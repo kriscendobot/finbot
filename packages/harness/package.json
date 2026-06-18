@@ -1,0 +1,24 @@
+{
+  "name": "@finbot/harness",
+  "version": "0.0.0",
+  "private": true,
+  "description": "OODA driving loop, tool-call surface, subagent spawn, and message bus for finbot.",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./loop": "./loop.js",
+    "./spawn": "./spawn.js",
+    "./tools": "./tools.js",
+    "./message-bus": "./message-bus/index.js",
+    "./observation": "./observation/index.js",
+    "./sandbox": "./sandbox/permissive.js",
+    "./schemas": "./schemas/index.js"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
