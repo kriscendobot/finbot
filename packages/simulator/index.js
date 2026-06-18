@@ -25,3 +25,4 @@ export {
   rowsToJsonl,
   rowsToCsv,
 } from './metrics.js';
+export { forecast, binHistogram } from './forecast.js';
