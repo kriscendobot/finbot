@@ -26,3 +26,4 @@ export {
   rowsToCsv,
 } from './metrics.js';
 export { forecast, binHistogram } from './forecast.js';
+export { reflect, renderReflection, reflectAndRecord } from './self-improvement.js';
