@@ -1,0 +1,74 @@
+#!/usr/bin/env node
+/**
+ * finbot — driving-loop entry point.
+ *
+ * Usage:
+ *   finbot --once         # run one OODA tick and exit
+ *   finbot --persistent   # run continuously, one tick per cadence interval
+ *   finbot --dry-run      # default; never sign or send a transaction
+ *   finbot --live         # requires live_authorized: true in the run config
+ *
+ * Flags are layered: --once and --persistent are mutually exclusive (default
+ * --once); --dry-run and --live are mutually exclusive (default --dry-run).
+ *
+ * The driving loop lives in @finbot/harness/loop. This entry script is a thin
+ * shell around it so the CLI shape can evolve without touching the harness.
+ */
+
+import process from 'node:process';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+
+import { run } from '../packages/harness/index.js';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const FINBOT_ROOT = path.resolve(HERE, '..');
+
+function parseArgs(argv) {
+  const args = {
+    mode: 'once',
+    safety: 'dry-run',
+    cadenceMs: 60_000,
+    finbotRoot: FINBOT_ROOT,
+    journalRoot: process.env.FINBOT_JOURNAL_ROOT || path.join(FINBOT_ROOT, '..', 'finbot-journal'),
+  };
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === '--once') args.mode = 'once';
+    else if (arg === '--persistent') args.mode = 'persistent';
+    else if (arg === '--dry-run') args.safety = 'dry-run';
+    else if (arg === '--live') args.safety = 'live';
+    else if (arg === '--cadence') {
+      args.cadenceMs = Number(argv[i + 1]) * 1000;
+      i += 1;
+    } else if (arg === '--journal') {
+      args.journalRoot = argv[i + 1];
+      i += 1;
+    } else if (arg === '--help' || arg === '-h') {
+      // eslint-disable-next-line no-console
+      console.log(
+        [
+          'finbot — driving loop',
+          '',
+          'Usage:',
+          '  finbot --once         run one OODA tick and exit (default)',
+          '  finbot --persistent   run continuously',
+          '  finbot --dry-run      never sign or send (default)',
+          '  finbot --live         live mode (requires authorization)',
+          '  finbot --cadence N    seconds between persistent ticks (default 60)',
+          '  finbot --journal P    journal worktree path',
+          '',
+        ].join('\n'),
+      );
+      process.exit(0);
+    } else {
+      // eslint-disable-next-line no-console
+      console.error(`finbot: unknown flag ${arg}`);
+      process.exit(2);
+    }
+  }
+  return args;
+}
+
+const args = parseArgs(process.argv.slice(2));
+await run(args);
