@@ -18,3 +18,10 @@ export {
 } from './price-feed.js';
 export { makeWorld, makePriceFeed, cloneWorld } from './world.js';
 export { runSimulator, runSimulatorFromConfig } from './runner.js';
+export {
+  perTickMetrics,
+  summaryMetrics,
+  meanStddev,
+  rowsToJsonl,
+  rowsToCsv,
+} from './metrics.js';
