@@ -1,0 +1,27 @@
+{
+  "name": "@finbot/simulator",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Self-improvement simulator over the finbot harness: simulated portfolio + price feed, meta-circular runSimulator, Monte Carlo forecasting, reflection-driven proposals.",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./world": "./world.js",
+    "./portfolio": "./portfolio.js",
+    "./price-feed": "./price-feed.js",
+    "./runner": "./runner.js",
+    "./metrics": "./metrics.js",
+    "./forecast": "./forecast.js",
+    "./self-improvement": "./self-improvement.js"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@finbot/harness": "0.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
