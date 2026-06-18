@@ -1,0 +1,43 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnp.*
+dist/
+build/
+*.tsbuildinfo
+
+# Environment / secrets
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+keystore/
+secrets/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# finbot agent state
+dispatches/*/
+!dispatches/.gitkeep
+
+# worktrees: per-dispatch and per-PR worktrees are not committed
+worktrees/*/
+!worktrees/.gitkeep
+!worktrees/README.md
+
+# references: shelves are committed when adopted, but per-clone caches are not
+references/*/.git/
+references/*/node_modules/
+
+# scratch
+tmp/
+scratch/
+*.log

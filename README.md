@@ -1,0 +1,61 @@
+# finbot
+
+A self-driving portfolio garden: an OODA loop (observe, orient, decide, act) over on-chain positions, oracle prices, and forecast distributions. Pattern-borrowed from the [kriskowal/garden](https://github.com/kriskowal/garden) agent-orchestration garden and from the Agoric [ymax planner](https://github.com/Agoric/agoric-sdk/tree/master/services/ymax-planner) + [portfolio-contract](https://github.com/Agoric/agoric-sdk/tree/master/packages/portfolio-contract); capability safety borrowed from the [Endo](https://github.com/endojs/endo) family (CapTP, Exo, Compartments, daemon).
+
+## What it does
+
+finbot is a meta library of agent **roles** and **skills** plus a **journal** that records what the bot has done. The bot itself has four loops running in concert:
+
+- **Observe.** The `oracle-watcher` polls price oracles on a schedule and emits opportunity-deviation events to the inbox and the job board. The `monitor` watches on-chain account state and external feeds.
+- **Orient.** The `analyzer` scores opportunities across instruments using risk-adjusted return metrics. The `forecaster` runs Monte Carlo ensemble simulations across a fixed time horizon and emits histogram projections.
+- **Decide.** The `planner` (ymax-shaped) consumes balance state, analyst recommendations, and forecaster projections to produce portfolio rebalance proposals.
+- **Act.** The `executor` is the only role that holds the wallet capability. It consumes planner proposals after the `auditor` has reviewed them and signs + sends on-chain transactions.
+
+The safety story is layered:
+
+1. **Capability attenuation.** Subagents run in [Endo compartments](https://github.com/endojs/endo/tree/master/packages/ses) with attenuated globals. They receive only the [Far](https://github.com/endojs/endo/tree/master/packages/pass-style)/[Exo](https://github.com/endojs/endo/tree/master/packages/exo) references their job requires; the wallet reference never reaches anything but the executor. See `designs/cap-attenuation.md`.
+2. **Pre-execution audit.** Every on-chain action passes through the `auditor` before it fires. The auditor checks invariants (no withdrawal above the day's budget, no rebalance that moves more than N percent of NAV in one step, no transaction lacking a citing forecaster projection).
+3. **Dry-run first.** The executor's default mode is `--dry-run`; live mode requires explicit per-job authorization in the dispatch prompt.
+
+## OODA loop diagram
+
+```
+oracle-watcher ──────────┐
+                          │
+monitor (on-chain) ───────┼──> analyzer ──> planner ──> auditor ──> executor ──> chain
+                          │       ▲
+forecaster ───────────────┘       │
+   ▲                              │
+   └────── opportunity-comparison ┘
+```
+
+## Layout
+
+See `CLAUDE.md` for the full layout and the dispatch contract. Quick map:
+
+- `roles/<role>/AGENT.md`: operating brief for one role.
+- `skills/<skill>/SKILL.md`: self-contained playbook for one capability.
+- `journal/`: orphan-branch worktree of this repo; transcript and message bus.
+- `scripts/`: executable helpers (driver, watchers, daemon-management).
+- `designs/`: design documents.
+- `references/`: read-only shelves imported from other libraries.
+- `worktrees/`: bare clones + per-PR worktrees for downstream projects.
+- `dispatches/`: per-dispatch ephemeral worktree triples.
+
+## Status
+
+This repository is the initial scaffolding. The skills are all stubs; the executor cannot yet sign transactions; the forecaster cannot yet run a Monte Carlo simulation. The structure is in place so the gardener-shaped role can grow the inventory and the planner-shaped roles can begin emitting proposals against a paper portfolio.
+
+## Safety
+
+finbot does not currently hold or transact on a live portfolio. Bringing it online requires:
+
+- A wallet key landed under a separate secrets-management surface (not in this repo).
+- An RPC URL pinned per environment (not in this repo).
+- An explicit maintainer authorization recorded in the journal that enables live executor mode.
+
+Until those three are in place, `executor` runs in `--dry-run` mode only and signs nothing.
+
+## License
+
+Apache-2.0. See `LICENSE`.
