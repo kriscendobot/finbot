@@ -17,3 +17,4 @@ export {
   gaussian,
 } from './price-feed.js';
 export { makeWorld, makePriceFeed, cloneWorld } from './world.js';
+export { runSimulator, runSimulatorFromConfig } from './runner.js';

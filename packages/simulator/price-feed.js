@@ -146,15 +146,15 @@ export class GBMPriceFeed {
       dt: this.dt,
       seed: opts.seed != null ? opts.seed : this.seed,
     });
-    // If not reseeded, preserve current state precisely.
+    // Preserve current state (current prices + tick counter). The
+    // rng is fresh from the (possibly new) seed; subsequent ticks
+    // either continue the original sequence (same seed) or diverge
+    // (new seed). For the same-seed case, burn the RNG forward to
+    // the parent's consumption point so the next tick draws the
+    // parent's next sample.
+    copy.prices = { ...this.prices };
+    copy.t = this.t;
     if (opts.seed == null) {
-      copy.prices = { ...this.prices };
-      copy.t = this.t;
-      // Re-run RNG forward this.t calls' worth of consumption. Cheaper
-      // path: recreate sfc32 with the same seed and burn this.t * 2
-      // gaussian draws' worth of uniforms (gaussian consumes 2 uniforms
-      // per call, one per asset). This guarantees a continuing
-      // sequence rather than restarting.
       const draws = this.t * Object.keys(this.initialPrices).length * 2;
       for (let i = 0; i < draws; i += 1) copy.rng();
     }
