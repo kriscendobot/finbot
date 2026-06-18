@@ -13,9 +13,11 @@
   },
   "scripts": {
     "test": "for f in packages/*/test/*.test.js; do node --test \"$f\" || exit 1; done",
-    "finbot": "node bin/finbot"
+    "finbot": "node bin/finbot",
+    "finbot-sim": "node bin/finbot-sim"
   },
   "bin": {
-    "finbot": "bin/finbot"
+    "finbot": "bin/finbot",
+    "finbot-sim": "bin/finbot-sim"
   }
 }

@@ -1,0 +1,215 @@
+#!/usr/bin/env node
+/**
+ * finbot-sim — self-improvement simulator entry point.
+ *
+ * Usage:
+ *   finbot-sim --ticks=100 --seed=42 --out=./sim-metrics.jsonl
+ *   finbot-sim --ticks=500 --seed=7 --self-improve
+ *   finbot-sim --self-improve --dry-run
+ *
+ * Flags:
+ *   --ticks=N          number of ticks to run (default 100)
+ *   --seed=N           PRNG seed (default 42)
+ *   --out=PATH         metrics JSONL output path (default ./sim-metrics.jsonl)
+ *   --self-improve     run reflection at end of batch and write a journal entry
+ *   --dry-run          do not write the self-improvement journal entry
+ *   --journal=PATH     journal root for self-improvement entries
+ *                      (default $FINBOT_JOURNAL_ROOT or <finbot-root>/../finbot-journal)
+ *   --tag=STR          tag stored on the reflection entry (default 'sim-<seed>-<ticks>')
+ *   --help / -h        print this and exit
+ *
+ * The simulator runs a deterministic price feed (GBM, sfc32 seeded) +
+ * a trivial mean-reversion tickFn (buy on dip / sell on lift) so the
+ * exit metrics are reproducible from one invocation to the next.
+ *
+ * The metric stream is suitable for plotting (CSV/JSONL); the
+ * histogram-projection-render skill is the eventual consumer.
+ */
+
+import process from 'node:process';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+import { writeFile } from 'node:fs/promises';
+
+import {
+  makeWorld,
+  runSimulator,
+  perTickMetrics,
+  summaryMetrics,
+  rowsToJsonl,
+  reflectAndRecord,
+} from '../packages/simulator/index.js';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const FINBOT_ROOT = path.resolve(HERE, '..');
+
+function parseArgs(argv) {
+  const args = {
+    ticks: 100,
+    seed: 42,
+    out: './sim-metrics.jsonl',
+    selfImprove: false,
+    dryRun: false,
+    journalRoot: process.env.FINBOT_JOURNAL_ROOT || path.join(FINBOT_ROOT, '..', 'finbot-journal'),
+    tag: null,
+  };
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    const eq = arg.indexOf('=');
+    const key = eq >= 0 ? arg.slice(0, eq) : arg;
+    const val = eq >= 0 ? arg.slice(eq + 1) : null;
+    if (key === '--ticks') args.ticks = Number(val);
+    else if (key === '--seed') args.seed = Number(val);
+    else if (key === '--out') args.out = val;
+    else if (key === '--self-improve') args.selfImprove = true;
+    else if (key === '--dry-run') args.dryRun = true;
+    else if (key === '--journal') args.journalRoot = val;
+    else if (key === '--tag') args.tag = val;
+    else if (key === '--help' || key === '-h') {
+      // eslint-disable-next-line no-console
+      console.log(
+        [
+          'finbot-sim — self-improvement simulator',
+          '',
+          'Usage:',
+          '  finbot-sim --ticks=N --seed=N --out=PATH',
+          '  finbot-sim --self-improve [--dry-run]',
+          '',
+          'Flags:',
+          '  --ticks=N        number of ticks (default 100)',
+          '  --seed=N         seed (default 42)',
+          '  --out=PATH       metrics JSONL output (default ./sim-metrics.jsonl)',
+          '  --self-improve   run reflection at batch end',
+          '  --dry-run        skip writing the self-improvement journal entry',
+          '  --journal=PATH   journal root for entries',
+          '  --tag=STR        tag on the reflection entry',
+          '',
+        ].join('\n'),
+      );
+      process.exit(0);
+    } else {
+      // eslint-disable-next-line no-console
+      console.error(`finbot-sim: unknown flag ${arg}`);
+      process.exit(2);
+    }
+  }
+  return args;
+}
+
+/**
+ * v0 sample tickFn — trivial mean-reversion stand-in. Not a real
+ * strategy; just exercises the simulator surface so the metric stream
+ * is non-trivial.
+ */
+function meanRevertTickFn(world, t, prices) {
+  const prev = world.harnessConfig._lastPrice;
+  world.harnessConfig._lastPrice = prices.ATOM;
+  if (prev == null) return { action: 'init', t };
+
+  const tradeSize = world.harnessConfig.tradeSize || 1;
+  const minNotional = world.harnessConfig.minTradeNotional || 0;
+  const notional = tradeSize * prices.ATOM;
+  if (notional < minNotional) return { action: 'skip-small', t, notional };
+
+  if (prices.ATOM < prev && world.portfolio.cash >= notional) {
+    try {
+      world.portfolio.applyTrade({ t, side: 'buy', asset: 'ATOM', qty: tradeSize, price: prices.ATOM });
+      return { action: 'buy', t, qty: tradeSize, price: prices.ATOM };
+    } catch {
+      return { action: 'buy-error', t };
+    }
+  }
+  if (prices.ATOM > prev && (world.portfolio.balances.ATOM || 0) >= tradeSize) {
+    try {
+      world.portfolio.applyTrade({ t, side: 'sell', asset: 'ATOM', qty: tradeSize, price: prices.ATOM });
+      return { action: 'sell', t, qty: tradeSize, price: prices.ATOM };
+    } catch {
+      return { action: 'sell-error', t };
+    }
+  }
+  return { action: 'hold', t };
+}
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  const tag = args.tag || `sim-seed${args.seed}-t${args.ticks}`;
+
+  const world = makeWorld({
+    portfolio: { cash: 1000, balances: { ATOM: 10 }, initialPrice: 10 },
+    priceFeed: {
+      kind: 'gbm',
+      initialPrices: { ATOM: 10 },
+      volatilities: { ATOM: 0.03 },
+      drifts: { ATOM: 0.0005 },
+      seed: args.seed,
+    },
+    harnessConfig: {
+      tradeSize: 1,
+      minTradeNotional: 5,
+      weights: { momentum: 0.5 },
+      drawdownStopPct: 0.20,
+      proposeThreshold: 0.05,
+      maxAllocationPct: 0.5,
+    },
+    seed: args.seed,
+    tag,
+  });
+
+  const sim = runSimulator(world, { tickFn: meanRevertTickFn });
+  for (let i = 0; i < args.ticks; i += 1) sim.tick();
+
+  const rows = perTickMetrics(sim.history);
+  const summary = summaryMetrics(sim.history);
+  const outAbs = path.resolve(args.out);
+  await writeFile(outAbs, rowsToJsonl(rows));
+
+  // eslint-disable-next-line no-console
+  console.log(`finbot-sim: ${args.ticks} ticks (seed=${args.seed}); ${rows.length} metric rows -> ${outAbs}`);
+  // eslint-disable-next-line no-console
+  console.log(
+    `finbot-sim: final equity=${summary.finalEquity.toFixed(2)} P&L=${summary.totalPnL.toFixed(2)} (${(summary.pnlPct * 100).toFixed(2)}%) Sharpe=${summary.sharpe.toFixed(3)} maxDD=${(summary.maxDrawdownPct * 100).toFixed(2)}% trades=${summary.tradeCount}`,
+  );
+
+  if (args.selfImprove) {
+    // Dynamic import so the bin can run without @finbot/harness installed
+    // when the user only wants metrics output. recordEntry is only loaded
+    // when self-improvement is actually requested.
+    let recordEntry = null;
+    if (!args.dryRun) {
+      try {
+        ({ recordEntry } = await import('../packages/harness/observation/record.js'));
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error('finbot-sim: --self-improve requires @finbot/harness; falling back to --dry-run', err.message);
+        args.dryRun = true;
+      }
+    }
+    const reflection = await reflectAndRecord({
+      observations: sim.history,
+      harnessConfig: world.harnessConfig,
+      journalRoot: args.journalRoot,
+      recordEntry,
+      role: 'simulator',
+      project: 'finbot',
+      tag,
+      dryRun: args.dryRun,
+    });
+    // eslint-disable-next-line no-console
+    console.log(`finbot-sim: reflection produced ${reflection.proposals.length} proposal(s)`);
+    if (reflection.path) {
+      // eslint-disable-next-line no-console
+      console.log(`finbot-sim: reflection journal entry -> ${reflection.path}`);
+    } else if (args.dryRun) {
+      // eslint-disable-next-line no-console
+      console.log('finbot-sim: dry-run; reflection body follows:');
+      // eslint-disable-next-line no-console
+      console.log(reflection.body);
+    }
+  }
+}
+
+main().catch((err) => {
+  // eslint-disable-next-line no-console
+  console.error('finbot-sim: error', err);
+  process.exit(1);
+});
