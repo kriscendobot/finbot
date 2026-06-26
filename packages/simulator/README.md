@@ -63,6 +63,16 @@ streamed metrics.
   the protocol shape of `@finbot/pipeline`'s `rebalance.js` over an
   instrument mix, and shares `stepInstrument` with the single-leg path so a
   leg behaves identically alone or in the mix.
+- `yield-accrual.js` (`accruePortfolio`) is the **live** complement to the
+  series-based instrument walk: as `runSimulator` advances the price feed, a
+  held yield/APR-bearing or dividend-paying position accrues into the same
+  portfolio's cash (or, under DRIP, back into the position) every tick. A
+  world carrying an `instruments` registry (`asset -> descriptor`) accrues
+  through the runner — and through every fork the forecaster spawns — so a
+  yield leg compounds over a projected future, not only in offline analysis.
+  `aprOf` / `aprToPerPeriodRate` convert an annualized rate for scoring and
+  accrual. A world with no registry (or all-growth) accrues nothing, so the
+  prior price-only behaviour is byte-for-byte unchanged.
 - `history.js` ingests **real** user-supplied price history: `parsePriceSeriesCsv`
   (single-asset, accepting one-price-per-line / `t,price` / a named column),
   `seriesFromFrames` (extract an asset from `parseCsvFrames` output),

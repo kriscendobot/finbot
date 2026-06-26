@@ -112,8 +112,17 @@ export {
   initInstrumentState,
   kinkedUtilizationApy,
   exDividendAdjustedSeries,
+  resolveYieldRate,
+  resolveDividendPerUnit,
+  isPayoutTick,
 } from './instruments.js';
 export { rebalanceMix } from './instrument-mix.js';
+export {
+  accruePortfolio,
+  hasAccruingInstrument,
+  aprOf,
+  aprToPerPeriodRate,
+} from './yield-accrual.js';
 export {
   parsePriceSeriesCsv,
   seriesFromFrames,

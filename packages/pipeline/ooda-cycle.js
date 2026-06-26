@@ -83,8 +83,19 @@ export async function runOodaCycle(input) {
   }
 
   // ----- ORIENT (a): analyzer -----
+  // The world's instrument registry (yield/APR descriptors) and the price
+  // feed's correlation spec feed the analyzer's carry and correlation-cluster
+  // scoring. Either may be absent (single risk asset, no correlation), in
+  // which case those terms are zero.
   const analysis = analyze(
-    { opportunities: observed.crossings, readings, portfolio: world.portfolio.markToMarket(prices), prices },
+    {
+      opportunities: observed.crossings,
+      readings,
+      portfolio: world.portfolio.markToMarket(prices),
+      prices,
+      instruments: world.instruments,
+      correlations: config.correlations || (world.priceFeed && world.priceFeed.correlations) || undefined,
+    },
     config.analyzer || {},
   );
   const analysisId = await record({

@@ -12,6 +12,7 @@
  *   finbot-ooda                          # one cycle, seed 7, print a report
  *   finbot-ooda --seed=11 --drift=-0.01  # bias the walk so a dip appears
  *   finbot-ooda --warmup=12 --ensemble=300 --horizon=20
+ *   finbot-ooda --multi                  # 3-instrument world (ATOM + OSMO + yield-bearing stATOM)
  *   finbot-ooda --journal=PATH           # also record each stage to a journal worktree (local commit only)
  *
  * Flags:
@@ -23,6 +24,7 @@
  *   --ensemble=N     forecaster ensemble size (default 200)
  *   --horizon=N      forecaster horizon in ticks (default 20)
  *   --tail-floor=F   auditor tail-risk floor as a fraction of NAV (default 0.6)
+ *   --multi          run the multi-instrument world (correlated growth legs + a yield leg)
  *   --journal=PATH   journal worktree to record entries into (local commit only)
  *   --json           print the structured result as JSON instead of a report
  *   --help / -h      print this and exit
@@ -42,6 +44,7 @@ function parseArgs(argv) {
   const args = {
     seed: 7, drift: -0.01, vol: 0.02, warmup: 10, threshold: 30,
     ensemble: 200, horizon: 20, tailFloor: 0.6, journal: null, json: false,
+    multi: false,
   };
   for (const arg of argv) {
     const eq = arg.indexOf('=');
@@ -57,6 +60,7 @@ function parseArgs(argv) {
     else if (key === '--tail-floor') args.tailFloor = Number(val);
     else if (key === '--journal') args.journal = val;
     else if (key === '--json') args.json = true;
+    else if (key === '--multi') args.multi = true;
     else if (key === '--help' || key === '-h') { printHelp(); process.exit(0); }
     else { console.error(`finbot-ooda: unknown flag ${arg}`); process.exit(2); }
   }
@@ -71,7 +75,7 @@ function printHelp() {
     'Usage:',
     '  finbot-ooda [--seed=N] [--drift=F] [--vol=F] [--warmup=N]',
     '              [--threshold=BPS] [--ensemble=N] [--horizon=N]',
-    '              [--tail-floor=F] [--journal=PATH] [--json]',
+    '              [--tail-floor=F] [--multi] [--journal=PATH] [--json]',
     '',
     'DRY-RUN ONLY. Never reads a keystore; never constructs a wallet.',
     '',
@@ -84,9 +88,9 @@ async function makeRecorder(journalRoot) {
   return { record: (entry) => recordEntry(journalRoot, entry, { localOnly: true }) };
 }
 
-async function main() {
-  const args = parseArgs(process.argv.slice(2));
-
+// The default single-risk-asset world: ATOM vs cash, the cut the loop was
+// first proven on.
+function buildSingleWorld(args) {
   const world = makeWorld({
     portfolio: { cash: 1000, balances: { ATOM: 10 }, initialPrice: 10 },
     priceFeed: {
@@ -99,9 +103,63 @@ async function main() {
     seed: args.seed,
     tag: `ooda-seed${args.seed}`,
   });
+  const config = {
+    windowTicks: args.warmup,
+    oracle: { thresholdBps: args.threshold },
+    analyzer: { scoreFloor: 0 },
+    forecaster: { ensembleSize: args.ensemble, horizon: args.horizon, baseSeed: 1000 + args.seed },
+    bounds: { maxStepPct: 0.25, maxDayPct: 0.5, concentrationCapPct: 0.9 },
+    auditor: { tailFloorPct: args.tailFloor, stalenessWindowTicks: args.warmup + 1 },
+  };
+  return { world, config };
+}
+
+// A multi-instrument world: two correlated growth legs (ATOM, OSMO) plus a
+// yield-bearing leg (stATOM) that accrues APR over ticks. Exercises the
+// correlation-aware, APR-aware analyzer and the multi-leg allocation path.
+function buildMultiWorld(args) {
+  const world = makeWorld({
+    portfolio: { cash: 4000, balances: { ATOM: 100, OSMO: 100, stATOM: 50 }, initialPrice: 10 },
+    priceFeed: {
+      kind: 'gbm',
+      initialPrices: { ATOM: 10, OSMO: 5, stATOM: 11 },
+      volatilities: { ATOM: args.vol, OSMO: args.vol, stATOM: args.vol * 0.4 },
+      drifts: { ATOM: args.drift, OSMO: args.drift * 0.8, stATOM: args.drift * 0.2 },
+      correlations: { 'ATOM:OSMO': 0.9, 'ATOM:stATOM': 0.5, 'OSMO:stATOM': 0.45 },
+      seed: args.seed,
+    },
+    instruments: {
+      ATOM: { type: 'growth' },
+      OSMO: { type: 'growth' },
+      stATOM: { type: 'yield', apr: 0.15, accrualPeriod: 1, ticksPerYear: 365, reinvest: 'cash' },
+    },
+    seed: args.seed,
+    tag: `ooda-multi-seed${args.seed}`,
+  });
+  const config = {
+    windowTicks: args.warmup,
+    oracle: { thresholdBps: args.threshold },
+    analyzer: {
+      scoreFloor: 0, maxPositions: 3, maxTotalWeight: 0.8, maxTargetWeight: 0.5,
+      carryHorizonTicks: 40, correlationPenalty: 0.5,
+    },
+    forecaster: { ensembleSize: args.ensemble, horizon: args.horizon, baseSeed: 1000 + args.seed },
+    bounds: { maxStepPct: 0.4, maxDayPct: 1.0, concentrationCapPct: 0.9 },
+    auditor: { tailFloorPct: args.tailFloor, stalenessWindowTicks: args.warmup + 1 },
+  };
+  return { world, config };
+}
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+
+  const { world, config } = args.multi ? buildMultiWorld(args) : buildSingleWorld(args);
 
   const sim = runSimulator(world);
   for (let i = 0; i < args.warmup; i += 1) sim.tick();
+  // Income the instrument registry accrued over the warm-up (0 when no
+  // yield/dividend leg is present).
+  args._accruedIncome = world.portfolio.markToMarket(world.priceFeed.current()).accruedIncome || 0;
 
   const recorder = await makeRecorder(args.journal);
   const res = await runOodaCycle({
@@ -109,14 +167,7 @@ async function main() {
     history: sim.history,
     recorder,
     cycleId: `ooda-${args.seed}-${world.priceFeed.t}`,
-    config: {
-      windowTicks: args.warmup,
-      oracle: { thresholdBps: args.threshold },
-      analyzer: { scoreFloor: 0 },
-      forecaster: { ensembleSize: args.ensemble, horizon: args.horizon, baseSeed: 1000 + args.seed },
-      bounds: { maxStepPct: 0.25, maxDayPct: 0.5, concentrationCapPct: 0.9 },
-      auditor: { tailFloorPct: args.tailFloor, stalenessWindowTicks: args.warmup + 1 },
-    },
+    config,
   });
 
   if (args.json) {
@@ -135,8 +186,11 @@ async function main() {
 
 function printReport(res, args) {
   const log = (...a) => console.log(...a); // eslint-disable-line no-console
-  log(`finbot-ooda cycle ${res.cycleId} (seed=${args.seed})`);
+  log(`finbot-ooda cycle ${res.cycleId} (seed=${args.seed}${args.multi ? ', multi-instrument' : ''})`);
   log(`  outcome: ${res.outcome}`);
+  if (args._accruedIncome > 0) {
+    log(`  ACCRUAL  yield/dividend income over warm-up: ${args._accruedIncome.toFixed(4)}`);
+  }
   log(`  OBSERVE  oracle-watcher: ${res.opportunities.length} crossing(s)`);
   for (const o of res.opportunities) {
     log(`           - ${o.asset}: ${o.referencePrice.toFixed(4)} -> ${o.currentPrice.toFixed(4)} `

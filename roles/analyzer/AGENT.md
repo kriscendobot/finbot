@@ -41,6 +41,9 @@ A `result` journal entry with `kind: analysis`, containing:
 - **Cite the forecast distribution, not the point estimate.** A recommendation that names "expected return = 12%" is incomplete; the analyzer also names the 5th-percentile return (the tail risk) and the max-drawdown distribution. The planner's risk bound check needs these to function.
 - **Score over rank.** The score is comparable across opportunities; the rank alone is not. The planner consumes scores to weigh combined allocations; passing only ranks loses information.
 - **No-action is a valid outcome.** Often the right answer is "the current allocation is still optimal given the new data". Emit a `result` with `next_action: no-action` and a one-paragraph rationale; this is normal traffic.
+- **Weigh carry against price risk.** A yield/APR-bearing instrument earns a carry edge even with no price deviation; score that carry per unit of price risk (so a high-APR low-volatility leg outscores a high-APR high-volatility one), and let a flat-but-yielding leg be a candidate in its own right. The programmatic form is `@finbot/pipeline`'s `analyze()` reading the world's `instruments` registry for each leg's APR.
+- **Penalize correlated clustering.** When the move would add to a position highly correlated with the rest of the held book, discount it by its correlation-weighted exposure to that cluster — diversification, not just per-leg return, drives the allocation.
+- **Allocate across legs when asked.** Under a multi-position budget the analyzer emits a target allocation spread over the top-scoring legs (bounded per-leg and in total), not a single asset weight; the planner and the rest of the chain are already multi-asset.
 
 ## Definition of done
 

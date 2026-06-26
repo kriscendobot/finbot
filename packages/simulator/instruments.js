@@ -196,7 +196,7 @@ function sampleSeries(v, idx, ctx) {
  * @param {object} ctx     { t, ... }
  * @returns {number}
  */
-function resolveYieldRate(policy, ctx) {
+export function resolveYieldRate(policy, ctx) {
   if (policy.apyFromUtilization) {
     const util = sampleSeries(policy.utilization != null ? policy.utilization : 0, ctx.t, ctx);
     return policy.apyFromUtilization(util, ctx);
@@ -211,7 +211,7 @@ function resolveYieldRate(policy, ctx) {
  * @param {object} ctx     { t, payoutIndex, ... }
  * @returns {number}
  */
-function resolveDividendPerUnit(policy, ctx) {
+export function resolveDividendPerUnit(policy, ctx) {
   if (policy.payoutRatio != null) {
     const eps = sampleSeries(policy.earningsPerUnit != null ? policy.earningsPerUnit : 0, ctx.t, ctx);
     return Math.max(0, policy.payoutRatio * eps);
@@ -230,7 +230,7 @@ function resolveDividendPerUnit(policy, ctx) {
  * @param {number} t
  * @returns {boolean}
  */
-function isPayoutTick(policy, t) {
+export function isPayoutTick(policy, t) {
   if (t <= 0) return false;
   if (typeof policy.scheduleAt === 'function') return !!policy.scheduleAt(t);
   if (Array.isArray(policy.payoutTicks)) return policy.payoutTicks.includes(t);
