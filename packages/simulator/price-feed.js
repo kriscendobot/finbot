@@ -220,6 +220,124 @@ export class GBMPriceFeed {
 }
 
 /**
+ * Harmonic (seasonal-decomposition + residual-GBM) price feed.
+ *
+ * Each asset's price is a deterministic seasonal trajectory times an
+ * independent stochastic residual walk:
+ *
+ *   shapeLog(t) = drift * t + sum_k [alpha_k cos(2*pi*f_k*t) + beta_k sin(2*pi*f_k*t)]
+ *   relLog(t)   = shapeLog(t) - shapeLog(0)            // anchored so price(0) = initialPrice
+ *   W_{t}       = W_{t-1} + residualSigma*sqrt(dt)*Z   // GBM residual in log space
+ *   price_t     = initialPrice * exp(relLog(t) + W_t)
+ *
+ * The seasonal part is identical across forks (it is deterministic in t);
+ * only the residual walk W diverges per seed. So when `forecast()` forks the
+ * feed into an ensemble, the spread reflects the residual volatility and the
+ * center tracks the cycle. The per-asset model is produced by
+ * `fitHarmonicModel` (`harmonic.js`).
+ *
+ * Draw schedule matches GBMPriceFeed: one standard-normal per asset per
+ * tick, in a fixed asset order, so a same-seed clone can resync by burning
+ * the RNG forward.
+ */
+export class HarmonicPriceFeed {
+  /**
+   * @param {object} cfg
+   * @param {Record<string, number>} cfg.initialPrices
+   * @param {Record<string, {drift: number, harmonics: Array<{frequency: number, alpha: number, beta: number}>, residualSigma: number, residualDrift?: number}>} cfg.models
+   * @param {number} [cfg.dt]                                 default 1
+   * @param {number} [cfg.seed]                               default 42
+   */
+  constructor(cfg) {
+    this.initialPrices = { ...cfg.initialPrices };
+    this.models = cfg.models || {};
+    this.dt = cfg.dt != null ? cfg.dt : 1;
+    this.seed = cfg.seed != null ? cfg.seed : 42;
+    this.rng = sfc32(this.seed);
+    this.t = 0;
+    this.assetOrder = Object.keys(this.initialPrices);
+    // Residual walk accumulator (log space), one per asset, starts at 0.
+    this.residualLog = {};
+    for (const a of this.assetOrder) this.residualLog[a] = 0;
+    this.prices = { ...this.initialPrices };
+  }
+
+  /**
+   * Deterministic anchored seasonal log-offset relative to t = 0.
+   *
+   * @param {string} asset
+   * @param {number} t
+   * @returns {number}
+   */
+  shapeLogRel(asset, t) {
+    const model = this.models[asset];
+    if (!model) return 0;
+    const drift = model.drift || 0;
+    let v = drift * t;
+    let v0 = 0;
+    const harmonics = model.harmonics || [];
+    for (const h of harmonics) {
+      const w = 2 * Math.PI * h.frequency;
+      v += h.alpha * Math.cos(w * t) + h.beta * Math.sin(w * t);
+      v0 += h.alpha; // cos(0) = 1, sin(0) = 0
+    }
+    return v - v0;
+  }
+
+  /**
+   * Advance one tick.
+   *
+   * @returns {Record<string, number>}
+   */
+  tick() {
+    this.t += 1;
+    const next = {};
+    for (let i = 0; i < this.assetOrder.length; i += 1) {
+      const asset = this.assetOrder[i];
+      // One gaussian per asset per tick, fixed order (matches GBM schedule).
+      const z = gaussian(this.rng);
+      const model = this.models[asset];
+      const sigma = model ? (model.residualSigma || 0) : 0;
+      const mu = model ? (model.residualDrift || 0) : 0;
+      this.residualLog[asset] += mu + sigma * Math.sqrt(this.dt) * z;
+      const rel = this.shapeLogRel(asset, this.t);
+      next[asset] = this.initialPrices[asset] * Math.exp(rel + this.residualLog[asset]);
+    }
+    this.prices = next;
+    return { ...this.prices };
+  }
+
+  /** @returns {Record<string, number>} */
+  current() { return { ...this.prices }; }
+
+  /**
+   * Clone, optionally reseeded. A same-seed clone continues the parent's
+   * residual walk (RNG burned forward to the parent's draw count); a
+   * reseeded clone forks an independent residual path from the current state.
+   *
+   * @param {object} [opts]
+   * @param {number} [opts.seed]
+   * @returns {HarmonicPriceFeed}
+   */
+  clone(opts = {}) {
+    const copy = new HarmonicPriceFeed({
+      initialPrices: this.initialPrices,
+      models: this.models,
+      dt: this.dt,
+      seed: opts.seed != null ? opts.seed : this.seed,
+    });
+    copy.prices = { ...this.prices };
+    copy.residualLog = { ...this.residualLog };
+    copy.t = this.t;
+    if (opts.seed == null) {
+      const draws = this.t * this.assetOrder.length;
+      for (let i = 0; i < draws; i += 1) copy.rng();
+    }
+    return copy;
+  }
+}
+
+/**
  * Replay price feed: fixed-length time series, wraps by default when
  * exhausted.
  *

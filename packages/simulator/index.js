@@ -10,12 +10,19 @@
 export { Portfolio } from './portfolio.js';
 export {
   GBMPriceFeed,
+  HarmonicPriceFeed,
   ReplayPriceFeed,
   parseCsvFrames,
   sfc32,
   splitmix32,
   gaussian,
 } from './price-feed.js';
+export {
+  fitHarmonicModel,
+  detectFrequencies,
+  leastSquares,
+  solveLinear,
+} from './harmonic.js';
 export { makeWorld, makePriceFeed, cloneWorld } from './world.js';
 export { runSimulator, runSimulatorFromConfig } from './runner.js';
 export {
@@ -56,6 +63,7 @@ export {
   scoreForecast,
   evaluateForecast,
   evalTableOverPresets,
+  compareForecastersOverPresets,
 } from './forecast-eval.js';
 export {
   riskAversionFromTolerance,
