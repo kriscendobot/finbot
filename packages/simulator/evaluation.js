@@ -13,7 +13,7 @@
  */
 
 import { gbmSeries } from './fixtures.js';
-import { evalTableOverPresets } from './forecast-eval.js';
+import { evalTableOverPresets, compareForecastersOverPresets } from './forecast-eval.js';
 import {
   growthInstrument,
   yieldInstrument,
@@ -115,15 +115,20 @@ export function instrumentCandidates(cfg = {}) {
  * @param {Array<{name: string, kind: string, params: object}>} cfg.presets
  * @param {(preset: object, overrides: object) => {series: number[], meta: object}} cfg.generate
  * @param {object} [cfg.forecastEval]       forwarded to evalTableOverPresets
+ * @param {boolean} [cfg.compareForecasters] also build the GBM-vs-harmonic
+ *        before/after comparison table (default true)
  * @param {object} [cfg.instruments]        forwarded to instrumentCandidates
  * @param {number[]} [cfg.tolerances]       volatility-tolerance grid
- * @returns {{ forecastTable: Array<object>, candidates: Array<object>, frontier: Array<object> }}
+ * @returns {{ forecastTable: Array<object>, forecasterComparison?: Array<object>, candidates: Array<object>, frontier: Array<object> }}
  */
 export function runEvaluation(cfg) {
   const forecastTable = evalTableOverPresets(cfg.presets, cfg.generate, cfg.forecastEval || {});
+  const forecasterComparison = cfg.compareForecasters === false
+    ? undefined
+    : compareForecastersOverPresets(cfg.presets, cfg.generate, cfg.forecastEval || {});
   const candidates = instrumentCandidates(cfg.instruments || {});
   const frontier = toleranceFrontier({ candidates, tolerances: cfg.tolerances });
-  return { forecastTable, candidates, frontier };
+  return { forecastTable, forecasterComparison, candidates, frontier };
 }
 
 /**
@@ -145,6 +150,20 @@ export function renderEvaluationText(result) {
       + `${f(r.coverage90, 2).padStart(5)} ${f(r.coverage50, 2).padStart(5)} `
       + `${f(r.pitKs, 3).padStart(6)} ${f(r.relPointError, 3).padStart(7)}`,
     );
+  }
+
+  if (result.forecasterComparison) {
+    lines.push('');
+    lines.push('# Forecaster comparison: GBM vs harmonic (cyclical-structure-aware)');
+    lines.push('preset                 kind        K   CRPS g->h            pitKS g->h        relErr g->h');
+    for (const r of result.forecasterComparison) {
+      lines.push(
+        `${r.name.padEnd(22)} ${r.kind.padEnd(11)} ${String(r.harmonicCount).padStart(2)}  `
+        + `${(`${f(r.gbm.crps, 3)}->${f(r.harmonic.crps, 3)}`).padEnd(20)}`
+        + `${(`${f(r.gbm.pitKs, 3)}->${f(r.harmonic.pitKs, 3)}`).padEnd(18)}`
+        + `${f(r.gbm.relPointError, 3)}->${f(r.harmonic.relPointError, 3)}`,
+      );
+    }
   }
 
   lines.push('');

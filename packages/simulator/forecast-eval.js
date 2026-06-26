@@ -31,6 +31,7 @@ import { forecast } from './forecast.js';
 import { makeWorld } from './world.js';
 import { quantileSorted } from './bootstrap.js';
 import { seriesLogReturns } from './fixtures.js';
+import { fitHarmonicModel } from './harmonic.js';
 
 /**
  * Sample mean and variance (population, /N) of a numeric array.
@@ -243,6 +244,8 @@ export function scoreForecast(ensemble, realized, opts = {}) {
  * @param {number} [cfg.realizeSeedBase]     default 900000
  * @param {number} [cfg.baseSeed]            forecaster child-seed anchor, default 1000
  * @param {object} [cfg.scoreOpts]           forwarded to scoreForecast
+ * @param {'gbm'|'harmonic'} [cfg.forecaster] which model to fit, default 'gbm'
+ * @param {object} [cfg.harmonicOpts]        forwarded to fitHarmonicModel when forecaster='harmonic'
  * @returns {object}
  */
 export function evaluateForecast(cfg) {
@@ -253,21 +256,38 @@ export function evaluateForecast(cfg) {
   const realizationCount = cfg.realizationCount != null ? cfg.realizationCount : 400;
   const realizeSeedBase = cfg.realizeSeedBase != null ? cfg.realizeSeedBase : 900000;
   const baseSeed = cfg.baseSeed != null ? cfg.baseSeed : 1000;
+  const forecaster = cfg.forecaster || 'gbm';
 
-  // 1. Fit GBM from a training realization.
+  // 1. Fit a model from a training realization (what a real forecaster
+  //    sees: a history window).
   const training = cfg.generate({ seed: trainSeed, length: trainLength });
   const fit = fitGbm(training.series);
 
   // 2. Forecast from an all-in single-asset world: equity == terminal price.
-  const world = makeWorld({
-    portfolio: { cash: 0, balances: { ASSET: 1 }, initialPrice: cfg.initialPrice },
-    priceFeed: {
+  //    The feed kind is the model under test; both are scored unchanged by
+  //    the same fork-based forecast() path below.
+  let priceFeed;
+  let harmonicModel = null;
+  if (forecaster === 'harmonic') {
+    harmonicModel = fitHarmonicModel(training.series, cfg.harmonicOpts);
+    priceFeed = {
+      kind: 'harmonic',
+      initialPrices: { ASSET: cfg.initialPrice },
+      models: { ASSET: harmonicModel },
+      seed: baseSeed,
+    };
+  } else {
+    priceFeed = {
       kind: 'gbm',
       initialPrices: { ASSET: cfg.initialPrice },
       drifts: { ASSET: fit.mu },
       volatilities: { ASSET: fit.sigma },
       seed: baseSeed,
-    },
+    };
+  }
+  const world = makeWorld({
+    portfolio: { cash: 0, balances: { ASSET: 1 }, initialPrice: cfg.initialPrice },
+    priceFeed,
   });
   const fc = forecast({ from: world, horizon, ensembleSize, baseSeed });
   const ensemble = fc.outcomes.map((o) => o.finalEquity);
@@ -283,7 +303,9 @@ export function evaluateForecast(cfg) {
   const score = scoreForecast(ensemble, realized, cfg.scoreOpts);
 
   return {
+    forecaster,
     fit,
+    harmonicModel,
     horizon,
     ensembleSize,
     realizationCount,
@@ -319,14 +341,50 @@ export function evalTableOverPresets(presets, generateFor, cfg = {}) {
     return {
       name: preset.name,
       kind: preset.kind,
+      forecaster: result.forecaster,
       fittedMu: result.fit.mu,
       fittedSigma: result.fit.sigma,
+      harmonicCount: result.harmonicModel ? result.harmonicModel.harmonics.length : 0,
       crps: result.score.crps,
       coverage90: result.score.coverage[0.9],
       coverage50: result.score.coverage[0.5],
       pitKs: result.score.pitKs,
       pinballMedian: result.score.pinball[0.5],
       relPointError: result.score.relPointError,
+    };
+  });
+}
+
+/**
+ * Run both the GBM and the harmonic forecaster over a preset set and pair
+ * the rows, so the eval table can show the before/after of swapping in the
+ * cyclical-structure-aware model. The deltas use the convention "harmonic
+ * minus GBM" for the error metrics (negative is an improvement) and the
+ * absolute distance from nominal for coverage.
+ *
+ * @param {Array<{name: string, kind: string, params: object}>} presets
+ * @param {(preset: object, overrides: object) => {series: number[], meta: object}} generateFor
+ * @param {object} [cfg]                forwarded to evaluateForecast (minus generate/initialPrice/forecaster)
+ * @returns {Array<object>}
+ */
+export function compareForecastersOverPresets(presets, generateFor, cfg = {}) {
+  const gbm = evalTableOverPresets(presets, generateFor, { ...cfg, forecaster: 'gbm' });
+  const harmonic = evalTableOverPresets(presets, generateFor, { ...cfg, forecaster: 'harmonic' });
+  return presets.map((preset, i) => {
+    const g = gbm[i];
+    const h = harmonic[i];
+    return {
+      name: preset.name,
+      kind: preset.kind,
+      harmonicCount: h.harmonicCount,
+      gbm: g,
+      harmonic: h,
+      crpsDelta: h.crps - g.crps,
+      crpsRatio: g.crps !== 0 ? h.crps / g.crps : NaN,
+      pitKsDelta: h.pitKs - g.pitKs,
+      relPointErrorDelta: h.relPointError - g.relPointError,
+      coverage90AbsErrGbm: Math.abs(g.coverage90 - 0.9),
+      coverage90AbsErrHarmonic: Math.abs(h.coverage90 - 0.9),
     };
   });
 }

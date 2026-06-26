@@ -32,10 +32,22 @@ streamed metrics.
   or speculated series). Named presets live in `test/fixtures/presets.js`.
 - `forecast-eval.js` scores the ensemble forecaster against the *known*
   generating process: CRPS, pinball loss, interval coverage / hit-rate, PIT
-  uniformity (KS), and point error. `evaluateForecast` fits a GBM to a
+  uniformity (KS), and point error. `evaluateForecast` fits a model to a
   training window, runs the forecaster, and compares its predicted
   distribution to fresh realizations of the true process; `evalTableOverPresets`
-  rolls that across the presets.
+  rolls that across the presets. Pass `forecaster: 'harmonic'` (default `'gbm'`)
+  to score the cyclical-structure-aware model below;
+  `compareForecastersOverPresets` pairs the two into a before/after table.
+- `harmonic.js` is the cyclical-structure-aware forecaster — a seasonal
+  decomposition plus a residual GBM. `fitHarmonicModel` recovers a log-linear
+  trend and a small set of harmonics (frequency/amplitude/phase) from a
+  training window, detecting frequencies on the *differenced* (whitened) log
+  series so a pure random walk selects none and the model degrades cleanly to
+  a fitted GBM. `HarmonicPriceFeed` (in `price-feed.js`) replays the
+  decomposition under the unchanged fork-based `forecast()` shape: every fork
+  shares the deterministic seasonal trajectory but walks an independent
+  residual, so the ensemble's center tracks the cycle while its spread
+  reflects only the residual volatility.
 - `instruments.js` models three return shapes over a price series — `growth`
   (appreciation only), `yield` (periodic accrual), `dividend` (discrete
   payouts) — that a strategy can `mixReturns`, each drivable from a synthetic
@@ -99,12 +111,17 @@ node bin/finbot-eval --horizon=32 --ensemble=300 --realizations=500
 
 Because every fixture's generating process is known, the harness measures
 whether the ensemble forecaster recovers the distribution it should. The
-headline reading: on a GBM process with adequate history the forecaster is
-well calibrated (90% interval covers ~90% of realized outcomes, PIT near
-uniform); on a cyclic oracle it is not (the GBM forecaster cannot capture
-mean-reverting cyclical structure, so its intervals over- or mis-cover) —
-which is the gap the parked
-[`finbot-richer-forecasting`](../../journal/jobs) plan would close. The
+headline reading: on a GBM process with adequate history the GBM forecaster
+is well calibrated (90% interval covers ~90% of realized outcomes, PIT near
+uniform); on a cyclic oracle it is not (a random walk cannot capture
+mean-reverting cyclical structure, so its intervals over- or mis-cover). The
+**harmonic** forecaster (`harmonic.js`) closes that gap: at horizon 32 over
+the presets it cuts cyclic CRPS by ~30-60x (e.g. `cyclic-wild` 11.0 -> 0.17)
+and slashes point error, fixes `cyclic-drifting` coverage (0.0 -> ~1.0),
+improves synthesis PIT-KS (`synthesis-turbulent` 0.25 -> 0.09), and — because
+GBM data selects zero harmonics — leaves the GBM presets unchanged. The
+before/after table prints as the "Forecaster comparison" section of
+`finbot-eval`. The
 risk/reward sweep shows a diversified growth+yield mix dominating either
 instrument alone across most volatility-tolerance appetites. Richer
 instrument dynamics (stochastic/utilization yield, dividend growth/cuts,

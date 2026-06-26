@@ -22,7 +22,7 @@
  */
 
 import { Portfolio } from './portfolio.js';
-import { GBMPriceFeed, ReplayPriceFeed, parseCsvFrames } from './price-feed.js';
+import { GBMPriceFeed, HarmonicPriceFeed, ReplayPriceFeed, parseCsvFrames } from './price-feed.js';
 
 /**
  * @typedef {object} World
@@ -83,6 +83,14 @@ export function makePriceFeed(cfg) {
       seed: cfg.seed != null ? cfg.seed : 42,
       correlations: cfg.correlations,
       volSurface: cfg.volSurface,
+    });
+  }
+  if (kind === 'harmonic') {
+    return new HarmonicPriceFeed({
+      initialPrices: cfg.initialPrices || { ASSET: 100 },
+      models: cfg.models,
+      dt: cfg.dt,
+      seed: cfg.seed != null ? cfg.seed : 42,
     });
   }
   if (kind === 'replay') {
