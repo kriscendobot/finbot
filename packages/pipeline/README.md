@@ -23,7 +23,7 @@ in-process for a dry-run cycle with **no LLM required**.
 | Module               | Role / concern                                                            |
 | -------------------- | ------------------------------------------------------------------------- |
 | `oracle-watcher.js`  | detect price deviations past a basis-point threshold over a reading window |
-| `analyzer.js`        | risk-adjusted scoring; candidate target weight; no-action is valid         |
+| `analyzer.js`        | risk-adjusted scoring (price edge + APR carry, less a correlated-cluster penalty); single- or multi-leg target allocation; no-action is valid |
 | `forecaster.js`      | Monte Carlo via the simulator's nested-fork `forecast()`; deterministic    |
 | `planner.js`         | ymax-shaped proposal: hashed steps + forecast/analysis citations           |
 | `auditor.js`         | the invariant set (citation, risk-bound, tail-risk, reproducibility, freshness) |
@@ -31,6 +31,26 @@ in-process for a dry-run cycle with **no LLM required**.
 | `rebalance.js`       | ymax-shaped `computeTargetBalances` + `deriveSteps` solver                  |
 | `cap-attenuation.js` | the wallet boundary: capability map, interface-guarded revocable wallet     |
 | `ooda-cycle.js`      | `runOodaCycle` — wires the six roles + optional journal recording          |
+
+## Multi-instrument portfolios
+
+The cycle runs end to end over a target allocation across several instruments,
+including yield/APR-bearing legs that accrue over ticks:
+
+- A world's `instruments` registry (`asset -> @finbot/simulator/yield-accrual`
+  descriptor) and its price feed's `correlations` flow into `analyze()`. The
+  analyzer weighs each candidate's **APR carry against its price risk** and
+  subtracts a **correlated-cluster penalty** so adding to an already-correlated
+  position is discounted.
+- With `analyzer.maxPositions > 1`, the analyzer emits a multi-leg target
+  allocation (bounded by `maxTotalWeight` / `maxTargetWeight`), folding in
+  registry yield legs that did not themselves deviate. The `rebalance.js`
+  solver, planner, forecaster, auditor, and executor are already multi-asset,
+  so the allocation flows through unchanged. The default `maxPositions: 1`
+  keeps the legacy single-risk-asset behaviour byte-for-byte.
+- The forecaster's forked futures carry the same registry, so a yield leg's
+  accrual compounds inside the Monte Carlo projection, not only in the live
+  walk.
 
 ## Safety
 

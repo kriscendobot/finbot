@@ -31,6 +31,7 @@ import { GBMPriceFeed, ReplayPriceFeed, parseCsvFrames } from './price-feed.js';
  * @property {object} harnessConfig
  * @property {number} seed
  * @property {string} tag
+ * @property {Record<string, object>} [instruments]   asset -> live instrument descriptor (yield/dividend accrual)
  */
 
 /**
@@ -57,7 +58,12 @@ export function makeWorld(cfg = {}) {
     priceFeed = makePriceFeed(cfg.priceFeed || { kind: 'gbm', seed });
   }
   const harnessConfig = cfg.harnessConfig || {};
-  return { portfolio, priceFeed, harnessConfig, seed, tag };
+  // Optional instrument registry: asset -> live instrument descriptor (see
+  // `yield-accrual.js`). When present, the runner accrues each held
+  // yield / dividend position into the portfolio every tick. Absent or
+  // all-growth means no accrual and byte-identical price-only behaviour.
+  const instruments = cfg.instruments || undefined;
+  return { portfolio, priceFeed, harnessConfig, seed, tag, instruments };
 }
 
 /**
@@ -107,5 +113,8 @@ export function cloneWorld(world, opts) {
     harnessConfig: world.harnessConfig,
     seed: opts.seed,
     tag: opts.tag || `${world.tag}/fork-${opts.seed}`,
+    // The instrument registry is read-only config; share it by reference so a
+    // forked world accrues yield on the same descriptors the parent does.
+    instruments: world.instruments,
   };
 }

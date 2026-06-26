@@ -25,6 +25,7 @@
  */
 
 import { cloneWorld, makeWorld } from './world.js';
+import { accruePortfolio, hasAccruingInstrument } from './yield-accrual.js';
 
 /**
  * @typedef {object} Observation
@@ -62,6 +63,12 @@ export function runSimulator(world, opts = {}) {
   const recordHistory = opts.recordHistory !== false;
   /** @type {Observation[]} */
   const history = [];
+  // Per-run yield/dividend accrual state, keyed by asset. Lives on the runner
+  // (not the world) so it is fresh per fork; the world only carries the
+  // read-only instrument registry. No registry / all-growth => the fast path.
+  const accruing = hasAccruingInstrument(world.instruments);
+  /** @type {Record<string, {payoutIndex: number, accruedCash: number}>} */
+  const accrualState = {};
 
   function observe() {
     const prices = world.priceFeed.current();
@@ -77,6 +84,12 @@ export function runSimulator(world, opts = {}) {
 
   function tick() {
     const prices = world.priceFeed.tick();
+    // Accrue held yield / dividend positions into the portfolio before the
+    // agent reacts, so the agent's tick sees this period's income in cash.
+    let accrualFlows;
+    if (accruing) {
+      accrualFlows = accruePortfolio(world.portfolio, world.instruments, world.priceFeed.t, prices, accrualState);
+    }
     let agentResult;
     if (tickFn) {
       // The agent tick may mutate world.portfolio via applyTrade.
@@ -91,6 +104,7 @@ export function runSimulator(world, opts = {}) {
       portfolio,
     };
     if (agentResult !== undefined) obs.agentResult = agentResult;
+    if (accrualFlows && accrualFlows.length > 0) obs.accruals = accrualFlows;
     if (recordHistory) history.push(obs);
     return obs;
   }

@@ -48,6 +48,12 @@ export class Portfolio {
     /** @type {Trade[]} */
     this.trades = [];
     this.realizedPnL = 0;
+    // Income credited from instrument accrual (yield / dividends) that did not
+    // pass through a trade. Tracked separately so equity stays honest and the
+    // accrual trail is auditable. See `yield-accrual.js`.
+    this.accruedIncome = 0;
+    /** @type {Array<{kind?: string, asset?: string, t?: number, amount: number}>} */
+    this.accruals = [];
     // Track lot-level cost basis per asset (FIFO). { asset: [{qty, price}, ...] }
     /** @type {Record<string, Array<{qty: number, price: number}>>} */
     this.lots = {};
@@ -130,10 +136,29 @@ export class Portfolio {
       equity,
       realizedPnL: this.realizedPnL,
       unrealizedPnL,
-      totalPnL: this.realizedPnL + unrealizedPnL,
+      accruedIncome: this.accruedIncome,
+      totalPnL: this.realizedPnL + unrealizedPnL + this.accruedIncome,
       costBasis,
       tradeCount: this.trades.length,
     };
+  }
+
+  /**
+   * Credit income to the cash account outside of a trade (yield accrual, a
+   * dividend payout). Raises cash and equity, records the accrual on the
+   * trail, and accumulates `accruedIncome` so total P&L stays honest. A DRIP
+   * reinvestment credits cash here and then immediately spends it via
+   * `applyTrade`, so its net cash effect is zero while the position grows.
+   *
+   * @param {number} amount               quote-currency income (must be > 0)
+   * @param {object} [meta]               { kind, asset, t, reinvested }
+   * @returns {void}
+   */
+  creditCash(amount, meta = {}) {
+    if (!(amount > 0)) return;
+    this.cash += amount;
+    this.accruedIncome += amount;
+    this.accruals.push({ ...meta, amount });
   }
 
   /**
@@ -149,6 +174,8 @@ export class Portfolio {
     });
     copy.initialEquity = this.initialEquity;
     copy.realizedPnL = this.realizedPnL;
+    copy.accruedIncome = this.accruedIncome;
+    copy.accruals = this.accruals.map((a) => ({ ...a }));
     copy.trades = this.trades.map((t) => ({ ...t }));
     copy.lots = {};
     for (const [asset, lots] of Object.entries(this.lots)) {
