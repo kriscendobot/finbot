@@ -19,7 +19,12 @@
     "./bootstrap": "./bootstrap.js",
     "./path-stats": "./path-stats.js",
     "./histogram-svg": "./histogram-svg.js",
-    "./self-improvement": "./self-improvement.js"
+    "./self-improvement": "./self-improvement.js",
+    "./fixtures": "./fixtures.js",
+    "./forecast-eval": "./forecast-eval.js",
+    "./risk-reward": "./risk-reward.js",
+    "./instruments": "./instruments.js",
+    "./evaluation": "./evaluation.js"
   },
   "scripts": {
     "test": "node --test test/*.test.js"

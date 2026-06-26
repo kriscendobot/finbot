@@ -1,0 +1,77 @@
+#!/usr/bin/env node
+/**
+ * finbot-eval — forecast-evaluation + risk/reward sweep over the synthetic
+ * oracle fixtures and the three instrument types.
+ *
+ * Usage:
+ *   finbot-eval
+ *   finbot-eval --horizon=32 --ensemble=300 --realizations=500
+ *   finbot-eval --instrument-horizon=64 --instrument-realizations=400
+ *
+ * Flags:
+ *   --horizon=N                forecast horizon (ticks), default 32
+ *   --ensemble=N               forecaster ensemble size, default 300
+ *   --realizations=N           held-out realizations per preset, default 500
+ *   --instrument-horizon=N     instrument-sweep horizon, default 64
+ *   --instrument-realizations=N  instrument-sweep realizations, default 400
+ *   --help / -h                print this and exit
+ *
+ * Everything is seeded; two runs with the same flags print identical
+ * tables. Simulation only — no funds, no chain. See the @finbot/simulator
+ * README § Forecast evaluation for what the tables mean.
+ */
+
+import process from 'node:process';
+
+import { runEvaluation, renderEvaluationText } from '../packages/simulator/evaluation.js';
+import { PRESETS, generate } from '../packages/simulator/test/fixtures/presets.js';
+
+function parseArgs(argv) {
+  const args = {
+    horizon: 32,
+    ensemble: 300,
+    realizations: 500,
+    instrumentHorizon: 64,
+    instrumentRealizations: 400,
+  };
+  for (const arg of argv) {
+    const eq = arg.indexOf('=');
+    const key = eq >= 0 ? arg.slice(0, eq) : arg;
+    const val = eq >= 0 ? arg.slice(eq + 1) : null;
+    if (key === '--horizon') args.horizon = Number(val);
+    else if (key === '--ensemble') args.ensemble = Number(val);
+    else if (key === '--realizations') args.realizations = Number(val);
+    else if (key === '--instrument-horizon') args.instrumentHorizon = Number(val);
+    else if (key === '--instrument-realizations') args.instrumentRealizations = Number(val);
+    else if (key === '--help' || key === '-h') {
+      // eslint-disable-next-line no-console
+      console.log([
+        'finbot-eval — forecast evaluation + risk/reward sweep',
+        '',
+        'Usage:',
+        '  finbot-eval [--horizon=N] [--ensemble=N] [--realizations=N]',
+        '              [--instrument-horizon=N] [--instrument-realizations=N]',
+      ].join('\n'));
+      process.exit(0);
+    }
+  }
+  return args;
+}
+
+const args = parseArgs(process.argv.slice(2));
+
+const result = runEvaluation({
+  presets: PRESETS,
+  generate,
+  forecastEval: {
+    horizon: args.horizon,
+    ensembleSize: args.ensemble,
+    realizationCount: args.realizations,
+  },
+  instruments: {
+    horizon: args.instrumentHorizon,
+    realizationCount: args.instrumentRealizations,
+  },
+});
+
+process.stdout.write(renderEvaluationText(result));

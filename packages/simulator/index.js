@@ -38,3 +38,46 @@ export { bootstrapQuantileBands, quantileSorted } from './bootstrap.js';
 export { pathStatsOf } from './path-stats.js';
 export { renderHistogramSvg } from './histogram-svg.js';
 export { reflect, renderReflection, reflectAndRecord } from './self-improvement.js';
+export {
+  cyclicSeries,
+  gbmSeries,
+  synthesisSeries,
+  blockBootstrapSeries,
+  seriesLogReturns,
+  seriesToFrames,
+} from './fixtures.js';
+export {
+  fitGbm,
+  crps,
+  ensembleSpread,
+  pinballLoss,
+  pit,
+  pitUniformityKs,
+  scoreForecast,
+  evaluateForecast,
+  evalTableOverPresets,
+} from './forecast-eval.js';
+export {
+  riskAversionFromTolerance,
+  toleranceFromRiskAversion,
+  riskRewardScore,
+  rewardRiskOf,
+  chooseStrategy,
+  toleranceFrontier,
+  inferToleranceFromMaxDrawdown,
+  inferToleranceFromLottery,
+} from './risk-reward.js';
+export {
+  growthInstrument,
+  yieldInstrument,
+  dividendInstrument,
+  instrumentReturns,
+  mixReturns,
+  instrumentReturnDistribution,
+} from './instruments.js';
+export {
+  defaultInstrumentSpecs,
+  instrumentCandidates,
+  runEvaluation,
+  renderEvaluationText,
+} from './evaluation.js';

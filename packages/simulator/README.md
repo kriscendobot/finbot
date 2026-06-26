@@ -24,6 +24,51 @@ streamed metrics.
 - `self-improvement.js` reflects on recent observations + metrics and
   proposes one or more small bounded rule/skill changes as a journal
   entry.
+- `fixtures.js` generates seeded synthetic-oracle price series with known
+  parameters: `cyclicSeries` (sinusoid: frequency/amplitude/phase/drift),
+  `gbmSeries` (geometric Brownian motion: drift `mu`, volatility `sigma`),
+  `synthesisSeries` (superposed cycles of differing period+amplitude atop a
+  GBM trend), and `blockBootstrapSeries` (resample a user-supplied historical
+  or speculated series). Named presets live in `test/fixtures/presets.js`.
+- `forecast-eval.js` scores the ensemble forecaster against the *known*
+  generating process: CRPS, pinball loss, interval coverage / hit-rate, PIT
+  uniformity (KS), and point error. `evaluateForecast` fits a GBM to a
+  training window, runs the forecaster, and compares its predicted
+  distribution to fresh realizations of the true process; `evalTableOverPresets`
+  rolls that across the presets.
+- `instruments.js` models three return shapes over a price series — `growth`
+  (appreciation only), `yield` (periodic accrual), `dividend` (discrete
+  payouts) — that a strategy can `mixReturns`, each drivable from a synthetic
+  fixture or a user-supplied/speculated series.
+- `risk-reward.js` represents a user **volatility tolerance** (`tau` in
+  [0,1]) as a mean-variance certainty-equivalent objective, optimizes the
+  risk-for-reward balance it implies (`chooseStrategy`), traces the
+  trade-off frontier across a tolerance sweep (`toleranceFrontier`), and
+  sketches tolerance elicitation (from a stated worst-acceptable drawdown,
+  or a single lottery choice).
+- `evaluation.js` ties the three together: `runEvaluation` produces the
+  forecast-evaluation table plus the risk/reward frontier over the three
+  instrument types; `renderEvaluationText` formats them.
+
+## Forecast evaluation
+
+`bin/finbot-eval` runs the evaluation harness end to end:
+
+```
+node bin/finbot-eval --horizon=32 --ensemble=300 --realizations=500
+```
+
+Because every fixture's generating process is known, the harness measures
+whether the ensemble forecaster recovers the distribution it should. The
+headline reading: on a GBM process with adequate history the forecaster is
+well calibrated (90% interval covers ~90% of realized outcomes, PIT near
+uniform); on a cyclic oracle it is not (the GBM forecaster cannot capture
+mean-reverting cyclical structure, so its intervals over- or mis-cover) —
+which is the gap the parked
+[`finbot-richer-forecasting`](../../journal/jobs) plan would close. The
+risk/reward sweep shows a diversified growth+yield mix dominating either
+instrument alone across most volatility-tolerance appetites; richer
+instrument models are the parked `finbot-additional-instruments` slice.
 
 ## CLI
 
