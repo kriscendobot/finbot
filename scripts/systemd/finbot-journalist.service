@@ -1,0 +1,23 @@
+[Unit]
+Description=finbot journalist (transcript-consolidation loop)
+Documentation=file:%h/roles/journalist/AGENT.md
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+# One `claude -p` cycle per cadence. The journalist consolidates the period's
+# dispatch/tick/result entries into narrative digests; a longer cadence suits it
+# (set FINBOT_JOURNALIST_CADENCE_SECONDS=3600 for hourly, default 300).
+Type=exec
+WorkingDirectory=%h
+Environment=FINBOT_ROOT=%h
+Environment=FINBOT_JOURNALIST_CADENCE_SECONDS=3600
+ExecStart=%h/scripts/daemons/journalist-loop.sh
+Restart=always
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

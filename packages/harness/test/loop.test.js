@@ -114,6 +114,82 @@ test('runOnce: with new observations posts orient + decide + act', async () => {
   }
 });
 
+test('runOnce: compute hook runs, receives a recorder, and is summarized', async () => {
+  const journalRoot = await setupJournal();
+  const finbotRoot = await setupFinbotRoot();
+  try {
+    const bare = await mkdtemp(path.join(tmpdir(), 'finbot-loop-bare-'));
+    await runGit(bare, ['init', '--bare', '--initial-branch=journal']);
+    await runGit(journalRoot, ['remote', 'add', 'origin', bare]);
+    await runGit(journalRoot, ['push', 'origin', 'HEAD:journal']);
+
+    let seenCtx = null;
+    // A fake compute hook stands in for @finbot/pipeline's real one; the harness
+    // must stay free of any pipeline/simulator dependency, so the test injects a
+    // plain function and asserts the contract (recorder handed in, result echoed).
+    const compute = async (ctx) => {
+      seenCtx = ctx;
+      await ctx.recorder.record({ kind: 'oracle-read', role: 'oracle-watcher', body: '# fake stage\n' });
+      return { outcome: 'dry-run-complete', walletTouched: false };
+    };
+
+    const r = await runOnce({
+      finbotRoot,
+      journalRoot,
+      safety: 'dry-run',
+      roleHost: 'test-host',
+      compute,
+    });
+
+    assert.equal(r.computation.ran, true);
+    assert.equal(r.computation.result.outcome, 'dry-run-complete');
+    assert.ok(seenCtx, 'compute hook was called with a context');
+    assert.equal(typeof seenCtx.recorder.record, 'function');
+    assert.equal(seenCtx.tickId, r.tickId);
+
+    // the fake stage entry the hook recorded is on disk
+    await runGit(journalRoot, ['fetch', 'origin', 'journal']);
+    const logged = await runGit(journalRoot, ['log', '--oneline']);
+    assert.match(logged.stdout, /oracle-watcher/);
+    await rm(bare, { recursive: true, force: true });
+  } finally {
+    await rm(journalRoot, { recursive: true, force: true });
+    await rm(finbotRoot, { recursive: true, force: true });
+  }
+});
+
+test('runOnce: jobBoard=false suppresses orient/decide/act posts', async () => {
+  const journalRoot = await setupJournal();
+  const finbotRoot = await setupFinbotRoot();
+  try {
+    const bare = await mkdtemp(path.join(tmpdir(), 'finbot-loop-bare-'));
+    await runGit(bare, ['init', '--bare', '--initial-branch=journal']);
+    await runGit(journalRoot, ['remote', 'add', 'origin', bare]);
+    await runGit(journalRoot, ['push', 'origin', 'HEAD:journal']);
+
+    let computed = false;
+    const r = await runOnce({
+      finbotRoot,
+      journalRoot,
+      safety: 'dry-run',
+      roleHost: 'test-host',
+      jobBoard: false,
+      compute: async () => { computed = true; return { outcome: 'no-opportunity' }; },
+    });
+
+    assert.equal(r.orientations.posted.length, 0);
+    assert.equal(r.decisions.posted.length, 0);
+    assert.equal(r.actions.posted.length, 0);
+    assert.equal(computed, true);
+    const open = await listOpenJobs(journalRoot);
+    assert.equal(open.length, 0, 'no jobs posted when jobBoard is false');
+    await rm(bare, { recursive: true, force: true });
+  } finally {
+    await rm(journalRoot, { recursive: true, force: true });
+    await rm(finbotRoot, { recursive: true, force: true });
+  }
+});
+
 test('runOnce: live mode posts executor in addition to auditor', async () => {
   const journalRoot = await setupJournal();
   const finbotRoot = await setupFinbotRoot();

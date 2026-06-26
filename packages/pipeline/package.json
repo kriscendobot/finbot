@@ -15,7 +15,8 @@
     "./executor": "./executor.js",
     "./rebalance": "./rebalance.js",
     "./cap-attenuation": "./cap-attenuation.js",
-    "./ooda-cycle": "./ooda-cycle.js"
+    "./ooda-cycle": "./ooda-cycle.js",
+    "./driver-compute": "./driver-compute.js"
   },
   "scripts": {
     "test": "node --test test/*.test.js"

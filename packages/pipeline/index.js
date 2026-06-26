@@ -25,3 +25,4 @@ export {
   makeWalletCapability, attenuateForRole, runInAttenuatedCompartment,
 } from './cap-attenuation.js';
 export { runOodaCycle } from './ooda-cycle.js';
+export { makeDryRunCompute, deriveSeed } from './driver-compute.js';

@@ -28,6 +28,10 @@ secrets/
 dispatches/*/
 !dispatches/.gitkeep
 
+# watcher daemon caches (ETag / last-price state), per-host and out-of-journal
+.garden-oracle/
+.garden-monitor/
+
 # worktrees: per-dispatch and per-PR worktrees are not committed
 worktrees/*/
 !worktrees/.gitkeep

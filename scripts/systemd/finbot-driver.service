@@ -1,0 +1,30 @@
+[Unit]
+Description=finbot driver (continuous dry-run OODA compute loop)
+Documentation=file:%h/scripts/driver/persistent-driver.sh
+Documentation=file:%h/CLAUDE.md
+After=network-online.target
+Wants=network-online.target
+# A continuous-loop unit must never be permanently killed by a crash loop. With a
+# finite start-limit, rapid Restart cycles trip systemd's rate limiter and it
+# STOPS restarting. Disable the start-limit; the tick-level resilience in the
+# loop means it should not crash-loop in the first place. (Parent-garden lesson:
+# the 2026-06-25 bulletin dark window.)
+StartLimitIntervalSec=0
+
+[Service]
+# Long-running loop, NOT oneshot+timer: the loop IS the cadence (finbot
+# --persistent --cadence N). Keep it up if it dies, with a restart backoff.
+Type=exec
+WorkingDirectory=%h
+Environment=FINBOT_ROOT=%h
+# DRY-RUN ONLY. persistent-driver.sh runs `finbot --persistent --dry-run
+# --compute`; bin/finbot refuses --compute --live. The wallet keystore is never
+# read. Live execution is a separate, explicitly-authorized executor dispatch.
+ExecStart=%h/scripts/driver/persistent-driver.sh
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

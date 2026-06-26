@@ -1,0 +1,24 @@
+[Unit]
+Description=finbot activity-feed watcher (%i)
+Documentation=file:%h/scripts/watcher/README.md
+Documentation=file:%h/roles/oracle-watcher/AGENT.md
+After=network-online.target
+Wants=network-online.target
+# A standing watcher must never be permanently killed by a crash loop.
+StartLimitIntervalSec=0
+
+[Service]
+# %i is the feed slug; it must match a directory under scripts/watcher/<feed>/
+# that contains a watcher.sh. The initial feed is `oracle` (the read-only
+# price-oracle poll daemon). The watcher is shell-only with NO LLM context.
+Type=exec
+WorkingDirectory=%h
+Environment=FINBOT_ROOT=%h
+ExecStart=%h/scripts/watcher/%i/watcher.sh
+Restart=always
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

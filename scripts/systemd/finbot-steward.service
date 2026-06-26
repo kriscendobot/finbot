@@ -1,0 +1,25 @@
+[Unit]
+Description=finbot steward (bounded-authority autonomous orchestrator loop)
+Documentation=file:%h/roles/steward/AGENT.md
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+# One `claude -p` cycle per cadence (default 300s; override with
+# FINBOT_STEWARD_CADENCE_SECONDS). The loop drains the inbox, claims job-board
+# work, dispatches the appropriate OODA role, and journals a tick.
+Type=exec
+WorkingDirectory=%h
+Environment=FINBOT_ROOT=%h
+# SAFETY: the steward holds BOUNDED authority. It never originates a live
+# executor dispatch; live on-chain action requires an explicit pre-staged
+# authorization the steward forwards but never invents (roles/steward/AGENT.md).
+ExecStart=%h/scripts/daemons/steward-loop.sh
+Restart=always
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

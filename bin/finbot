@@ -7,9 +7,16 @@
  *   finbot --persistent   # run continuously, one tick per cadence interval
  *   finbot --dry-run      # default; never sign or send a transaction
  *   finbot --live         # requires live_authorized: true in the run config
+ *   finbot --compute      # also run the in-process dry-run OODA cycle each tick
  *
  * Flags are layered: --once and --persistent are mutually exclusive (default
  * --once); --dry-run and --live are mutually exclusive (default --dry-run).
+ *
+ * `--compute` turns on the in-process path: each tick runs `runOodaCycle` over a
+ * fresh simulator world (DRY-RUN ONLY) and records real per-stage entries, in
+ * addition to (or, with `--no-job-board`, instead of) posting jobs to the board.
+ * The compute hook is built in this bin from `@finbot/pipeline`, never inside the
+ * harness, so `@finbot/harness` keeps its no-dependency stance.
  *
  * The driving loop lives in @finbot/harness/loop. This entry script is a thin
  * shell around it so the CLI shape can evolve without touching the harness.
@@ -20,6 +27,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 import { run } from '../packages/harness/index.js';
+import { makeDryRunCompute } from '../packages/pipeline/driver-compute.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const FINBOT_ROOT = path.resolve(HERE, '..');
@@ -29,6 +37,9 @@ function parseArgs(argv) {
     mode: 'once',
     safety: 'dry-run',
     cadenceMs: 60_000,
+    compute: false,
+    jobBoard: true,
+    localOnly: false,
     finbotRoot: FINBOT_ROOT,
     journalRoot: process.env.FINBOT_JOURNAL_ROOT || path.join(FINBOT_ROOT, '..', 'finbot-journal'),
   };
@@ -38,6 +49,9 @@ function parseArgs(argv) {
     else if (arg === '--persistent') args.mode = 'persistent';
     else if (arg === '--dry-run') args.safety = 'dry-run';
     else if (arg === '--live') args.safety = 'live';
+    else if (arg === '--compute') args.compute = true;
+    else if (arg === '--no-job-board') args.jobBoard = false;
+    else if (arg === '--local-only') args.localOnly = true;
     else if (arg === '--cadence') {
       args.cadenceMs = Number(argv[i + 1]) * 1000;
       i += 1;
@@ -55,6 +69,9 @@ function parseArgs(argv) {
           '  finbot --persistent   run continuously',
           '  finbot --dry-run      never sign or send (default)',
           '  finbot --live         live mode (requires authorization)',
+          '  finbot --compute      run the in-process dry-run OODA cycle each tick',
+          '  finbot --no-job-board do not post jobs (pairs with --compute)',
+          '  finbot --local-only   commit journal entries locally, do not push',
           '  finbot --cadence N    seconds between persistent ticks (default 60)',
           '  finbot --journal P    journal worktree path',
           '',
@@ -71,4 +88,17 @@ function parseArgs(argv) {
 }
 
 const args = parseArgs(process.argv.slice(2));
+
+// Build the in-process compute hook here (never in the harness): it needs both
+// @finbot/simulator and @finbot/pipeline, and @finbot/harness depends on neither.
+if (args.compute) {
+  if (args.safety === 'live') {
+    // The compute path is dry-run by construction; refuse to imply otherwise.
+    // eslint-disable-next-line no-console
+    console.error('finbot: --compute is dry-run only; drop --live or drop --compute');
+    process.exit(2);
+  }
+  args.compute = makeDryRunCompute();
+}
+
 await run(args);
