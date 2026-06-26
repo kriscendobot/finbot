@@ -29,6 +29,9 @@
 
 import { runSimulator } from './runner.js';
 import { summaryMetrics } from './metrics.js';
+import { pathStatsOf } from './path-stats.js';
+import { bootstrapQuantileBands } from './bootstrap.js';
+import { renderHistogramSvg } from './histogram-svg.js';
 
 /**
  * @typedef {object} ForecastOutcome
@@ -38,6 +41,8 @@ import { summaryMetrics } from './metrics.js';
  * @property {number} pnlPct
  * @property {number} maxDrawdownPct
  * @property {number} sharpe
+ * @property {number | null} timeToRecovery   ticks under the pre-drawdown peak, or null if never reclaimed
+ * @property {boolean} recovered              whether the worst drawdown was reclaimed within the horizon
  */
 
 /**
@@ -45,6 +50,9 @@ import { summaryMetrics } from './metrics.js';
  * @property {ForecastOutcome[]} outcomes
  * @property {object} summary
  * @property {object} histogram                  binned distribution of final equity
+ * @property {object} quantileBands              bootstrap confidence bands on tail quantiles
+ * @property {object} pathStats                  drawdown + time-to-recovery distributions
+ * @property {string} [projectionSvg]            deterministic SVG render (when cfg.render)
  */
 
 /**
@@ -59,6 +67,11 @@ import { summaryMetrics } from './metrics.js';
  * @param {Function} [cfg.tickFn]              passed to child runSimulator (e.g. a planner)
  * @param {number} [cfg.profitThreshold]       absolute equity profit threshold for P(profit > x)
  * @param {number} [cfg.bins]                  histogram bin count, default 10
+ * @param {number[]} [cfg.tailQuantiles]       quantiles to band via bootstrap (default [0.01,0.05,0.5,0.95,0.99])
+ * @param {number} [cfg.bootstrapResamples]    bootstrap resamples B (default 500)
+ * @param {number} [cfg.bootstrapSeed]         bootstrap RNG seed (default derived from baseSeed)
+ * @param {boolean|object} [cfg.render]        when truthy, attach a deterministic SVG; object passes render opts
+ * @param {string} [cfg.program]               program label carried into the render header
  * @returns {ForecastResult}
  */
 export function forecast(cfg) {
@@ -67,6 +80,12 @@ export function forecast(cfg) {
   const horizon = cfg.horizon || 10;
   const bins = cfg.bins || 10;
   const profitThreshold = cfg.profitThreshold != null ? cfg.profitThreshold : 0;
+  const tailQuantiles = cfg.tailQuantiles || [0.01, 0.05, 0.5, 0.95, 0.99];
+  const bootstrapResamples = cfg.bootstrapResamples != null ? cfg.bootstrapResamples : 500;
+  // Bootstrap seed is derived from baseSeed so the whole forecast is
+  // reproducible from a single anchor, but is offset so the resampling
+  // stream cannot alias the price-shock streams.
+  const bootstrapSeed = cfg.bootstrapSeed != null ? cfg.bootstrapSeed : ((baseSeed + 0x4f1bbcdc) >>> 0);
 
   // Normalize: accept either a Simulator (has .fork) or a World.
   let parentSim;
@@ -95,13 +114,19 @@ export function forecast(cfg) {
     const innerSim = runSimulator(child.world, { tickFn: childTickFn, recordHistory: true });
     for (let j = 0; j < horizon; j += 1) innerSim.tick();
     const summary = summaryMetrics(innerSim.history);
+    // Path statistics need the full equity trajectory, not just the
+    // terminal value (which is all the summary captures).
+    const equitySeries = innerSim.history.map((o) => o.portfolio.equity);
+    const path = pathStatsOf(equitySeries);
     outcomes.push({
       seed,
       finalEquity: summary.finalEquity,
       totalPnL: summary.totalPnL,
       pnlPct: summary.pnlPct,
-      maxDrawdownPct: summary.maxDrawdownPct,
+      maxDrawdownPct: path.maxDrawdownPct,
       sharpe: summary.sharpe,
+      timeToRecovery: path.timeToRecovery,
+      recovered: path.recovered,
     });
   }
 
@@ -113,23 +138,90 @@ export function forecast(cfg) {
   const percentile = (p) => sortedEq[Math.min(sortedEq.length - 1, Math.floor(p * sortedEq.length))];
   const pProfit = pnls.filter((x) => x > profitThreshold).length / pnls.length;
 
-  return {
+  const summary = {
+    ensembleSize,
+    horizon,
+    baseSeed,
+    meanEquity,
+    stddevEquity,
+    meanPnL,
+    p05: percentile(0.05),
+    p25: percentile(0.25),
+    p50: percentile(0.50),
+    p75: percentile(0.75),
+    p95: percentile(0.95),
+    pProfit,
+    profitThreshold,
+  };
+
+  // Bootstrap confidence bands on the (noisy) tail quantiles of terminal
+  // equity, so the report can name how much to trust p01 / p99.
+  const quantileBands = bootstrapQuantileBands(equities, {
+    quantiles: tailQuantiles,
+    resamples: bootstrapResamples,
+    seed: bootstrapSeed,
+  });
+
+  const pathStats = aggregatePathStats(outcomes, bins);
+
+  /** @type {ForecastResult} */
+  const result = {
     outcomes,
-    summary: {
-      ensembleSize,
-      horizon,
-      meanEquity,
-      stddevEquity,
-      meanPnL,
-      p05: percentile(0.05),
-      p25: percentile(0.25),
-      p50: percentile(0.50),
-      p75: percentile(0.75),
-      p95: percentile(0.95),
-      pProfit,
-      profitThreshold,
-    },
+    summary,
     histogram: binHistogram(equities, bins),
+    quantileBands,
+    pathStats,
+  };
+
+  if (cfg.render) {
+    const renderOpts = typeof cfg.render === 'object' ? cfg.render : {};
+    result.projectionSvg = renderHistogramSvg(result, {
+      program: cfg.program || renderOpts.program || 'forecast',
+      seed: baseSeed,
+      ...renderOpts,
+    });
+  }
+
+  return result;
+}
+
+/**
+ * Aggregate per-outcome path statistics into ensemble distributions:
+ * the max-drawdown distribution (quantiles + histogram) and the
+ * time-to-recovery distribution over the paths that recovered, plus the
+ * recovery rate.
+ *
+ * @param {ForecastOutcome[]} outcomes
+ * @param {number} bins
+ * @returns {object}
+ */
+export function aggregatePathStats(outcomes, bins) {
+  const drawdowns = outcomes.map((o) => o.maxDrawdownPct);
+  const recoveredOutcomes = outcomes.filter((o) => o.recovered && o.timeToRecovery != null);
+  const recoveryTimes = recoveredOutcomes.map((o) => o.timeToRecovery);
+  const recoveryRate = outcomes.length > 0 ? recoveredOutcomes.length / outcomes.length : 0;
+
+  const ddSorted = drawdowns.slice().sort((a, b) => a - b);
+  const rtSorted = recoveryTimes.slice().sort((a, b) => a - b);
+  const q = (sorted, p) => (sorted.length === 0
+    ? null
+    : sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))]);
+
+  return {
+    maxDrawdownPct: {
+      p50: q(ddSorted, 0.5),
+      p95: q(ddSorted, 0.95),
+      p99: q(ddSorted, 0.99),
+      mean: drawdowns.length ? drawdowns.reduce((a, b) => a + b, 0) / drawdowns.length : 0,
+      histogram: binHistogram(drawdowns, bins),
+    },
+    timeToRecovery: {
+      p50: q(rtSorted, 0.5),
+      p95: q(rtSorted, 0.95),
+      mean: recoveryTimes.length ? recoveryTimes.reduce((a, b) => a + b, 0) / recoveryTimes.length : 0,
+      histogram: recoveryTimes.length ? binHistogram(recoveryTimes, bins) : { binEdges: [], counts: [], binWidth: 0 },
+    },
+    recoveryRate,
   };
 }
 

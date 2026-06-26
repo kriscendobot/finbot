@@ -72,4 +72,48 @@ A 10,000-simulation ensemble on a non-trivial program takes minutes. The orchest
 - The ensemble runner lives in `skills/monte-carlo-ensemble`; the renderer lives in `skills/histogram-projection-render`. Both are stubs.
 - The forecaster role file names the inputs and outputs; the implementation lands when the first concrete program is chosen for forecasting.
 
-Status: stub. The first forecaster engagement chooses a concrete program, a concrete stochastic-process implementation, and a concrete renderer.
+## Notes from the field (2026-06-26 — richer-forecasting build)
+
+The first richer build chose concrete implementations for the open axes. All
+live in `@finbot/simulator`; the pipeline `forecaster.project()` consumes them.
+
+- **Correlation handling.** Implemented. `packages/simulator/correlation.js` factors
+  a correlation matrix via Cholesky (`L · Lᵀ = R`); `GBMPriceFeed` draws one
+  standard-normal shock per asset per tick and runs the shock vector through `L`
+  when a `correlations` spec is supplied. The draw count per tick is unchanged, so
+  an uncorrelated feed stays byte-for-byte identical to the prior independent walk
+  — the determinism contract is preserved across the upgrade. Spec accepts a sparse
+  pair map (`{ "ATOM:OSMO": 0.6 }`), a nested map, or a full matrix; a
+  non-positive-definite (inconsistent) request throws.
+- **Volatility surface.** Implemented as *empirical bootstrap of realized vol*
+  (`packages/simulator/vol-surface.js`). `surfaceFromPriceHistory()` derives a
+  rolling-window realized-vol sample set per asset from a price history;
+  `VolatilitySurface.sample()` draws a sigma per tick from a *separate* seeded RNG
+  stream so the price-shock schedule is undisturbed. This widens the terminal
+  distribution's tails toward what the record actually showed without assuming a
+  distributional family. GARCH / implied surfaces remain open for a later cut.
+- **Execution-cost noise.** `packages/simulator/costs.js` adds size-aware slippage
+  (`slippageFill`) and jittered per-trade gas (`gasCost`), both seeded.
+- **Bootstrap confidence bands.** `packages/simulator/bootstrap.js` resamples the
+  ensemble B times under a seeded RNG and reports `{point, lo, hi, stderr}` per
+  quantile. `forecast()` bands the tails (p01/p05/p50/p95/p99) by default — the
+  report can now name how much to trust the noisy tails.
+- **Path statistics.** `packages/simulator/path-stats.js` computes max-drawdown and
+  time-to-recovery per trajectory; `forecast()` aggregates them into the
+  `pathStats` distributions (drawdown quantiles + histogram, recovery-time
+  distribution over recovered paths, and the recovery rate).
+- **Renderer.** Chose **plain SVG via a deterministic builder**
+  (`packages/simulator/histogram-svg.js`) — no DOM, no dependency, byte-diffable,
+  embeds in markdown. `report` style draws the terminal-equity histogram with the
+  p05–p95 / p25–p75 quantile bands shaded and the p50 line, plus a max-drawdown
+  panel; `compact` is the single-panel form. Same forecast result → byte-identical
+  SVG; the renderer never reads system time or `Math.random`. PNG rasterization
+  remains the deferred fallback.
+- **Output shape.** `forecaster.writeForecastArtifacts()` honors the role brief's
+  `histogram_path` + `projection_path`: it writes `<id>.json` (the canonical
+  artifact) and `<id>.svg` under a forecasts directory, where `<id>` is a SHA-256
+  over the canonical artifact JSON — so the auditor can recompute the id and
+  confirm a cited projection. The fs surface is injected, never hard-imported.
+
+Status: implemented (richer build). Open axes still deferred: GARCH/implied vol
+surfaces, PNG rasterization, far-ref vending of large forecasts to the analyzer.

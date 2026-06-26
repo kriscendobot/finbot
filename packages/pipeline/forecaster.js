@@ -13,6 +13,7 @@
  * and the price feed's RNG is the seeded sfc32, never Math.random.
  */
 
+import { createHash } from 'node:crypto';
 import { forecast as simForecast } from '@finbot/simulator/forecast';
 import { deriveSteps, applyStepsToPortfolio, navOf } from './rebalance.js';
 
@@ -25,10 +26,13 @@ import { deriveSteps, applyStepsToPortfolio, navOf } from './rebalance.js';
  * @property {number} currentNav
  * @property {object} summary        from simulator forecast(): meanEquity, p05..p95, pProfit, ...
  * @property {object} histogram      { binEdges, counts, binWidth }
+ * @property {object} quantileBands  bootstrap confidence bands on tail quantiles
+ * @property {object} pathStats      max-drawdown + time-to-recovery distributions
  * @property {number} p05Equity      5th-percentile terminal equity (tail-risk anchor)
  * @property {number} p50Equity
  * @property {number} pProfit
  * @property {Array<object>} actionSteps   the steps the projection applied at t=1
+ * @property {string} [projectionSvg]      deterministic SVG render of the histogram
  */
 
 /**
@@ -59,6 +63,8 @@ export function makeRebalanceAction(targetWeights, bounds) {
  * @param {number} [config.ensembleSize]     children (default 200)
  * @param {number} [config.baseSeed]         child-seed schedule anchor (default 1000)
  * @param {number} [config.bins]             histogram bins (default 12)
+ * @param {boolean} [config.render]          attach a deterministic SVG projection (default true)
+ * @param {string} [config.program]          program label carried into the render header
  * @returns {ForecastProjection}
  */
 export function project(input, config = {}) {
@@ -66,6 +72,8 @@ export function project(input, config = {}) {
   const ensembleSize = config.ensembleSize != null ? config.ensembleSize : 200;
   const baseSeed = config.baseSeed != null ? config.baseSeed : 1000;
   const bins = config.bins != null ? config.bins : 12;
+  const render = config.render !== false;
+  const program = config.program || 'rebalance';
   const bounds = input.bounds || {};
 
   const currentPrices = input.world.priceFeed.current();
@@ -80,6 +88,8 @@ export function project(input, config = {}) {
     baseSeed,
     bins,
     profitThreshold: 0,
+    render,
+    program,
   });
 
   // Record the deterministic steps the action would apply at current prices
@@ -89,6 +99,7 @@ export function project(input, config = {}) {
   const { steps: actionSteps } = deriveSteps(snapshot, currentPrices, input.targetWeights, bounds);
 
   return {
+    program,
     targetWeights: input.targetWeights,
     horizon,
     ensembleSize,
@@ -96,9 +107,86 @@ export function project(input, config = {}) {
     currentNav,
     summary: result.summary,
     histogram: result.histogram,
+    quantileBands: result.quantileBands,
+    pathStats: result.pathStats,
     p05Equity: result.summary.p05,
     p50Equity: result.summary.p50,
     pProfit: result.summary.pProfit,
     actionSteps,
+    projectionSvg: result.projectionSvg,
   };
+}
+
+/**
+ * Canonical JSON serialization of a forecast projection's data (excludes
+ * the rendered SVG, which is derived). Stable key order so the content
+ * hash is deterministic across runs.
+ *
+ * @param {ForecastProjection} projection
+ * @returns {object}
+ */
+export function projectionArtifact(projection) {
+  return {
+    program: projection.program,
+    targetWeights: projection.targetWeights,
+    horizon: projection.horizon,
+    ensembleSize: projection.ensembleSize,
+    baseSeed: projection.baseSeed,
+    currentNav: projection.currentNav,
+    summary: projection.summary,
+    histogram: projection.histogram,
+    quantileBands: projection.quantileBands,
+    pathStats: projection.pathStats,
+    p05Equity: projection.p05Equity,
+    p50Equity: projection.p50Equity,
+    pProfit: projection.pProfit,
+    actionSteps: projection.actionSteps,
+  };
+}
+
+/**
+ * Deterministic short-id for a projection: the leading hex of a SHA-256
+ * over the canonical artifact JSON. Same forecast → same id → same
+ * filenames, which is what makes the auditor's recompute-and-compare work.
+ *
+ * @param {ForecastProjection} projection
+ * @returns {string}
+ */
+export function projectionId(projection) {
+  const json = JSON.stringify(projectionArtifact(projection));
+  return createHash('sha256').update(json).digest('hex').slice(0, 16);
+}
+
+/**
+ * Write the forecaster's two artifacts — the histogram JSON and the SVG
+ * projection — under a directory, honoring the role brief's output shape
+ * (`histogram_path` + `projection_path`). The filenames are derived from
+ * the deterministic projection id, so re-running the same forecast
+ * overwrites byte-identical files.
+ *
+ * The fs surface is injected (an object exposing `mkdirSync` and
+ * `writeFileSync`, e.g. node:fs) so the pure pipeline never hard-imports
+ * the filesystem; callers in a test pass a fake.
+ *
+ * @param {ForecastProjection} projection
+ * @param {object} args
+ * @param {string} args.dir                  output directory
+ * @param {{ mkdirSync: Function, writeFileSync: Function }} args.fs
+ * @returns {{ histogram_path: string, projection_path: string, id: string }}
+ */
+export function writeForecastArtifacts(projection, { dir, fs }) {
+  if (!fs || typeof fs.writeFileSync !== 'function') {
+    throw new Error('writeForecastArtifacts: an fs with writeFileSync is required');
+  }
+  const id = projectionId(projection);
+  if (typeof fs.mkdirSync === 'function') fs.mkdirSync(dir, { recursive: true });
+  const sep = dir.endsWith('/') ? '' : '/';
+  const histogramPath = `${dir}${sep}${id}.json`;
+  const projectionPath = `${dir}${sep}${id}.svg`;
+  if (!projection.projectionSvg) {
+    throw new Error('writeForecastArtifacts: projection has no projectionSvg; call project() with render enabled (the default)');
+  }
+  fs.writeFileSync(histogramPath, `${JSON.stringify(projectionArtifact(projection), null, 2)}\n`);
+  fs.writeFileSync(projectionPath, projection.projectionSvg);
+  return { histogram_path: histogramPath, projection_path: projectionPath, id };
 }

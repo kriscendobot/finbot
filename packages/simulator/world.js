@@ -75,6 +75,8 @@ export function makePriceFeed(cfg) {
       volatilities: cfg.volatilities,
       dt: cfg.dt,
       seed: cfg.seed != null ? cfg.seed : 42,
+      correlations: cfg.correlations,
+      volSurface: cfg.volSurface,
     });
   }
   if (kind === 'replay') {

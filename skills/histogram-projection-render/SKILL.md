@@ -47,4 +47,14 @@ Same JSON input + same render style + same output format -> byte-identical outpu
 
 ## Notes
 
-This is a stub. The renderer can be implemented in plain JavaScript with a deterministic SVG-builder library (no DOM dependency), or in Python with matplotlib in a deterministic mode (seed and backend pinned). The choice is for the first dispatched forecaster engagement to make; the contract above is what the planner and journalist consume.
+Implemented (2026-06-26 richer-forecasting build) as **plain JavaScript with a
+deterministic SVG builder, no DOM dependency** — the first of the two options below
+was chosen. The renderer is `packages/simulator/histogram-svg.js`
+(`renderHistogramSvg(forecastResult, { style, program, seed })`); the pipeline
+forecaster attaches it as `projection.projectionSvg` and persists it via
+`writeForecastArtifacts()` as the `projection_path` alongside the `histogram_path`
+JSON. `report` style renders the terminal-equity histogram with p05–p95 / p25–p75
+quantile bands and the p50 line plus a max-drawdown panel; `compact` is the
+single-panel form. Determinism is enforced by fixed-precision number formatting and
+no system-time / `Math.random` use. Matplotlib-in-deterministic-mode and PNG
+rasterization remain the deferred fallback for richer multi-panel projections.

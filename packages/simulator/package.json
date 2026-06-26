@@ -13,6 +13,12 @@
     "./runner": "./runner.js",
     "./metrics": "./metrics.js",
     "./forecast": "./forecast.js",
+    "./correlation": "./correlation.js",
+    "./vol-surface": "./vol-surface.js",
+    "./costs": "./costs.js",
+    "./bootstrap": "./bootstrap.js",
+    "./path-stats": "./path-stats.js",
+    "./histogram-svg": "./histogram-svg.js",
     "./self-improvement": "./self-improvement.js"
   },
   "scripts": {

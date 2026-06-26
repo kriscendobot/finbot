@@ -18,6 +18,8 @@
  * deps, passes PractRand to 32 TB. We never call Math.random.
  */
 
+import { choleskyFactorFor, applyCholesky } from './correlation.js';
+
 /**
  * sfc32 PRNG. Returns a function that emits uniform [0, 1) floats.
  *
@@ -84,8 +86,20 @@ export function gaussian(rng) {
  *
  * S_{t+dt} = S_t * exp((mu - sigma^2/2) * dt + sigma * sqrt(dt) * Z)
  *
- * Multi-asset: one sigma per asset, optional correlation (currently
- * independent walks; future cut can add a Cholesky-factored covariance).
+ * Multi-asset. By default each asset walks independently (one sigma per
+ * asset). Two optional enrichments:
+ *
+ *   - Correlation. Pass `cfg.correlations` (a pair spec or full matrix)
+ *     and the per-tick standard-normal shock vector is run through the
+ *     Cholesky factor of the correlation matrix, so the assets move
+ *     together with the requested correlation. The draw count per tick
+ *     is unchanged (one gaussian per asset), so the independent walk
+ *     stays byte-for-byte identical when no correlation is given.
+ *   - Volatility surface. Pass `cfg.volSurface` (a VolatilitySurface)
+ *     and each tick samples sigma per asset from the empirical surface
+ *     using a *separate* seeded RNG stream (so the main price-shock
+ *     stream is undisturbed). Falls back to the fixed `cfg.volatilities`
+ *     for any asset the surface does not cover.
  */
 export class GBMPriceFeed {
   /**
@@ -95,6 +109,8 @@ export class GBMPriceFeed {
    * @param {Record<string, number>} [cfg.volatilities]       sigma per asset (default 0.02)
    * @param {number} [cfg.dt]                                 default 1 (one tick = one unit time)
    * @param {number} [cfg.seed]                               default 42
+   * @param {number[][] | Record<string, any>} [cfg.correlations]   correlation spec for correlated walks
+   * @param {import('./vol-surface.js').VolatilitySurface} [cfg.volSurface]   empirical vol surface to sample sigma from
    */
   constructor(cfg) {
     this.initialPrices = { ...cfg.initialPrices };
@@ -106,6 +122,16 @@ export class GBMPriceFeed {
     this.seed = cfg.seed != null ? cfg.seed : 42;
     this.rng = sfc32(this.seed);
     this.t = 0;
+    // Fixed asset order anchors the correlation matrix and the shock
+    // vector. Object key order is insertion order, stable across clones.
+    this.assetOrder = Object.keys(this.initialPrices);
+    this.correlations = cfg.correlations || null;
+    this.choleskyL = choleskyFactorFor(this.assetOrder, this.correlations);
+    this.volSurface = cfg.volSurface || null;
+    // A separate RNG stream for volatility-surface sampling keeps the
+    // price-shock stream's draw schedule independent of whether the
+    // surface is in play.
+    this.volRng = sfc32((this.seed ^ 0x9e3779b9) >>> 0);
   }
 
   /**
@@ -114,18 +140,39 @@ export class GBMPriceFeed {
    * @returns {Record<string, number>}
    */
   tick() {
+    // Draw one standard-normal shock per asset, in fixed asset order.
+    const z = new Array(this.assetOrder.length);
+    for (let i = 0; i < this.assetOrder.length; i += 1) z[i] = gaussian(this.rng);
+    // Apply correlation if present (y = L · z); otherwise shocks are iid.
+    const shocks = this.choleskyL ? applyCholesky(this.choleskyL, z) : z;
+
     const next = {};
-    for (const [asset, prev] of Object.entries(this.prices)) {
+    for (let i = 0; i < this.assetOrder.length; i += 1) {
+      const asset = this.assetOrder[i];
+      const prev = this.prices[asset];
       const mu = this.drifts[asset] || 0;
-      const sigma = this.volatilities[asset] != null ? this.volatilities[asset] : this.defaultVol;
-      const z = gaussian(this.rng);
+      const sigma = this.sigmaFor(asset);
       const drift = (mu - 0.5 * sigma * sigma) * this.dt;
-      const diffusion = sigma * Math.sqrt(this.dt) * z;
+      const diffusion = sigma * Math.sqrt(this.dt) * shocks[i];
       next[asset] = prev * Math.exp(drift + diffusion);
     }
     this.prices = next;
     this.t += 1;
     return { ...this.prices };
+  }
+
+  /**
+   * Resolve this tick's volatility for an asset: an empirical-surface
+   * draw when the surface covers the asset, else the fixed config vol.
+   *
+   * @param {string} asset
+   * @returns {number}
+   */
+  sigmaFor(asset) {
+    if (this.volSurface && this.volSurface.has(asset)) {
+      return this.volSurface.sample(asset, this.volRng);
+    }
+    return this.volatilities[asset] != null ? this.volatilities[asset] : this.defaultVol;
   }
 
   /** @returns {Record<string, number>} */
@@ -145,6 +192,8 @@ export class GBMPriceFeed {
       volatilities: this.volatilities,
       dt: this.dt,
       seed: opts.seed != null ? opts.seed : this.seed,
+      correlations: this.correlations,
+      volSurface: this.volSurface,
     });
     // Preserve current state (current prices + tick counter). The
     // rng is fresh from the (possibly new) seed; subsequent ticks
@@ -155,8 +204,16 @@ export class GBMPriceFeed {
     copy.prices = { ...this.prices };
     copy.t = this.t;
     if (opts.seed == null) {
-      const draws = this.t * Object.keys(this.initialPrices).length * 2;
+      const draws = this.t * this.assetOrder.length * 2;
       for (let i = 0; i < draws; i += 1) copy.rng();
+      // The vol-surface stream draws once per *covered* asset per tick;
+      // resync it the same way so a same-seed clone continues the
+      // surface sampling sequence in lockstep with the price shocks.
+      if (this.volSurface) {
+        const coveredCount = this.assetOrder.filter((a) => this.volSurface.has(a)).length;
+        const volDraws = this.t * coveredCount;
+        for (let i = 0; i < volDraws; i += 1) copy.volRng();
+      }
     }
     return copy;
   }

@@ -25,5 +25,16 @@ export {
   rowsToJsonl,
   rowsToCsv,
 } from './metrics.js';
-export { forecast, binHistogram } from './forecast.js';
+export { forecast, binHistogram, aggregatePathStats } from './forecast.js';
+export {
+  cholesky,
+  applyCholesky,
+  correlationMatrixFromPairs,
+  choleskyFactorFor,
+} from './correlation.js';
+export { VolatilitySurface, surfaceFromPriceHistory } from './vol-surface.js';
+export { slippageFill, gasCost } from './costs.js';
+export { bootstrapQuantileBands, quantileSorted } from './bootstrap.js';
+export { pathStatsOf } from './path-stats.js';
+export { renderHistogramSvg } from './histogram-svg.js';
 export { reflect, renderReflection, reflectAndRecord } from './self-improvement.js';
