@@ -24,6 +24,8 @@
     "./forecast-eval": "./forecast-eval.js",
     "./risk-reward": "./risk-reward.js",
     "./instruments": "./instruments.js",
+    "./instrument-mix": "./instrument-mix.js",
+    "./history": "./history.js",
     "./evaluation": "./evaluation.js",
     "./elicitation": "./elicitation.js",
     "./profile-store": "./profile-store.js",

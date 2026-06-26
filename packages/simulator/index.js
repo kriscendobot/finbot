@@ -108,7 +108,19 @@ export {
   instrumentReturns,
   mixReturns,
   instrumentReturnDistribution,
+  stepInstrument,
+  initInstrumentState,
+  kinkedUtilizationApy,
+  exDividendAdjustedSeries,
 } from './instruments.js';
+export { rebalanceMix } from './instrument-mix.js';
+export {
+  parsePriceSeriesCsv,
+  seriesFromFrames,
+  validateSeries,
+  loadPriceSeries,
+  loadPriceFrames,
+} from './history.js';
 export {
   defaultInstrumentSpecs,
   instrumentCandidates,

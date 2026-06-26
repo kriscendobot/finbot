@@ -39,7 +39,36 @@ streamed metrics.
 - `instruments.js` models three return shapes over a price series — `growth`
   (appreciation only), `yield` (periodic accrual), `dividend` (discrete
   payouts) — that a strategy can `mixReturns`, each drivable from a synthetic
-  fixture or a user-supplied/speculated series.
+  fixture or a user-supplied/speculated series. Each shape carries realistic
+  dynamics:
+  - **yield**: a constant rate, a yield curve / short-rate path (an array
+    sampled by tick), a stochastic short-rate (a seeded function), or a
+    DeFi utilization-driven APY (`kinkedUtilizationApy`, the Aave/Compound
+    two-slope model); simple or `compounding`; paid into cash or reinvested
+    into the position (`reinvest: 'position'`, DRIP).
+  - **dividend**: dividend growth and cuts (`dividendGrowth`, or an explicit
+    per-payout schedule), irregular payout schedules (`payoutTicks` /
+    `scheduleAt`), payout-ratio dividends over an earnings series
+    (`payoutRatio` + `earningsPerUnit`), and an ex-dividend price adjustment
+    (`exDividendDrop`) that marks the price down at the payout instant —
+    `exDividendAdjustedSeries` materializes that drop onto the oracle series.
+  - **all shapes**: per-payout and per-reinvest **fees** (`fees`) and **taxes**
+    (`tax.income` on payouts, `tax.capGains` on the realized terminal gain),
+    so returns are reported gross and net. `instrumentReturns` is a pure
+    stateful walk over `stepInstrument`, the single per-tick source of truth.
+- `instrument-mix.js` (`rebalanceMix`) is a target-allocation rebalancer over
+  a mix of instruments: it periodically trades legs back toward a target
+  weight vector, charging slippage, gas, and per-trade fees (`costs.js`),
+  while leg payouts flow into a shared cash account it redeploys. It mirrors
+  the protocol shape of `@finbot/pipeline`'s `rebalance.js` over an
+  instrument mix, and shares `stepInstrument` with the single-leg path so a
+  leg behaves identically alone or in the mix.
+- `history.js` ingests **real** user-supplied price history: `parsePriceSeriesCsv`
+  (single-asset, accepting one-price-per-line / `t,price` / a named column),
+  `seriesFromFrames` (extract an asset from `parseCsvFrames` output),
+  `validateSeries`, and the read-only file loaders `loadPriceSeries` /
+  `loadPriceFrames`. An ingested series drives an instrument directly or seeds
+  a `blockBootstrapSeries` ensemble for the risk/reward sweep.
 - `risk-reward.js` represents a user **volatility tolerance** (`tau` in
   [0,1]) as a mean-variance certainty-equivalent objective, optimizes the
   risk-for-reward balance it implies (`chooseStrategy`), traces the
@@ -67,8 +96,10 @@ mean-reverting cyclical structure, so its intervals over- or mis-cover) —
 which is the gap the parked
 [`finbot-richer-forecasting`](../../journal/jobs) plan would close. The
 risk/reward sweep shows a diversified growth+yield mix dominating either
-instrument alone across most volatility-tolerance appetites; richer
-instrument models are the parked `finbot-additional-instruments` slice.
+instrument alone across most volatility-tolerance appetites. Richer
+instrument dynamics (stochastic/utilization yield, dividend growth/cuts,
+ex-dividend marking, fees/taxes/reinvestment, and a mix rebalancer) landed
+in `instruments.js` / `instrument-mix.js` / `history.js`; see *Pieces* above.
 
 ## Volatility-tolerance elicitation
 
