@@ -1,0 +1,168 @@
+#!/usr/bin/env node
+/**
+ * finbot-elicit — calibrate a user's volatility tolerance from a bounded
+ * interaction and persist the profile the planner reads.
+ *
+ * Runs the adaptive lottery ladder over stdin (a sequence of sure-thing vs
+ * coin-flip choices that bisects the user's risk aversion), optionally folds in
+ * other stated signals (worst-acceptable drawdown, target Sharpe, a direct
+ * slider), reconciles them into one posterior `tau` with a confidence band, and
+ * writes a per-user profile under a store directory.
+ *
+ * Usage:
+ *   finbot-elicit --user=alice
+ *   finbot-elicit --user=alice --store=./profiles --steps=8
+ *   finbot-elicit --user=alice --drawdown=0.3 --sharpe=0.5 --slider=0.6
+ *   finbot-elicit --user=alice --show          # print the stored profile and exit
+ *   finbot-elicit --user=alice --auto=3.0       # non-interactive: simulate a user with lambda=3
+ *
+ * Flags:
+ *   --user=ID            profile key (required)
+ *   --store=DIR          profile store directory (default ./profiles)
+ *   --steps=N            ladder length (default 8)
+ *   --drawdown=F         stated worst-acceptable drawdown fraction (optional signal)
+ *   --sharpe=F           stated minimum-acceptable Sharpe hurdle (optional signal)
+ *   --slider=F           direct 0..1 tolerance (optional signal)
+ *   --cadence-days=N     re-calibration cadence in days (default 90)
+ *   --auto=LAMBDA        non-interactive: answer the ladder as a truthful user of this risk aversion
+ *   --show               print the stored profile (with recalibration status) and exit
+ *   --help / -h          print this and exit
+ *
+ * Simulation only — no funds, no chain. The ladder math is deterministic; the
+ * only entropy is the user's own answers.
+ */
+
+import process from 'node:process';
+import readline from 'node:readline';
+
+import {
+  startLotteryLadder,
+  ladderDone,
+  nextLotteryQuestion,
+  answerLotteryQuestion,
+  ladderEstimate,
+  runLotteryLadder,
+  truthfulLadderResponder,
+  signalFromLadder,
+  signalFromDrawdown,
+  signalFromSharpe,
+  signalFromSlider,
+  reconcileSignals,
+  recalibrationStatus,
+} from '../packages/simulator/elicitation.js';
+import {
+  makeVolatilityProfile,
+  ProfileStore,
+} from '../packages/simulator/profile-store.js';
+import {
+  renderElicitationIntro,
+  renderLotteryQuestion,
+  parseLotteryAnswer,
+  renderProfileSummary,
+} from '../packages/simulator/elicitation-ui.js';
+
+function parseArgs(argv) {
+  const args = { store: './profiles', steps: 8, cadenceDays: 90 };
+  for (const arg of argv) {
+    const eq = arg.indexOf('=');
+    const key = eq >= 0 ? arg.slice(0, eq) : arg;
+    const val = eq >= 0 ? arg.slice(eq + 1) : null;
+    if (key === '--user') args.user = val;
+    else if (key === '--store') args.store = val;
+    else if (key === '--steps') args.steps = Number(val);
+    else if (key === '--drawdown') args.drawdown = Number(val);
+    else if (key === '--sharpe') args.sharpe = Number(val);
+    else if (key === '--slider') args.slider = Number(val);
+    else if (key === '--cadence-days') args.cadenceDays = Number(val);
+    else if (key === '--auto') args.auto = Number(val);
+    else if (key === '--show') args.show = true;
+    else if (key === '--help' || key === '-h') args.help = true;
+  }
+  return args;
+}
+
+function usage() {
+  process.stdout.write([
+    'finbot-elicit — calibrate and persist a volatility-tolerance profile',
+    '',
+    'Usage:',
+    '  finbot-elicit --user=ID [--store=DIR] [--steps=N]',
+    '                [--drawdown=F] [--sharpe=F] [--slider=F]',
+    '                [--cadence-days=N] [--auto=LAMBDA] [--show]',
+    '',
+  ].join('\n'));
+}
+
+async function ask(rl, prompt) {
+  return new Promise((resolve) => rl.question(`${prompt}\n> `, resolve));
+}
+
+/** Drive the ladder interactively over stdin/stdout. */
+async function interactiveLadder(steps) {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  process.stdout.write(`${renderElicitationIntro()}\n\n`);
+  let state = startLotteryLadder({ maxSteps: steps });
+  while (!ladderDone(state)) {
+    const question = nextLotteryQuestion(state);
+    let answer = null;
+    while (answer == null) {
+      // eslint-disable-next-line no-await-in-loop
+      const text = await ask(rl, renderLotteryQuestion(question, { total: steps }));
+      answer = parseLotteryAnswer(text);
+      if (answer == null) process.stdout.write("Please answer 'A' or 'B'.\n");
+    }
+    state = answerLotteryQuestion(state, answer);
+    process.stdout.write('\n');
+  }
+  rl.close();
+  return ladderEstimate(state);
+}
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  if (args.help) { usage(); return; }
+  if (!args.user) { usage(); process.exitCode = 2; return; }
+
+  const store = new ProfileStore({ baseDir: args.store });
+
+  if (args.show) {
+    const profile = store.load(args.user);
+    if (!profile) { process.stdout.write(`No profile stored for ${args.user}.\n`); return; }
+    process.stdout.write(`${renderProfileSummary(profile)}\n`);
+    const status = recalibrationStatus(profile, Date.now());
+    process.stdout.write(`Re-calibration: ${status.due ? `due (${status.reason})` : 'not due'}.\n`);
+    return;
+  }
+
+  // Run the ladder (interactive, or simulated when --auto is given).
+  const estimate = args.auto != null
+    ? runLotteryLadder({
+      responder: truthfulLadderResponder(args.auto),
+      ladder: { maxSteps: args.steps },
+    }).estimate
+    : await interactiveLadder(args.steps);
+
+  // Collect every available signal and reconcile into one posterior.
+  const signals = [signalFromLadder(estimate)];
+  if (Number.isFinite(args.drawdown)) signals.push(signalFromDrawdown(args.drawdown));
+  if (Number.isFinite(args.sharpe)) signals.push(signalFromSharpe(args.sharpe));
+  if (Number.isFinite(args.slider)) signals.push(signalFromSlider(args.slider));
+  const posterior = reconcileSignals(signals);
+
+  const profile = makeVolatilityProfile({
+    userId: args.user,
+    posterior,
+    signals,
+    now: Date.now(),
+    cadenceMs: args.cadenceDays * 24 * 60 * 60 * 1000,
+  });
+  store.save(profile);
+
+  process.stdout.write(`\n${renderProfileSummary(profile)}\n`);
+  process.stdout.write(`Saved to ${store.pathFor(args.user)}\n`);
+}
+
+main().catch((err) => {
+  process.stderr.write(`${err && err.stack ? err.stack : err}\n`);
+  process.exitCode = 1;
+});

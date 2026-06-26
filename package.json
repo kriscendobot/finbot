@@ -16,12 +16,14 @@
     "finbot": "node bin/finbot",
     "finbot-sim": "node bin/finbot-sim",
     "finbot-ooda": "node bin/finbot-ooda",
-    "finbot-eval": "node bin/finbot-eval"
+    "finbot-eval": "node bin/finbot-eval",
+    "finbot-elicit": "node bin/finbot-elicit"
   },
   "bin": {
     "finbot": "bin/finbot",
     "finbot-sim": "bin/finbot-sim",
     "finbot-ooda": "bin/finbot-ooda",
-    "finbot-eval": "bin/finbot-eval"
+    "finbot-eval": "bin/finbot-eval",
+    "finbot-elicit": "bin/finbot-elicit"
   }
 }

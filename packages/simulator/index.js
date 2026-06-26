@@ -66,7 +66,41 @@ export {
   toleranceFrontier,
   inferToleranceFromMaxDrawdown,
   inferToleranceFromLottery,
+  inferToleranceFromTargetSharpe,
 } from './risk-reward.js';
+export {
+  startLotteryLadder,
+  ladderDone,
+  nextLotteryQuestion,
+  answerLotteryQuestion,
+  ladderEstimate,
+  runLotteryLadder,
+  truthfulLadderResponder,
+  signalFromLadder,
+  signalFromDrawdown,
+  signalFromSharpe,
+  signalFromSlider,
+  signalFromLottery,
+  reconcileSignals,
+  recalibrationStatus,
+  DEFAULT_SIGNAL_SIGMA,
+  DEFAULT_CADENCE_MS,
+  DEFAULT_MAX_SIGMA,
+} from './elicitation.js';
+export {
+  PROFILE_VERSION,
+  makeVolatilityProfile,
+  serializeProfile,
+  parseProfile,
+  ProfileStore,
+} from './profile-store.js';
+export {
+  renderElicitationIntro,
+  renderLotteryQuestion,
+  parseLotteryAnswer,
+  renderProfileSummary,
+  describeTolerance,
+} from './elicitation-ui.js';
 export {
   growthInstrument,
   yieldInstrument,

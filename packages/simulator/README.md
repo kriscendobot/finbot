@@ -70,6 +70,54 @@ risk/reward sweep shows a diversified growth+yield mix dominating either
 instrument alone across most volatility-tolerance appetites; richer
 instrument models are the parked `finbot-additional-instruments` slice.
 
+## Volatility-tolerance elicitation
+
+The risk/reward sweep is parameterized by a single volatility tolerance
+`tau in [0,1]`. `elicitation.js` calibrates it from a bounded interaction
+and `profile-store.js` persists the result for the planner to read.
+
+The strong instrument is an **adaptive lottery ladder**: a short sequence of
+50/50 gamble-vs-certain choices that *bisects* the user's mean-variance
+risk-aversion `lambda`. Each rung offers a coin flip (`+30%` / `-10%` of a
+notional stake) versus a guaranteed return set to the certainty-equivalent of
+the current `lambda` bracket's midpoint; "took the gamble" halves the bracket
+downward, "took the sure thing" upward. After N rungs the midpoint is `lambda`
+to resolution `range / 2^N`, which `toleranceFromRiskAversion` maps to `tau`
+with a confidence band from the residual bracket. Payoffs are fractional
+returns (not dollars) so the elicited `lambda` lives in the same units as the
+risk/reward score, and the offered certain amount stays inside the gamble's own
+range at every rung.
+
+Other signals reconcile alongside it: a stated worst-acceptable drawdown
+(`inferToleranceFromMaxDrawdown`), a target Sharpe hurdle
+(`inferToleranceFromTargetSharpe`), a direct `0..1` slider, or a one-shot
+lottery. `reconcileSignals` folds them into one posterior `tau` by
+inverse-variance (precision) weighting — agreeing signals tighten the band
+below any single one, and a confident signal dominates a vague one.
+`makeVolatilityProfile` stamps the posterior, its provenance, and a
+re-calibration deadline (`recalibrationStatus` reports when a profile is due,
+either by elapsed cadence or by too wide a confidence band).
+
+The planner consumes a persisted profile in `@finbot/pipeline`
+(`profile-allocation.js`): `selectAllocationForProfile` reads the profile's
+`tau` and lets `chooseStrategy` pick among candidate allocations on the
+frontier; `planForProfile` formalizes the choice through the existing
+deterministic `plan()`. `bin/finbot-elicit` is the usable terminal flow:
+
+```
+node bin/finbot-elicit --user=alice --store=./profiles --steps=8
+node bin/finbot-elicit --user=alice --drawdown=0.3 --sharpe=0.5
+node bin/finbot-elicit --user=alice --show
+node bin/finbot-elicit --user=alice --auto=3.0   # non-interactive (simulated user)
+```
+
+`elicitation.js` is pure (no clock, no I/O, no randomness); a truthful
+simulated user (`truthfulLadderResponder`) makes the whole ladder testable —
+bisecting against a known `lambda` recovers it. The terminal/chat surface
+(the liaison interaction) lives in `elicitation-ui.js` as pure render/parse
+helpers; the real adapter is a thin loop over `parseLotteryAnswer` and
+`runLotteryLadder`'s responder contract.
+
 ## CLI
 
 The entry script is `bin/finbot-sim` at the repo root. Run a 100-tick

@@ -24,7 +24,10 @@
     "./forecast-eval": "./forecast-eval.js",
     "./risk-reward": "./risk-reward.js",
     "./instruments": "./instruments.js",
-    "./evaluation": "./evaluation.js"
+    "./evaluation": "./evaluation.js",
+    "./elicitation": "./elicitation.js",
+    "./profile-store": "./profile-store.js",
+    "./elicitation-ui": "./elicitation-ui.js"
   },
   "scripts": {
     "test": "node --test test/*.test.js"

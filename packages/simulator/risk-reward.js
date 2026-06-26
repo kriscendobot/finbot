@@ -184,3 +184,25 @@ export function inferToleranceFromLottery(choice) {
     kind: choice.accepted ? 'lower' : 'upper',
   };
 }
+
+/**
+ * Elicitation sketch #3: infer tolerance from a stated *minimum acceptable*
+ * Sharpe ratio (a reward-per-unit-risk hurdle). A higher hurdle reveals a
+ * more demanding, more risk-averse user: in the mean-variance frame a
+ * required Sharpe acts exactly like a unit of risk aversion, so we map it
+ * through the same `1 / (1 + lambda)` curve with `lambda = sharpe / ref`:
+ *
+ *   tau = 1 / (1 + sharpe / sharpeRef)
+ *
+ * sharpe=0 -> tau=1 (will accept any risk), sharpe=sharpeRef -> tau=0.5,
+ * sharpe -> infinity -> tau -> 0. Monotone decreasing.
+ *
+ * @param {number} sharpe                required Sharpe ratio (>= 0)
+ * @param {number} [sharpeRef]           the hurdle that maps to tau=0.5 (default 1)
+ * @returns {number}                     tau in (0,1]
+ */
+export function inferToleranceFromTargetSharpe(sharpe, sharpeRef = 1) {
+  const s = Math.max(0, sharpe || 0);
+  const ref = sharpeRef > 0 ? sharpeRef : 1;
+  return toleranceFromRiskAversion(s / ref);
+}

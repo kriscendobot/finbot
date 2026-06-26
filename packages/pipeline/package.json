@@ -11,6 +11,7 @@
     "./analyzer": "./analyzer.js",
     "./forecaster": "./forecaster.js",
     "./planner": "./planner.js",
+    "./profile-allocation": "./profile-allocation.js",
     "./auditor": "./auditor.js",
     "./executor": "./executor.js",
     "./rebalance": "./rebalance.js",

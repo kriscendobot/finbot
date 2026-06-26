@@ -15,6 +15,9 @@ export { observeOpportunities, windowFromHistory } from './oracle-watcher.js';
 export { analyze, realizedVolatility } from './analyzer.js';
 export { project, makeRebalanceAction } from './forecaster.js';
 export { plan, hashProposal } from './planner.js';
+export {
+  toleranceFromProfile, selectAllocationForProfile, planForProfile,
+} from './profile-allocation.js';
 export { audit } from './auditor.js';
 export { execute, currentNav } from './executor.js';
 export {
