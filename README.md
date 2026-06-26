@@ -44,7 +44,26 @@ See `CLAUDE.md` for the full layout and the dispatch contract. Quick map:
 
 ## Status
 
-This repository is the initial scaffolding. The skills are all stubs; the executor cannot yet sign transactions; the forecaster cannot yet run a Monte Carlo simulation. The structure is in place so the gardener-shaped role can grow the inventory and the planner-shaped roles can begin emitting proposals against a paper portfolio.
+The **end-to-end dry-run OODA cycle works** over the simulator. `@finbot/pipeline`
+implements each role as a deterministic function over the simulator world and wires
+them into one cycle — `oracle-watcher` emits an opportunity → `analyzer` scores it →
+`forecaster` runs a Monte Carlo ensemble (via the simulator's nested-fork
+`forecast()`) → `planner` emits a hashed, cited, ymax-shaped rebalance proposal →
+`auditor` checks the invariant set → `executor` **dry-runs** the approved steps on a
+clone of the portfolio. The wallet capability is confined to the executor and is
+never even constructed in dry-run. Run it:
+
+```
+node bin/finbot-ooda --seed=7        # one dry-run cycle, printed report
+node bin/finbot-ooda --seed=7 --json # structured result
+npm test                             # 163 tests across harness, simulator, pipeline
+```
+
+Still scaffolding / follow-on work: the role `AGENT.md` briefs describe the
+LLM-dispatch form of each role (the pipeline is the computation those dispatches
+drive); the cap-attenuation layer is the dependency-free in-process v0.5 (the SES /
+`@endo/compartment-mapper` upgrade is the next step); live execution against a real
+substrate is unbuilt and gated. See the posted `finbot-*` follow-on jobs.
 
 ## Safety
 

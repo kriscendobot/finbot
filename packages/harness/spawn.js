@@ -80,10 +80,11 @@ export async function spawn(params, ctx) {
   events.push({ type: 'agent_start', role: params.role, id });
 
   const runner = (async () => {
+    const deadline = timeout(timeoutMs);
     try {
       const result = await Promise.race([
         runLoop({ params, ctx, attenuated, roleBrief, events, llm }),
-        timeout(timeoutMs),
+        deadline.promise,
       ]);
       handle.status = 'completed';
       handle.result = result;
@@ -96,6 +97,11 @@ export async function spawn(params, ctx) {
       handle.finished = Date.now();
       events.push({ type: 'agent_end', error: handle.error, messages: [] });
       return handle;
+    } finally {
+      // Clear the deadline timer so a completed spawn does not keep the
+      // event loop (and `node --test`) alive until the 10-minute timeout
+      // fires. Without this the process hangs at exit after every spawn.
+      deadline.cancel();
     }
   })();
 
@@ -238,8 +244,19 @@ function stubLlm(args) {
   };
 }
 
+/**
+ * A cancelable deadline. Returns a rejecting promise and a `cancel()` that
+ * clears the underlying timer so a settled race does not leak it.
+ *
+ * @param {number} ms
+ * @returns {{ promise: Promise<never>, cancel: () => void }}
+ */
 function timeout(ms) {
-  return new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms));
+  let handle;
+  const promise = new Promise((_, reject) => {
+    handle = setTimeout(() => reject(new Error('timeout')), ms);
+  });
+  return { promise, cancel: () => clearTimeout(handle) };
 }
 
 function shortId() {

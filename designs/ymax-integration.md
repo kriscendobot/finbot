@@ -69,4 +69,12 @@ Phase 2: Path A for any portfolio that does live on Agoric (the on-chain substra
 - The target-balance helper is imported from `@agoric/portfolio-api` directly.
 - The auditor's invariant set extends (does not replace) the on-chain contract's invariants. The contract checks what it can on-chain; the auditor checks what the contract cannot (forecast tail-risk, citation completeness, freshness).
 
-Status: stub. The first implementation engagement consumes the helper and the solver and emits its first proposal against a paper portfolio.
+## Notes from the field (2026-06-26)
+
+Phase 1 (Path B) is implemented. `packages/pipeline/rebalance.js` mirrors the ymax *protocol* — `computeTargetBalances(nav, targetWeights)` (weight·NAV per asset) and `deriveSteps(...)` (the target-balance → funds-flow-step solver) — without importing `@agoric/portfolio-api` (the public shape is small and clearly reusable; we borrow the protocol, not the implementation). The planner (`packages/pipeline/planner.js`) emits a proposal with a content `proposal_hash`, ordered steps, and forecast/analysis citations; the auditor's invariant set (`packages/pipeline/auditor.js`) *extends* rather than replaces what an on-chain contract would check (it adds forecast tail-risk, citation completeness, reproducibility, and pricing freshness). The executor dry-runs the steps against a paper portfolio; no on-chain transaction is built.
+
+Where internal ymax detail would refine a step (the place identifier for Aave/Compound/USDN, Axelar GMP routing, the pending-tx handle), each step carries a `route: 'sim:single-venue'` marker — flagged, not fabricated, so Path A/C work can fill it from the real `portfolio-contract` shape later.
+
+Open for Phase 2 (posted as `finbot-substrate-adapters`): adopt `computeTargetBalances` / `plan-solve` directly vs. keep the mirror; the executor's per-substrate signing adapters (Agoric smart wallet for Path A, EVM/Solana for Path C).
+
+Status: Path B landed against the simulator. Phase 2 substrate work is decomposed into follow-on jobs.

@@ -155,6 +155,9 @@ Create `skills/<name>/SKILL.md`. Sections: purpose, inputs, state (if any), proc
 
 - Roles: `liaison`, `steward`, `planner`, `executor`, `oracle-watcher`, `forecaster`, `analyzer`, `auditor`, `journalist`, `monitor`.
 - Skills: `dispatch-worktree`, `inbox-drain`, `journal-sync`, `self-improvement`, `ymax-planner-protocol`, `oracle-poll`, `monte-carlo-ensemble`, `histogram-projection-render`, `portfolio-rebalance`, `opportunity-comparison`, `compartment-sandbox`, `far-exo-vending`, `pre-execution-audit`.
+- Packages: `@finbot/harness` (the OODA driving loop, tool surface, subagent spawn, message bus, observation recorder), `@finbot/simulator` (paper portfolio + seeded price feed + nested-fork `forecast()` Monte Carlo), and `@finbot/pipeline` (each OODA role as a deterministic function over the simulator + the wallet-confining capability attenuator + `runOodaCycle`). `bin/finbot-ooda` runs one end-to-end **dry-run** cycle over the simulator; `npm test` runs all three packages.
+
+The roles' `AGENT.md` briefs describe the LLM-dispatch form of each role; `@finbot/pipeline` is the computation those dispatches drive, and the form the harness runs in-process for a dry-run cycle with no LLM required. The wallet capability is vended only to the executor and only in live mode (`packages/pipeline/cap-attenuation.js`, mirroring `designs/cap-attenuation.md` § Capability map); dry-run never constructs it.
 
 The `liaison` and `steward` are the two orchestrator postures. When a user is in the loop, the liaison runs with excess authority and asks before acting. When finbot runs in the bot sandbox under safe credentials with no user present, the steward runs with bounded authority and may act on its own (but not on live executor dispatches; those require explicit per-action authorization).
 

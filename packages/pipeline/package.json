@@ -1,0 +1,30 @@
+{
+  "name": "@finbot/pipeline",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The OODA role pipeline: oracle-watcher -> analyzer -> forecaster -> planner -> auditor -> executor (dry-run), wired over @finbot/simulator with capability attenuation confining the wallet to the executor.",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./oracle-watcher": "./oracle-watcher.js",
+    "./analyzer": "./analyzer.js",
+    "./forecaster": "./forecaster.js",
+    "./planner": "./planner.js",
+    "./auditor": "./auditor.js",
+    "./executor": "./executor.js",
+    "./rebalance": "./rebalance.js",
+    "./cap-attenuation": "./cap-attenuation.js",
+    "./ooda-cycle": "./ooda-cycle.js"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@finbot/harness": "0.0.0",
+    "@finbot/simulator": "0.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

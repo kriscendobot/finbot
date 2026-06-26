@@ -14,10 +14,12 @@
   "scripts": {
     "test": "for f in packages/*/test/*.test.js; do node --test \"$f\" || exit 1; done",
     "finbot": "node bin/finbot",
-    "finbot-sim": "node bin/finbot-sim"
+    "finbot-sim": "node bin/finbot-sim",
+    "finbot-ooda": "node bin/finbot-ooda"
   },
   "bin": {
     "finbot": "bin/finbot",
-    "finbot-sim": "bin/finbot-sim"
+    "finbot-sim": "bin/finbot-sim",
+    "finbot-ooda": "bin/finbot-ooda"
   }
 }

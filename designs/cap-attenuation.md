@@ -65,4 +65,15 @@ finbot's threat model is more demanding because the action is irreversible. The 
 - `skills/far-exo-vending/SKILL.md`: the Exo + InterfaceGuard vending pattern with citations to `@endo/exo`, `@endo/pass-style`, `@endo/patterns`, `@endo/eventual-send`, `@endo/captp`.
 - `roles/executor/AGENT.md`: the executor's modes and the wallet-Far lifecycle.
 
-Status: stub. The first executor dispatch that goes beyond `--dry-run` (a paper-wallet live run on a test net first) builds the compartment + Far machinery for real and lands a Notes from the field here.
+## Notes from the field (2026-06-26)
+
+The first end-to-end dry-run OODA cycle landed `packages/pipeline/cap-attenuation.js`, the **in-process v0.5 attenuator** that enforces the *boundary* this design specifies without yet pulling in SES/@endo:
+
+- `CAPABILITY_MAP` is the table above, in code. `attenuateForRole(role, parentCaps, { live })` returns only the cap names a role may see; `wallet` and `signing-rpc` are in `LIVE_ONLY_CAPS` and are dropped unless `live === true`. The executor is the only role whose `vended` set contains `wallet`, so no other role can name it even in a live run.
+- `makeWalletCapability(backing, methods)` is the plain-JS stand-in for an `@endo/exo` Far ref behind an InterfaceGuard: only whitelisted methods are callable, and `revoke()` makes every method throw (fail-closed) so a reference retained past the dispatch is inert.
+- `runInAttenuatedCompartment({ role, parentCaps, live, walletRevoke, fn })` runs `fn` with the attenuated set and revokes the vended wallet in a `finally`, the in-process analog of "the compartment is discarded; the wallet reference becomes unreachable".
+- The executor (`packages/pipeline/executor.js`) asserts, in dry-run, that `caps.wallet === undefined`, and carries `walletTouched: false` as the proof; `bin/finbot-ooda` exits non-zero if a dry-run cycle ever reports `walletTouched: true`.
+
+What remains for v1 (a posted `finbot-ses-compartments` follow-on): replace the in-process attenuator with `@endo/compartment-mapper` so the *globals/modules* surface is sandboxed too (today `ambient` in the map is documentary), and move the live executor's signing call into a separate worker process over CapTP per § Process boundary.
+
+Status: boundary enforced in-process; SES upgrade pending. The first live (paper-wallet test-net) run builds the worker-process + real-Far machinery and updates this section.

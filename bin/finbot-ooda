@@ -1,0 +1,175 @@
+#!/usr/bin/env node
+/**
+ * finbot-ooda — run one end-to-end dry-run OODA cycle over the simulator.
+ *
+ * This is the demonstrable form of the loop the design describes:
+ *   oracle-watcher -> analyzer -> forecaster (Monte Carlo) -> planner
+ *   -> auditor -> executor (DRY-RUN), all over the in-memory simulator
+ *   world, with the wallet capability confined to the executor and never
+ *   constructed at all in dry-run.
+ *
+ * Usage:
+ *   finbot-ooda                          # one cycle, seed 7, print a report
+ *   finbot-ooda --seed=11 --drift=-0.01  # bias the walk so a dip appears
+ *   finbot-ooda --warmup=12 --ensemble=300 --horizon=20
+ *   finbot-ooda --journal=PATH           # also record each stage to a journal worktree (local commit only)
+ *
+ * Flags:
+ *   --seed=N         PRNG seed (default 7)
+ *   --drift=F        per-tick GBM drift for ATOM (default -0.01, biases a dip)
+ *   --vol=F          per-tick GBM volatility for ATOM (default 0.02)
+ *   --warmup=N       price-feed warmup ticks before the cycle (default 10)
+ *   --threshold=BPS  oracle deviation threshold in basis points (default 30)
+ *   --ensemble=N     forecaster ensemble size (default 200)
+ *   --horizon=N      forecaster horizon in ticks (default 20)
+ *   --tail-floor=F   auditor tail-risk floor as a fraction of NAV (default 0.6)
+ *   --journal=PATH   journal worktree to record entries into (local commit only)
+ *   --json           print the structured result as JSON instead of a report
+ *   --help / -h      print this and exit
+ *
+ * DRY-RUN ONLY. This entry never enables live mode, never reads a keystore,
+ * and never constructs a wallet capability. Live execution is gated behind
+ * an explicit authorized executor dispatch per designs/cap-attenuation.md.
+ */
+
+import process from 'node:process';
+
+import { makeWorld } from '../packages/simulator/world.js';
+import { runSimulator } from '../packages/simulator/runner.js';
+import { runOodaCycle } from '../packages/pipeline/index.js';
+
+function parseArgs(argv) {
+  const args = {
+    seed: 7, drift: -0.01, vol: 0.02, warmup: 10, threshold: 30,
+    ensemble: 200, horizon: 20, tailFloor: 0.6, journal: null, json: false,
+  };
+  for (const arg of argv) {
+    const eq = arg.indexOf('=');
+    const key = eq >= 0 ? arg.slice(0, eq) : arg;
+    const val = eq >= 0 ? arg.slice(eq + 1) : null;
+    if (key === '--seed') args.seed = Number(val);
+    else if (key === '--drift') args.drift = Number(val);
+    else if (key === '--vol') args.vol = Number(val);
+    else if (key === '--warmup') args.warmup = Number(val);
+    else if (key === '--threshold') args.threshold = Number(val);
+    else if (key === '--ensemble') args.ensemble = Number(val);
+    else if (key === '--horizon') args.horizon = Number(val);
+    else if (key === '--tail-floor') args.tailFloor = Number(val);
+    else if (key === '--journal') args.journal = val;
+    else if (key === '--json') args.json = true;
+    else if (key === '--help' || key === '-h') { printHelp(); process.exit(0); }
+    else { console.error(`finbot-ooda: unknown flag ${arg}`); process.exit(2); }
+  }
+  return args;
+}
+
+function printHelp() {
+  // eslint-disable-next-line no-console
+  console.log([
+    'finbot-ooda — one dry-run OODA cycle over the simulator',
+    '',
+    'Usage:',
+    '  finbot-ooda [--seed=N] [--drift=F] [--vol=F] [--warmup=N]',
+    '              [--threshold=BPS] [--ensemble=N] [--horizon=N]',
+    '              [--tail-floor=F] [--journal=PATH] [--json]',
+    '',
+    'DRY-RUN ONLY. Never reads a keystore; never constructs a wallet.',
+    '',
+  ].join('\n'));
+}
+
+async function makeRecorder(journalRoot) {
+  if (!journalRoot) return null;
+  const { recordEntry } = await import('../packages/harness/observation/record.js');
+  return { record: (entry) => recordEntry(journalRoot, entry, { localOnly: true }) };
+}
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+
+  const world = makeWorld({
+    portfolio: { cash: 1000, balances: { ATOM: 10 }, initialPrice: 10 },
+    priceFeed: {
+      kind: 'gbm',
+      initialPrices: { ATOM: 10 },
+      volatilities: { ATOM: args.vol },
+      drifts: { ATOM: args.drift },
+      seed: args.seed,
+    },
+    seed: args.seed,
+    tag: `ooda-seed${args.seed}`,
+  });
+
+  const sim = runSimulator(world);
+  for (let i = 0; i < args.warmup; i += 1) sim.tick();
+
+  const recorder = await makeRecorder(args.journal);
+  const res = await runOodaCycle({
+    world,
+    history: sim.history,
+    recorder,
+    cycleId: `ooda-${args.seed}-${world.priceFeed.t}`,
+    config: {
+      windowTicks: args.warmup,
+      oracle: { thresholdBps: args.threshold },
+      analyzer: { scoreFloor: 0 },
+      forecaster: { ensembleSize: args.ensemble, horizon: args.horizon, baseSeed: 1000 + args.seed },
+      bounds: { maxStepPct: 0.25, maxDayPct: 0.5, concentrationCapPct: 0.9 },
+      auditor: { tailFloorPct: args.tailFloor, stalenessWindowTicks: args.warmup + 1 },
+    },
+  });
+
+  if (args.json) {
+    // eslint-disable-next-line no-console
+    console.log(JSON.stringify(res, null, 2));
+  } else {
+    printReport(res, args);
+  }
+
+  // The whole point, restated for the operator: dry-run never touches a wallet.
+  if (res.walletTouched) {
+    console.error('finbot-ooda: SAFETY VIOLATION — walletTouched is true in a dry-run cycle');
+    process.exit(3);
+  }
+}
+
+function printReport(res, args) {
+  const log = (...a) => console.log(...a); // eslint-disable-line no-console
+  log(`finbot-ooda cycle ${res.cycleId} (seed=${args.seed})`);
+  log(`  outcome: ${res.outcome}`);
+  log(`  OBSERVE  oracle-watcher: ${res.opportunities.length} crossing(s)`);
+  for (const o of res.opportunities) {
+    log(`           - ${o.asset}: ${o.referencePrice.toFixed(4)} -> ${o.currentPrice.toFixed(4)} `
+      + `(${o.deviationBps >= 0 ? '+' : ''}${o.deviationBps.toFixed(0)}bps, ${o.direction})`);
+  }
+  if (res.analysis) {
+    log(`  ORIENT   analyzer: next_action=${res.analysis.next_action}`
+      + (res.analysis.targetWeights ? ` target=${JSON.stringify(res.analysis.targetWeights)}` : ''));
+  }
+  if (res.forecast) {
+    const f = res.forecast;
+    log(`  ORIENT   forecaster: N=${f.ensembleSize} horizon=${f.horizon} `
+      + `p05/p50/p95=${f.summary.p05.toFixed(2)}/${f.summary.p50.toFixed(2)}/${f.summary.p95.toFixed(2)} `
+      + `pProfit=${(f.pProfit * 100).toFixed(1)}%`);
+  }
+  if (res.proposal) {
+    log(`  DECIDE   planner: ${res.proposal.steps.length} step(s) hash=${res.proposal.proposal_hash.slice(0, 16)}…`);
+    log(`           ${res.proposal.dry_run_summary}`);
+  }
+  if (res.audit) {
+    log(`  ACT      auditor: ${res.audit.verdict.toUpperCase()}`
+      + (res.audit.failed_invariants.length ? ` failed=${res.audit.failed_invariants.join(',')}` : ''));
+    for (const r of res.audit.invariant_results) log(`           [${r.pass ? 'PASS' : 'FAIL'}] ${r.name}`);
+  }
+  if (res.execution) {
+    log(`  ACT      executor (${res.execution.mode}): ${res.execution.steps_completed.length} step(s) simulated, `
+      + `post-equity=${res.execution.post_execution_balances.equity.toFixed(2)}`);
+  }
+  log(`  WALLET TOUCHED: ${res.walletTouched}  (dry-run never constructs a wallet capability)`);
+  log(`  => ${res.summary}`);
+}
+
+main().catch((err) => {
+  console.error('finbot-ooda: error', err); // eslint-disable-line no-console
+  process.exit(1);
+});
