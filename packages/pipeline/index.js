@@ -29,3 +29,8 @@ export {
 } from './cap-attenuation.js';
 export { runOodaCycle } from './ooda-cycle.js';
 export { makeDryRunCompute, deriveSeed } from './driver-compute.js';
+export { pipelineToolRegistry, PIPELINE_TOOL_NAMES } from './agent-tools.js';
+export {
+  dispatchAnalyzer, analyzerBrief, makeScriptedAnalyzerLlm,
+  extractToolCalls, lastScoringResult,
+} from './role-dispatch.js';

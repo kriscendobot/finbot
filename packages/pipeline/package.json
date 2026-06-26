@@ -17,7 +17,9 @@
     "./rebalance": "./rebalance.js",
     "./cap-attenuation": "./cap-attenuation.js",
     "./ooda-cycle": "./ooda-cycle.js",
-    "./driver-compute": "./driver-compute.js"
+    "./driver-compute": "./driver-compute.js",
+    "./agent-tools": "./agent-tools.js",
+    "./role-dispatch": "./role-dispatch.js"
   },
   "scripts": {
     "test": "node --test test/*.test.js"

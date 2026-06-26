@@ -56,8 +56,27 @@ never even constructed in dry-run. Run it:
 ```
 node bin/finbot-ooda --seed=7        # one dry-run cycle, printed report
 node bin/finbot-ooda --seed=7 --json # structured result
-npm test                             # 163 tests across harness, simulator, pipeline
+npm test                             # all tests across harness, simulator, pipeline
 ```
+
+The cycle above is pure automation (every stage a function call, no LLM). The
+**inference-driven path** is also wired: a real subagent can drive an OODA stage
+and call the deterministic pipeline functions as tools. `@finbot/harness`'s
+subagent `spawn` takes an injected `llm` — the deterministic stub stays the
+default so tests stay offline, and `harness.providers.makeAnthropicLlm()` is the
+real provider (Anthropic, `claude-opus-4-8`, via `fetch`, no new dependency).
+`@finbot/pipeline` exposes the orient-phase scorers as harness tools
+(`pipelineToolRegistry`) and `dispatchAnalyzer` spawns the analyzer over an
+oracle-watcher observation so it reasons over the opportunities and **calls
+`score_opportunities` (the deterministic `analyze`) as a tool**:
+
+```
+node bin/finbot-dispatch --seed=7              # offline: deterministic scripted analyzer LLM
+node bin/finbot-dispatch --seed=7 --live-llm   # real inference (needs ANTHROPIC_API_KEY)
+```
+
+This drives the ORIENT stage end-to-end in dry-run; the analyzer is read-only and
+its tool subset can reach no wallet capability.
 
 Still scaffolding / follow-on work: the role `AGENT.md` briefs describe the
 LLM-dispatch form of each role (the pipeline is the computation those dispatches

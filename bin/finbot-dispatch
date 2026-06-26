@@ -1,0 +1,166 @@
+#!/usr/bin/env node
+/**
+ * finbot-dispatch — drive one OODA stage by inference, in dry-run.
+ *
+ * Companion to `finbot-ooda` (which runs every stage as a deterministic
+ * function with no LLM). This entry runs the ORIENT stage by **inference**: it
+ * builds an oracle-watcher observation over the simulator, then dispatches the
+ * analyzer as an LLM-shaped subagent that reasons over the opportunities and
+ * CALLS the deterministic `score_opportunities` tool to do the scoring. The
+ * stage's scored product is printed.
+ *
+ * Usage:
+ *   finbot-dispatch                       # offline: a deterministic scripted analyzer LLM
+ *   finbot-dispatch --seed=11 --drift=-0.02
+ *   finbot-dispatch --live-llm            # real inference via Anthropic (needs ANTHROPIC_API_KEY)
+ *   finbot-dispatch --model=claude-opus-4-8 --live-llm
+ *   finbot-dispatch --json                # structured result
+ *
+ * Flags:
+ *   --seed=N         PRNG seed (default 7)
+ *   --drift=F        per-tick GBM drift for ATOM (default -0.02, biases a dip so an opportunity appears)
+ *   --vol=F          per-tick GBM volatility (default 0.02)
+ *   --warmup=N       price-feed warmup ticks (default 12)
+ *   --threshold=BPS  oracle deviation threshold in basis points (default 30)
+ *   --live-llm       use the Anthropic provider instead of the offline scripted LLM
+ *   --model=ID       provider model (default claude-opus-4-8); implies --live-llm
+ *   --json           print the structured result as JSON
+ *   --help / -h
+ *
+ * DRY-RUN ONLY. The analyzer is read-only and its tool subset cannot reach a
+ * wallet capability; this entry never enables live mode or reads a keystore.
+ */
+
+import process from 'node:process';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import { makeWorld } from '../packages/simulator/world.js';
+import { runSimulator } from '../packages/simulator/runner.js';
+import { observeOpportunities, windowFromHistory } from '../packages/pipeline/oracle-watcher.js';
+import { dispatchAnalyzer, makeScriptedAnalyzerLlm } from '../packages/pipeline/role-dispatch.js';
+import { spawn } from '../packages/harness/spawn.js';
+import { makeAnthropicLlm } from '../packages/harness/providers/anthropic.js';
+
+const FINBOT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+function parseArgs(argv) {
+  const args = {
+    seed: 7, drift: -0.02, vol: 0.02, warmup: 12, threshold: 30,
+    liveLlm: false, model: null, json: false,
+  };
+  for (const arg of argv) {
+    const eq = arg.indexOf('=');
+    const key = eq >= 0 ? arg.slice(0, eq) : arg;
+    const val = eq >= 0 ? arg.slice(eq + 1) : null;
+    if (key === '--seed') args.seed = Number(val);
+    else if (key === '--drift') args.drift = Number(val);
+    else if (key === '--vol') args.vol = Number(val);
+    else if (key === '--warmup') args.warmup = Number(val);
+    else if (key === '--threshold') args.threshold = Number(val);
+    else if (key === '--live-llm') args.liveLlm = true;
+    else if (key === '--model') { args.model = val; args.liveLlm = true; }
+    else if (key === '--json') args.json = true;
+    else if (key === '--help' || key === '-h') { printHelp(); process.exit(0); }
+    else { console.error(`finbot-dispatch: unknown flag ${arg}`); process.exit(2); }
+  }
+  return args;
+}
+
+function printHelp() {
+  // eslint-disable-next-line no-console
+  console.log([
+    'finbot-dispatch — drive the ORIENT stage by inference, in dry-run',
+    '',
+    'Usage:',
+    '  finbot-dispatch [--seed=N] [--drift=F] [--vol=F] [--warmup=N]',
+    '                  [--threshold=BPS] [--live-llm] [--model=ID] [--json]',
+    '',
+    'Offline by default (a deterministic scripted analyzer LLM). --live-llm uses',
+    'the Anthropic provider and needs ANTHROPIC_API_KEY. DRY-RUN ONLY.',
+    '',
+  ].join('\n'));
+}
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+
+  const world = makeWorld({
+    portfolio: { cash: 1000, balances: { ATOM: 10 }, initialPrice: 10 },
+    priceFeed: {
+      kind: 'gbm',
+      initialPrices: { ATOM: 10 },
+      volatilities: { ATOM: args.vol },
+      drifts: { ATOM: args.drift },
+      seed: args.seed,
+    },
+    seed: args.seed,
+    tag: `dispatch-seed${args.seed}`,
+  });
+  const sim = runSimulator(world);
+  for (let i = 0; i < args.warmup; i += 1) sim.tick();
+
+  const prices = world.priceFeed.current();
+  const readings = windowFromHistory(sim.history, args.warmup);
+  const observed = observeOpportunities({ readings }, { thresholdBps: args.threshold });
+
+  const input = {
+    opportunities: observed.crossings,
+    readings,
+    portfolio: world.portfolio.markToMarket(prices),
+    prices,
+    analyzerConfig: { scoreFloor: 0 },
+  };
+
+  const llm = args.liveLlm
+    ? makeAnthropicLlm(args.model ? { model: args.model } : {})
+    : makeScriptedAnalyzerLlm(input);
+
+  const dispatch = await dispatchAnalyzer(input, { spawn, finbotRoot: FINBOT_ROOT, llm });
+
+  const out = {
+    mode: args.liveLlm ? 'inference (anthropic)' : 'inference (offline scripted)',
+    status: dispatch.status,
+    opportunities: observed.crossings.length,
+    toolCalls: dispatch.toolCalls,
+    scored: dispatch.scored,
+    next_action: dispatch.analysis ? dispatch.analysis.next_action : null,
+    targetWeights: dispatch.analysis ? dispatch.analysis.targetWeights || null : null,
+    finalText: dispatch.finalText,
+  };
+
+  if (args.json) {
+    // eslint-disable-next-line no-console
+    console.log(JSON.stringify({ ...out, analysis: dispatch.analysis }, null, 2));
+  } else {
+    printReport(out, args);
+  }
+
+  // Stage must actually have run through the deterministic scorer to count.
+  if (dispatch.status !== 'completed') {
+    console.error(`finbot-dispatch: analyzer dispatch did not complete (status=${dispatch.status})`);
+    process.exit(1);
+  }
+  if (!dispatch.toolCalls.includes('score_opportunities')) {
+    console.error('finbot-dispatch: analyzer never called the deterministic score_opportunities tool');
+    process.exit(1);
+  }
+}
+
+function printReport(out, args) {
+  const log = (...a) => console.log(...a); // eslint-disable-line no-console
+  log(`finbot-dispatch (seed=${args.seed}) — ${out.mode}`);
+  log(`  OBSERVE  oracle-watcher: ${out.opportunities} crossing(s)`);
+  log(`  ORIENT   analyzer subagent: ${out.status}`);
+  log(`           tool calls: ${out.toolCalls.join(', ') || '(none)'}`);
+  log(`           scored via deterministic tool: ${out.scored}`);
+  log(`           next_action: ${out.next_action}`
+    + (out.targetWeights ? ` target=${JSON.stringify(out.targetWeights)}` : ''));
+  if (out.finalText) log(`  SUMMARY  ${out.finalText}`);
+  log('  DRY-RUN: analyzer is read-only; no wallet capability is reachable from its tool subset.');
+}
+
+main().catch((err) => {
+  console.error('finbot-dispatch: error', err); // eslint-disable-line no-console
+  process.exit(1);
+});

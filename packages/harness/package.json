@@ -9,6 +9,7 @@
     ".": "./index.js",
     "./loop": "./loop.js",
     "./spawn": "./spawn.js",
+    "./providers": "./providers/index.js",
     "./tools": "./tools.js",
     "./message-bus": "./message-bus/index.js",
     "./observation": "./observation/index.js",

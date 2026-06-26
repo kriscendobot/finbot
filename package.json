@@ -16,6 +16,7 @@
     "finbot": "node bin/finbot",
     "finbot-sim": "node bin/finbot-sim",
     "finbot-ooda": "node bin/finbot-ooda",
+    "finbot-dispatch": "node bin/finbot-dispatch",
     "finbot-eval": "node bin/finbot-eval",
     "finbot-elicit": "node bin/finbot-elicit"
   },
@@ -23,6 +24,7 @@
     "finbot": "bin/finbot",
     "finbot-sim": "bin/finbot-sim",
     "finbot-ooda": "bin/finbot-ooda",
+    "finbot-dispatch": "bin/finbot-dispatch",
     "finbot-eval": "bin/finbot-eval",
     "finbot-elicit": "bin/finbot-elicit"
   }
