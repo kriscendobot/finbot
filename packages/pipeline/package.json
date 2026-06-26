@@ -16,6 +16,7 @@
     "./executor": "./executor.js",
     "./rebalance": "./rebalance.js",
     "./cap-attenuation": "./cap-attenuation.js",
+    "./signing-worker": "./signing-worker.js",
     "./ooda-cycle": "./ooda-cycle.js",
     "./driver-compute": "./driver-compute.js",
     "./agent-tools": "./agent-tools.js",
@@ -25,8 +26,14 @@
     "test": "node --test test/*.test.js"
   },
   "dependencies": {
+    "@endo/captp": "^4.5.1",
+    "@endo/eventual-send": "^1.5.0",
+    "@endo/exo": "^1.7.0",
+    "@endo/pass-style": "^1.8.1",
+    "@endo/patterns": "^1.9.1",
     "@finbot/harness": "0.0.0",
-    "@finbot/simulator": "0.0.0"
+    "@finbot/simulator": "0.0.0",
+    "ses": "^2.2.0"
   },
   "engines": {
     "node": ">=20"

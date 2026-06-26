@@ -26,10 +26,14 @@ export {
 export {
   CapabilityError, CAPABILITY_MAP, LIVE_ONLY_CAPS,
   makeWalletCapability, attenuateForRole, runInAttenuatedCompartment,
+  makeSeededRandom, buildRolePolicy, makeRoleCompartment, evaluateInRoleCompartment,
 } from './cap-attenuation.js';
 export {
   SUBSTRATES, selectSubstrate, routeResolverFor, stepHasRealRoute,
 } from './substrates.js';
+export {
+  makeSigningWorkerBootstrap, connectSigningWorkerInProcess, spawnSigningWorker,
+} from './signing-worker.js';
 export { runOodaCycle } from './ooda-cycle.js';
 export { makeDryRunCompute, deriveSeed } from './driver-compute.js';
 export { pipelineToolRegistry, PIPELINE_TOOL_NAMES } from './agent-tools.js';
