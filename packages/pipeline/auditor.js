@@ -14,6 +14,7 @@
 
 import { hashProposal } from './planner.js';
 import { navOf } from './rebalance.js';
+import { stepHasRealRoute } from './substrates.js';
 
 /**
  * @typedef {object} AuditVerdict
@@ -124,15 +125,24 @@ export function audit(input, config = {}) {
   }
   results.push({ name: 'pricing-freshness', pass: freshPass, detail: freshDetail });
 
-  // 6. No off-chain dependencies in the on-chain steps. In the simulator each
-  // step references only asset/amount/price; success is determined by the
-  // (simulated) venue, not by any off-chain artifact. Structurally satisfied;
-  // the real-substrate auditor verifies place/route reachability here.
-  results.push({
-    name: 'no-offchain-step-deps',
-    pass: true,
-    detail: 'sim venue: each step is self-contained (asset, qty, price); off-chain artifacts are inputs, not preconditions',
-  });
+  // 6. Place/route reachability. On the sim substrate each step is
+  // self-contained (asset, qty, price) and the venue is implicit, so the
+  // invariant is structurally satisfied. On a real substrate (Path A/C) every
+  // step must carry a resolved place/route; a step still missing its venue
+  // mapping (or naming an unknown place) is not reachable and fails the gate.
+  // A route that only awaits deploy-config detail (pool addresses, GMP
+  // channels) is reachable: filling it is a later, separately authorized step.
+  const realRouteSteps = proposal.steps.filter((s) => s.route && typeof s.route === 'object');
+  let routePass = true;
+  let routeDetail = 'sim venue: each step is self-contained (asset, qty, price); venue is implicit';
+  if (realRouteSteps.length > 0) {
+    const unreachable = realRouteSteps.filter((s) => !stepHasRealRoute(s));
+    routePass = unreachable.length === 0;
+    routeDetail = routePass
+      ? `all ${realRouteSteps.length} step(s) carry a reachable ${proposal.substrate || 'substrate'} place/route`
+      : `${unreachable.length} step(s) have an unresolved place/route (unmapped or unknown venue)`;
+  }
+  results.push({ name: 'place-route-reachability', pass: routePass, detail: routeDetail });
 
   const failed = results.filter((r) => !r.pass).map((r) => r.name);
   return {

@@ -71,6 +71,9 @@ export function computeTargetBalances(nav, targetWeights) {
  * @param {number} [bounds.concentrationCapPct]   per-asset post-move weight cap (default 0.80)
  * @param {number} [bounds.minStepNotional]       skip dust steps below this (default 1)
  * @param {number} [bounds.gasPerStep]            flat estimated gas per step, quote units (default 0)
+ * @param {(step: {asset:string, side:string, source:string, dest:string}) => (object|string)} [bounds.routeResolver]
+ *        per-step route resolver (from `substrates.js`); default stamps the
+ *        `'sim:single-venue'` placeholder for the paper-portfolio dry-run.
  * @returns {{ steps: Array<object>, clamped: boolean, projectedBalances: Record<string, number>, projectedCash: number }}
  */
 export function deriveSteps(snapshot, prices, targetWeights, bounds = {}) {
@@ -80,6 +83,10 @@ export function deriveSteps(snapshot, prices, targetWeights, bounds = {}) {
   const concentrationCapPct = bounds.concentrationCapPct != null ? bounds.concentrationCapPct : 0.80;
   const minStepNotional = bounds.minStepNotional != null ? bounds.minStepNotional : 1;
   const gasPerStep = bounds.gasPerStep || 0;
+  // Default resolver preserves the original sim placeholder, so callers that do
+  // not select a substrate are unchanged. A substrate-aware planner passes a
+  // resolver that fills the step's real place/route (see `substrates.js`).
+  const routeResolver = bounds.routeResolver || (() => 'sim:single-venue');
 
   const nav = navOf(snapshot, prices);
   const target = computeTargetBalances(nav, targetWeights);
@@ -137,7 +144,7 @@ export function deriveSteps(snapshot, prices, targetWeights, bounds = {}) {
       const finalQty = notional / price;
       cash -= notional;
       balances[asset] = (balances[asset] || 0) + finalQty;
-      steps.push(makeStep({ source: quote, dest: asset, side, asset, qty: finalQty, price, notional, gas: gasPerStep }));
+      steps.push(makeStep({ source: quote, dest: asset, side, asset, qty: finalQty, price, notional, gas: gasPerStep }, routeResolver));
       cumulative += notional;
     } else {
       const have = balances[asset] || 0;
@@ -146,7 +153,7 @@ export function deriveSteps(snapshot, prices, targetWeights, bounds = {}) {
       if (notional < minStepNotional) continue;
       cash += notional;
       balances[asset] = have - qty;
-      steps.push(makeStep({ source: asset, dest: quote, side, asset, qty, price, notional, gas: gasPerStep }));
+      steps.push(makeStep({ source: asset, dest: quote, side, asset, qty, price, notional, gas: gasPerStep }, routeResolver));
       cumulative += notional;
     }
   }
@@ -154,7 +161,7 @@ export function deriveSteps(snapshot, prices, targetWeights, bounds = {}) {
   return { steps, clamped, projectedBalances: balances, projectedCash: cash };
 }
 
-function makeStep({ source, dest, side, asset, qty, price, notional, gas }) {
+function makeStep({ source, dest, side, asset, qty, price, notional, gas }, routeResolver) {
   return {
     source,
     dest,
@@ -164,11 +171,12 @@ function makeStep({ source, dest, side, asset, qty, price, notional, gas }) {
     price,
     notional,
     estGas: gas,
-    // Where internal ymax detail would refine the step: on a real Agoric
-    // portfolio this carries the place identifier (Aave/Compound/USDN via
-    // Axelar GMP) and a pending-tx handle. The simulator has a single
-    // in-memory venue, so the route is implicit. Flagged, not fabricated.
-    route: 'sim:single-venue',
+    // The step's place / route on the target substrate. The default resolver
+    // stamps `'sim:single-venue'` (the paper-portfolio dry-run has one
+    // in-memory venue); a substrate-aware planner passes a resolver from
+    // `substrates.js` that fills the real Agoric pool place (Aave/Compound/USDN
+    // via Axelar GMP), the EVM chain+protocol pool, or the Solana program.
+    route: routeResolver({ source, dest, side, asset }),
   };
 }
 

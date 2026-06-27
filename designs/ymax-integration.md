@@ -1,7 +1,7 @@
 ---
 created: 2026-06-17
-updated: 2026-06-17
-author: architect
+updated: 2026-06-27
+author: architect, gardener
 status: stub
 ---
 
@@ -78,3 +78,19 @@ Where internal ymax detail would refine a step (the place identifier for Aave/Co
 Open for Phase 2 (posted as `finbot-substrate-adapters`): adopt `computeTargetBalances` / `plan-solve` directly vs. keep the mirror; the executor's per-substrate signing adapters (Agoric smart wallet for Path A, EVM/Solana for Path C).
 
 Status: Path B landed against the simulator. Phase 2 substrate work is decomposed into follow-on jobs.
+
+## Notes from the field (2026-06-27)
+
+Phase 2 substrate adapters landed behind the live gate (`finbot-substrate-adapters` job). `packages/pipeline/substrates.js` is the per-substrate layer that fills the step `route` with a real place identifier and builds the would-be transaction:
+
+- **Path A (Agoric):** `SUBSTRATES.agoric` resolves each step to a public portfolio-contract pool place (`USDN`, `Aave_Arbitrum`, `Compound_Optimism`, ...) with its chain, protocol, and transport (`axelar-gmp` for the EVM pools, `ica-noble` for USDN). `buildTransaction` emits a `rebalanceTx`-shaped continuing-offer (`invitationMakerName: 'Rebalance'`) whose flows move quote value between the Agoric-local cash place and each pool place. The live path (`signAndSubmit`) submits through a smart-wallet capability (`makeSigningSmartWalletKit` shape: `sign` then `submit`), which `cap-attenuation.js` vends only to a `--live`-authorized executor.
+- **Path C (EVM):** `SUBSTRATES.evm` resolves to `evm:<chain>:<protocol>` (e.g. `evm:Base:Aave-v3`) and builds an approve+supply / withdraw call batch.
+- **Path C (Solana):** `SUBSTRATES.solana` resolves to `solana:<cluster>:<program>` and builds an instruction batch.
+
+The planner takes `substrate` + `venueMap` (asset -> place) and stamps each step's route via a resolver; the default substrate stays `sim` so the paper-portfolio dry-run is unchanged (route remains `'sim:single-venue'`). The auditor's invariant #6 became a real `place-route-reachability` check: a step whose route is still unmapped or names an unknown venue fails the gate; a route that only awaits deploy-config detail is reachable.
+
+**Adopt vs. mirror decision (Path A open question):** kept the mirror. `computeTargetBalances` and the solver stay reimplemented in `rebalance.js`; the substrate layer borrows only the *place/route vocabulary and the offer shape* from the public portfolio-contract, not the package. Importing `@agoric/portfolio-api` would pull the Agoric dependency tree into a substrate-agnostic pipeline for two small, stable functions. Revisit if/when finbot runs inside an Agoric vat.
+
+**Provenance discipline.** Every place identifier, transport, and offer field is drawn from the PUBLIC portfolio-contract / portfolio-api / `agoric-to-axelar-local` design surface. Concrete deploy/runtime values that live only in the internal ymax-web / deployment config are carried per-route in `needs_internal_detail` (the continuing-offer id, pool contract addresses, Axelar GMP channel ids, Solana program ids, brand-scaled amounts), flagged rather than fabricated, so a later live-enable job fills them from the real config. No adapter constructs a real signer, RPC client, or key; live signing stays gated behind explicit per-job maintainer authorization.
+
+Proven by `packages/pipeline/test/substrates.test.js`: real routes on all three substrates, the rebalanceTx / call-batch / instruction-batch builders, the dry-run executor building the tx while the wallet stays untouched (the fake signer is never called), the live-without-authorization refusal, and `signAndSubmit` failing closed without a wallet capability.

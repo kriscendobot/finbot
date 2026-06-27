@@ -27,6 +27,9 @@ export {
   CapabilityError, CAPABILITY_MAP, LIVE_ONLY_CAPS,
   makeWalletCapability, attenuateForRole, runInAttenuatedCompartment,
 } from './cap-attenuation.js';
+export {
+  SUBSTRATES, selectSubstrate, routeResolverFor, stepHasRealRoute,
+} from './substrates.js';
 export { runOodaCycle } from './ooda-cycle.js';
 export { makeDryRunCompute, deriveSeed } from './driver-compute.js';
 export { pipelineToolRegistry, PIPELINE_TOOL_NAMES } from './agent-tools.js';

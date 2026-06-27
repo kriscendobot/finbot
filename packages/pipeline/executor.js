@@ -14,6 +14,7 @@
 import { applyStepsToPortfolio, navOf } from './rebalance.js';
 import { runInAttenuatedCompartment } from './cap-attenuation.js';
 import { audit as runAudit } from './auditor.js';
+import { selectSubstrate } from './substrates.js';
 
 /**
  * @typedef {object} ExecutionResult
@@ -24,7 +25,10 @@ import { audit as runAudit } from './auditor.js';
  * @property {Array<object>} steps_completed
  * @property {object|null} failed_step
  * @property {{ cash: number, balances: Record<string, number>, equity: number }} post_execution_balances
- * @property {object} [refusal]          present if the executor refused (e.g. live without authorization)
+ * @property {string} [substrate]        the substrate the would-be transaction was built for
+ * @property {object} [prepared_transaction]  the unsigned would-be transaction (dry-run proof)
+ * @property {object|null} [submission]  live submission result (null in dry-run; never reached in this pipeline)
+ * @property {object} [refusal]          present if the executor refused (live without authorization)
  * @property {object} fire_time_audit    the re-run audit verdict
  */
 
@@ -58,6 +62,9 @@ export async function execute(input, config = {}) {
       steps_completed: [],
       failed_step: null,
       post_execution_balances: snapshotWithEquity(input.world, input.world.priceFeed.current()),
+      substrate: config.substrate || input.proposal.substrate || 'sim',
+      prepared_transaction: null,
+      submission: null,
       refusal: { reason: 'live mode requires live_authorized: true; refusing to read keystore or sign' },
       fire_time_audit: null,
     };
@@ -87,7 +94,7 @@ export async function execute(input, config = {}) {
     parentCaps: input.parentCaps || {},
     live,
     walletRevoke: input.parentCaps && input.parentCaps.__walletRevoke,
-    fn: (caps) => {
+    fn: async (caps) => {
       const walletPresent = caps.wallet !== undefined;
       if (!live && walletPresent) {
         throw new Error('invariant violated: wallet capability vended to a dry-run executor');
@@ -106,15 +113,39 @@ export async function execute(input, config = {}) {
       const sandboxPortfolio = input.world.portfolio.clone();
       const { applied, skipped } = applyStepsToPortfolio(sandboxPortfolio, prices, input.proposal.steps, input.currentTick);
       const post = sandboxPortfolio.markToMarket(prices);
+
+      // Build the would-be substrate transaction from the planner's steps. This
+      // is pure (no wallet, no network) and proves the step routes resolve into
+      // a real transaction body. The substrate is the one the planner targeted
+      // (proposal.substrate), overridable per fire via config.substrate.
+      const adapter = selectSubstrate(config.substrate || input.proposal.substrate || 'sim');
+      const prepared_transaction = adapter.buildTransaction({
+        steps: input.proposal.steps,
+        account: config.account,
+        nav: navOf(input.world.portfolio.markToMarket(prices), prices),
+      });
+
+      // LIVE (gated, never reached in this pipeline): sign + submit through the
+      // wallet capability the executor was vended. In dry-run the wallet cap is
+      // absent, so we never sign and walletTouched stays false.
+      let submission = null;
+      if (live && walletPresent) {
+        submission = await adapter.signAndSubmit(prepared_transaction, caps.wallet);
+      }
+
       return {
         // In dry-run, the wallet was never present, so it was never touched.
         walletTouched: live ? walletPresent : false,
         steps_completed: applied.map((s) => ({
           side: s.side, asset: s.asset, qty: s.qty, price: s.executedPrice, notional: s.notional,
+          route: s.route,
           simulated_effect: `${s.side} ${s.qty.toFixed(4)} ${s.asset} -> cash ${post.cash.toFixed(2)}`,
         })),
         failed_step: skipped.length > 0 ? { ...skipped[0] } : null,
         post: { cash: post.cash, balances: post.balances, equity: post.equity },
+        substrate: adapter.id,
+        prepared_transaction,
+        submission,
       };
     },
   });
@@ -127,6 +158,9 @@ export async function execute(input, config = {}) {
     steps_completed: result.steps_completed,
     failed_step: result.failed_step,
     post_execution_balances: result.post,
+    substrate: result.substrate,
+    prepared_transaction: result.prepared_transaction,
+    submission: result.submission || null,
     fire_time_audit: fireTimeAudit,
   };
 }

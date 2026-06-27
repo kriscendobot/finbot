@@ -17,6 +17,7 @@
 import crypto from 'node:crypto';
 
 import { deriveSteps, navOf } from './rebalance.js';
+import { selectSubstrate, routeResolverFor } from './substrates.js';
 
 /**
  * Canonicalize the plan body and hash it. Only the fields that define the
@@ -55,6 +56,7 @@ function round(x) {
  * @property {object} bounds
  * @property {boolean} clamped         a risk bound clamped at least one step
  * @property {number} nav
+ * @property {string} substrate        target substrate id the steps' routes resolve against
  * @property {string} dry_run_summary
  * @property {object} [breach]         present when a bound made the plan empty/partial
  */
@@ -69,12 +71,20 @@ function round(x) {
  * @param {object} [input.bounds]                              risk bounds (see deriveSteps)
  * @param {string[]} [input.cited_forecasts]                   forecast entry ids/paths
  * @param {string[]} [input.cited_analyses]                    analysis entry ids/paths
+ * @param {string} [input.substrate]                           target substrate id ('sim' | 'agoric' | 'evm' | 'solana'); default 'sim'
+ * @param {Record<string,string>} [input.venueMap]            asset -> venue/place id for the chosen substrate
  * @returns {Proposal}
  */
 export function plan(input) {
   const bounds = input.bounds || {};
   const nav = navOf(input.portfolio, input.prices);
-  const { steps, clamped } = deriveSteps(input.portfolio, input.prices, input.targetWeights, bounds);
+  // Resolve the target substrate so each emitted step carries a real route
+  // (Path A Agoric pool place, Path C EVM/Solana venue) instead of the
+  // `sim:single-venue` placeholder. Defaults to the simulator substrate, so a
+  // caller that does not select one is unchanged.
+  const substrate = selectSubstrate(input.substrate);
+  const routeResolver = routeResolverFor(substrate, input.venueMap || {});
+  const { steps, clamped } = deriveSteps(input.portfolio, input.prices, input.targetWeights, { ...bounds, routeResolver });
   const proposal_hash = hashProposal(steps);
 
   const cited_forecasts = input.cited_forecasts || [];
@@ -97,6 +107,7 @@ export function plan(input) {
     bounds,
     clamped,
     nav,
+    substrate: substrate.id,
     dry_run_summary,
   };
   return proposal;
