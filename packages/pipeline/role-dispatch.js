@@ -34,6 +34,7 @@ import crypto from 'node:crypto';
 import {
   pipelineToolRegistry, PIPELINE_TOOL_NAMES,
   plannerToolRegistry, PLANNER_TOOL_NAMES,
+  auditorToolRegistry, AUDITOR_TOOL_NAMES,
 } from './agent-tools.js';
 
 /**
@@ -371,4 +372,176 @@ function summarizeProposalFromToolResults(messages) {
     }
   }
   return 'Planner decide complete.';
+}
+
+// --- ACT stage (a): inference-driven auditor dispatch -----------------------
+
+/**
+ * Compose the auditor's dispatch brief from the planner's proposal, the
+ * forecast that justified it, the pre-trade portfolio snapshot, a price book,
+ * the freshness clock, and the cited oracle readings. The brief embeds the
+ * structured inputs as JSON and tells the subagent to adjudicate via the
+ * deterministic tool rather than checking the invariants by hand.
+ *
+ * @param {object} input
+ * @returns {string}
+ */
+export function auditorBrief(input) {
+  const payload = {
+    proposal: input.proposal || null,
+    forecast: input.forecast || null,
+    portfolio: input.portfolio || { cash: 0, balances: {} },
+    prices: input.prices || {},
+    currentTick: input.currentTick != null ? input.currentTick : null,
+    oracleReadings: input.oracleReadings || [],
+  };
+  return [
+    'The planner emitted a rebalance proposal. Adjudicate it against the standing pre-execution',
+    'invariant set BEFORE any execution could fire. You are the gate: an approved verdict is a',
+    'precondition for execution, never an authorization to trade. You are read-only — you never',
+    'sign, send, or mutate the proposal.',
+    '',
+    'Use the `audit_proposal` tool for the adjudication — pass it the proposal, the forecast, the',
+    'pre-trade portfolio snapshot, the price book, the current tick, and the cited oracle readings',
+    'below. Do not check the invariants (citation completeness, risk bounds, tail-risk floor, hash',
+    'reproducibility, pricing freshness, place/route reachability) by hand; the auditor recomputes',
+    'the planner hash, so the verdict is the deterministic function of the inputs.',
+    '',
+    'Then report the verdict (approved / rejected) and any failed invariants.',
+    '',
+    'Inputs (JSON):',
+    JSON.stringify(payload, null, 2),
+  ].join('\n');
+}
+
+/**
+ * Dispatch the auditor as an inference-driven subagent over the planner's
+ * proposal, with the audit-phase deterministic gate available as a tool. The
+ * stage's product — the AuditVerdict — is extracted from the tool-execution
+ * events, so the inference-driven path and the headless path yield the same
+ * verdict.
+ *
+ * @param {object} input  { proposal, forecast, portfolio, prices, currentTick?, oracleReadings?, config? }
+ * @param {object} deps
+ * @param {Function} deps.spawn        the harness `spawn` function
+ * @param {string}   deps.finbotRoot   root holding `roles/<role>/AGENT.md`
+ * @param {Function} [deps.llm]        injected LLM; omit to use the harness stub (offline)
+ * @param {Record<string, object>} [deps.tools]  tool registry (default: auditor audit tools)
+ * @param {string[]} [deps.capabilities]         tool subset the auditor may call (default: auditor tool names)
+ * @returns {Promise<object>} { handle, status, verdict, adjudicated, toolCalls, finalText }
+ */
+export async function dispatchAuditor(input, deps) {
+  if (!deps || typeof deps.spawn !== 'function') {
+    throw new Error('dispatchAuditor: deps.spawn (the harness spawn function) is required');
+  }
+  const tools = deps.tools || auditorToolRegistry();
+  const capabilities = deps.capabilities || AUDITOR_TOOL_NAMES;
+
+  const handle = await deps.spawn(
+    {
+      role: 'auditor',
+      brief: auditorBrief(input),
+      capabilities,
+      llm: deps.llm,
+    },
+    { finbotRoot: deps.finbotRoot, tools },
+  );
+  await handle.done;
+
+  const toolCalls = extractToolCalls(handle.events);
+  const verdict = lastAuditResult(handle.events);
+
+  return {
+    handle,
+    status: handle.status,
+    verdict,
+    adjudicated: verdict != null,
+    toolCalls,
+    finalText: handle.result ? handle.result.finalText : '',
+  };
+}
+
+/**
+ * Find the AuditVerdict produced by the most recent successful `audit_proposal`
+ * tool call (the audit stage's structured product).
+ *
+ * @param {Array<object>} events
+ * @returns {object|null}
+ */
+export function lastAuditResult(events) {
+  for (let i = (events || []).length - 1; i >= 0; i -= 1) {
+    const e = events[i];
+    if (e.type !== 'tool_execution_end' || !e.toolCall || e.toolCall.name !== 'audit_proposal') continue;
+    const result = e.result;
+    if (!result || result.isError) continue;
+    const jsonBlock = (result.content || []).find((c) => c && c.type === 'json');
+    if (jsonBlock) return jsonBlock.value;
+  }
+  return null;
+}
+
+/**
+ * A deterministic, offline stand-in for an inference-driven auditor LLM: it
+ * calls `audit_proposal` with the real proposal + forecast on turn 0, then ends
+ * with a one-line summary on turn 1. The act-stage (gate) counterpart to
+ * {@link makeScriptedPlannerLlm} — exercises the same dispatch wiring as a real
+ * provider with no network call.
+ *
+ * @param {object} input  same shape passed to {@link dispatchAuditor}
+ * @returns {Function} an `llm` matching the spawn contract
+ */
+export function makeScriptedAuditorLlm(input) {
+  return async function scriptedAuditorLlm(args) {
+    if (args.turn === 0 && args.tools && args.tools.audit_proposal) {
+      return {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'Adjudicating the proposal via the deterministic auditor gate.' },
+          {
+            type: 'toolCall',
+            id: crypto.randomBytes(4).toString('hex'),
+            name: 'audit_proposal',
+            arguments: {
+              proposal: input.proposal || null,
+              forecast: input.forecast || null,
+              portfolio: input.portfolio || { cash: 0, balances: {} },
+              prices: input.prices || {},
+              currentTick: input.currentTick,
+              oracleReadings: input.oracleReadings || [],
+              config: input.config,
+            },
+          },
+        ],
+        stopReason: 'tool_use',
+        timestamp: Date.now(),
+      };
+    }
+    const summary = summarizeVerdictFromToolResults(args.messages);
+    return {
+      role: 'assistant',
+      content: [{ type: 'text', text: summary }],
+      stopReason: 'end_turn',
+      timestamp: Date.now(),
+    };
+  };
+}
+
+/**
+ * @param {Array<object>} messages
+ * @returns {string}
+ */
+function summarizeVerdictFromToolResults(messages) {
+  for (let i = (messages || []).length - 1; i >= 0; i -= 1) {
+    const m = messages[i];
+    if (m.role !== 'toolResult') continue;
+    const jsonBlock = (m.content || []).find((c) => c && c.type === 'json');
+    if (jsonBlock && jsonBlock.value && jsonBlock.value.verdict) {
+      const v = jsonBlock.value;
+      return `Auditor gate complete: verdict=${v.verdict}`
+        + (v.failed_invariants && v.failed_invariants.length > 0
+          ? `, failed=${v.failed_invariants.join(', ')}`
+          : '');
+    }
+  }
+  return 'Auditor gate complete.';
 }

@@ -27,6 +27,7 @@ import { toolResult } from '@finbot/harness/schemas';
 import { observeOpportunities } from './oracle-watcher.js';
 import { analyze, realizedVolatility } from './analyzer.js';
 import { plan } from './planner.js';
+import { audit } from './auditor.js';
 
 /**
  * Build the orient-phase pipeline tool registry (keyed by tool name), suitable
@@ -63,6 +64,96 @@ export function plannerToolRegistry() {
 
 /** Names of the tools in {@link plannerToolRegistry}, for capability subsets. */
 export const PLANNER_TOOL_NAMES = ['propose_rebalance'];
+
+/**
+ * Build the audit-phase (auditor) tool registry: the deterministic `audit`
+ * gate exposed as `audit_proposal`, so an inference-driven auditor subagent can
+ * reason over the planner's proposal and the forecast that justified it, then
+ * delegate the invariant checks (citation completeness, risk bounds, tail-risk
+ * floor, hash reproducibility, pricing freshness, place/route reachability) to
+ * the deterministic auditor rather than adjudicating them by hand. Strictly
+ * read-only — the auditor recomputes and returns a verdict; a verdict is a
+ * precondition for a live executor dispatch, never an authorization, and no
+ * wallet capability is reachable from the audit-phase tool subset.
+ *
+ * @returns {Record<string, object>} a registry of `assertToolDef`-shaped tools
+ */
+export function auditorToolRegistry() {
+  const tools = [auditProposalTool()];
+  const registry = {};
+  for (const t of tools) registry[t.name] = t;
+  return registry;
+}
+
+/** Names of the tools in {@link auditorToolRegistry}, for capability subsets. */
+export const AUDITOR_TOOL_NAMES = ['audit_proposal'];
+
+/**
+ * `audit` (the pre-execution invariant gate) as a tool. This is the
+ * deterministic adjudication the design asks an inference-driven auditor to
+ * call: given the planner's proposal, the forecast that justified it, the
+ * pre-trade portfolio snapshot, the price book, the freshness clock, and the
+ * cited oracle readings, it recomputes every standing invariant and returns the
+ * approved/rejected verdict naming any failed invariants. Read-only — the
+ * auditor never mutates the proposal and never signs; no wallet is reachable.
+ * The auditor reproduces the planner's hash, so the verdict is a deterministic
+ * function of its inputs.
+ */
+function auditProposalTool() {
+  return {
+    name: 'audit_proposal',
+    description:
+      'Adjudicate a planner proposal against the standing pre-execution invariant set. Given the '
+      + "proposal (with its ordered steps and proposal_hash), the forecaster's terminal-equity "
+      + 'projection, the pre-trade portfolio snapshot, the latest price book, the current tick '
+      + '(freshness clock), and the cited oracle readings, returns a verdict '
+      + "('approved' | 'rejected'), the per-invariant results (citation-completeness, "
+      + 'risk-bound-compliance, tail-risk-floor, reproducibility, pricing-freshness, '
+      + 'place-route-reachability), and the names of any failed invariants. Use this to adjudicate '
+      + 'the proposal rather than checking the invariants by hand — the auditor recomputes the '
+      + 'proposal hash, so the verdict is the deterministic function of the inputs. Read-only: an '
+      + 'approved verdict is a precondition for execution, never an authorization to trade.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        proposal: { type: 'object', description: 'the planner proposal: { steps, proposal_hash, cited_forecasts, cited_analyses, substrate? }' },
+        forecast: { type: 'object', description: 'the forecaster projection carrying p05Equity (the tail-risk anchor)' },
+        portfolio: { type: 'object', description: 'pre-trade snapshot: { cash, balances: { ASSET: qty } }' },
+        prices: { type: 'object', description: 'latest price book { ASSET: price }' },
+        currentTick: { type: 'number', description: 'the freshness clock (cited readings must be within the staleness window of it)' },
+        oracleReadings: { type: 'array', description: 'cited oracle readings (carry observedAtTick for the freshness invariant)' },
+        config: { type: 'object', description: 'optional bounds: { maxStepPct, maxDayPct, concentrationCapPct, tailFloorPct, stalenessWindowTicks }' },
+      },
+      required: ['proposal', 'portfolio', 'prices'],
+      additionalProperties: true,
+    },
+    run: async (args) => {
+      try {
+        const verdict = audit(
+          {
+            proposal: args.proposal,
+            forecast: args.forecast,
+            portfolio: args.portfolio || { cash: 0, balances: {} },
+            prices: args.prices || {},
+            currentTick: args.currentTick,
+            oracleReadings: args.oracleReadings || [],
+          },
+          args.config || {},
+        );
+        const summary = `audit_proposal: ${verdict.verdict}`
+          + (verdict.failed_invariants.length > 0
+            ? ` (failed: ${verdict.failed_invariants.join(', ')})`
+            : ` (all ${verdict.invariant_results.length} invariants pass)`);
+        return toolResult(true, [
+          { type: 'json', value: verdict },
+          { type: 'text', text: summary },
+        ]);
+      } catch (err) {
+        return toolResult(false, [{ type: 'text', text: `audit_proposal failed: ${err.message || err}` }]);
+      }
+    },
+  };
+}
 
 /**
  * `plan` (the ymax-shaped rebalance planner) as a tool. This is the
