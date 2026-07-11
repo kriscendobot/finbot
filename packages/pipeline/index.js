@@ -36,8 +36,12 @@ export {
 } from './signing-worker.js';
 export { runOodaCycle } from './ooda-cycle.js';
 export { makeDryRunCompute, deriveSeed } from './driver-compute.js';
-export { pipelineToolRegistry, PIPELINE_TOOL_NAMES } from './agent-tools.js';
+export {
+  pipelineToolRegistry, PIPELINE_TOOL_NAMES,
+  plannerToolRegistry, PLANNER_TOOL_NAMES,
+} from './agent-tools.js';
 export {
   dispatchAnalyzer, analyzerBrief, makeScriptedAnalyzerLlm,
   extractToolCalls, lastScoringResult,
+  dispatchPlanner, plannerBrief, makeScriptedPlannerLlm, lastProposalResult,
 } from './role-dispatch.js';

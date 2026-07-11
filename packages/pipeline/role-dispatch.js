@@ -5,28 +5,36 @@
  * deterministic function call — pure automation, no LLM. This module is the
  * other half the design asks for: drive an OODA stage by **inference**, with
  * the deterministic pipeline functions available to the reasoning subagent as
- * tools. Concretely, `dispatchAnalyzer` spawns the analyzer as an LLM-shaped
- * subagent (via `@finbot/harness`'s `spawn`), hands it the oracle-watcher
- * output in its brief plus the orient-phase pipeline tools, and lets it reason
- * over the opportunities and CALL `score_opportunities` (the deterministic
- * `analyze`) as a tool. The stage's product — the scored AnalyzerResult — is
- * extracted from the tool-execution events, so the inference-driven path and
- * the headless path yield the same structured orient output.
+ * tools. Concretely, `dispatchAnalyzer` spawns the analyzer (ORIENT) as an
+ * LLM-shaped subagent (via `@finbot/harness`'s `spawn`), hands it the
+ * oracle-watcher output in its brief plus the orient-phase pipeline tools, and
+ * lets it reason over the opportunities and CALL `score_opportunities` (the
+ * deterministic `analyze`) as a tool. `dispatchPlanner` is the DECIDE-stage
+ * counterpart: it hands the planner subagent the analyzer's target weights and
+ * a forecast, plus the decide-phase tools, and lets it reason then CALL
+ * `propose_rebalance` (the deterministic `plan`) to emit the ymax-shaped
+ * proposal. Each stage's product — the scored AnalyzerResult, the hashed
+ * Proposal — is extracted from the tool-execution events, so the
+ * inference-driven path and the headless path yield the same structured output.
  *
  * The LLM is injected. With no `llm`, `spawn` uses its deterministic stub, so
  * tests stay offline; pass `harness.providers.makeAnthropicLlm()` for real
  * inference, or `makeScriptedAnalyzerLlm(input)` for a faithful offline double
  * that calls the scoring tool with the real opportunity data.
  *
- * DRY-RUN by construction: this drives the ORIENT stage only (analyzer is
- * read-only; it scores, it does not trade). No wallet capability is reachable
- * from the analyzer's tool subset. Live execution stays gated behind the
- * executor per `designs/cap-attenuation.md`.
+ * DRY-RUN by construction: this drives the ORIENT and DECIDE stages only —
+ * both are read-only (the analyzer scores, the planner proposes; neither
+ * trades). A proposal is not a signed transaction, so no wallet capability is
+ * reachable from either stage's tool subset. Live execution stays gated behind
+ * the executor per `designs/cap-attenuation.md`.
  */
 
 import crypto from 'node:crypto';
 
-import { pipelineToolRegistry, PIPELINE_TOOL_NAMES } from './agent-tools.js';
+import {
+  pipelineToolRegistry, PIPELINE_TOOL_NAMES,
+  plannerToolRegistry, PLANNER_TOOL_NAMES,
+} from './agent-tools.js';
 
 /**
  * Compose the analyzer's dispatch brief from an oracle-watcher observation and
@@ -196,4 +204,171 @@ function summarizeFromToolResults(messages) {
     }
   }
   return 'Analyzer orient complete.';
+}
+
+// --- DECIDE stage: inference-driven planner dispatch ------------------------
+
+/**
+ * Compose the planner's dispatch brief from the analyzer's target allocation, a
+ * portfolio snapshot, a price book, and the forecast/analysis citations. The
+ * brief embeds the structured inputs as JSON and tells the subagent to derive
+ * the proposal via the deterministic tool rather than by hand.
+ *
+ * @param {object} input
+ * @returns {string}
+ */
+export function plannerBrief(input) {
+  const payload = {
+    portfolio: input.portfolio || { cash: 0, balances: {} },
+    prices: input.prices || {},
+    targetWeights: input.targetWeights || {},
+    bounds: input.bounds || null,
+    cited_forecasts: input.cited_forecasts || [],
+    cited_analyses: input.cited_analyses || [],
+    substrate: input.substrate || null,
+  };
+  return [
+    'The analyzer produced a candidate target allocation. Produce a ymax-shaped rebalance proposal',
+    'that would move the portfolio toward that target without exceeding the risk bounds. You are',
+    'read-only: you emit a proposal for the auditor; you do not sign or send anything.',
+    '',
+    'Use the `propose_rebalance` tool to derive the funds-flow steps, the deterministic proposal',
+    'hash, and the dry-run summary — pass it the portfolio, the target weights, the price book, the',
+    'risk bounds, the target substrate, and the forecast/analysis citations below. Do not compose',
+    'the steps or the hash yourself; the auditor reproduces this exact hash.',
+    '',
+    'A proposal MUST cite at least one forecast and one analysis, or the auditor rejects it.',
+    '',
+    'Inputs (JSON):',
+    JSON.stringify(payload, null, 2),
+  ].join('\n');
+}
+
+/**
+ * Dispatch the planner as an inference-driven subagent over the analyzer's
+ * target allocation, with the decide-phase pipeline function available as a
+ * tool. The stage's product — the hashed ymax-shaped Proposal — is extracted
+ * from the tool-execution events.
+ *
+ * @param {object} input  { portfolio, prices, targetWeights, bounds?, cited_forecasts?, cited_analyses?, substrate?, venueMap? }
+ * @param {object} deps
+ * @param {Function} deps.spawn        the harness `spawn` function
+ * @param {string}   deps.finbotRoot   root holding `roles/<role>/AGENT.md`
+ * @param {Function} [deps.llm]        injected LLM; omit to use the harness stub (offline)
+ * @param {Record<string, object>} [deps.tools]  tool registry (default: planner decide tools)
+ * @param {string[]} [deps.capabilities]         tool subset the planner may call (default: planner tool names)
+ * @returns {Promise<object>} { handle, status, proposal, proposed, toolCalls, finalText }
+ */
+export async function dispatchPlanner(input, deps) {
+  if (!deps || typeof deps.spawn !== 'function') {
+    throw new Error('dispatchPlanner: deps.spawn (the harness spawn function) is required');
+  }
+  const tools = deps.tools || plannerToolRegistry();
+  const capabilities = deps.capabilities || PLANNER_TOOL_NAMES;
+
+  const handle = await deps.spawn(
+    {
+      role: 'planner',
+      brief: plannerBrief(input),
+      capabilities,
+      llm: deps.llm,
+    },
+    { finbotRoot: deps.finbotRoot, tools },
+  );
+  await handle.done;
+
+  const toolCalls = extractToolCalls(handle.events);
+  const proposal = lastProposalResult(handle.events);
+
+  return {
+    handle,
+    status: handle.status,
+    proposal,
+    proposed: proposal != null,
+    toolCalls,
+    finalText: handle.result ? handle.result.finalText : '',
+  };
+}
+
+/**
+ * Find the Proposal produced by the most recent successful `propose_rebalance`
+ * tool call (the decide stage's structured product).
+ *
+ * @param {Array<object>} events
+ * @returns {object|null}
+ */
+export function lastProposalResult(events) {
+  for (let i = (events || []).length - 1; i >= 0; i -= 1) {
+    const e = events[i];
+    if (e.type !== 'tool_execution_end' || !e.toolCall || e.toolCall.name !== 'propose_rebalance') continue;
+    const result = e.result;
+    if (!result || result.isError) continue;
+    const jsonBlock = (result.content || []).find((c) => c && c.type === 'json');
+    if (jsonBlock) return jsonBlock.value;
+  }
+  return null;
+}
+
+/**
+ * A deterministic, offline stand-in for an inference-driven planner LLM: it
+ * calls `propose_rebalance` with the real target allocation on turn 0, then
+ * ends with a one-line summary on turn 1. The decide-stage counterpart to
+ * {@link makeScriptedAnalyzerLlm} — exercises the same dispatch wiring as a
+ * real provider with no network call.
+ *
+ * @param {object} input  same shape passed to {@link dispatchPlanner}
+ * @returns {Function} an `llm` matching the spawn contract
+ */
+export function makeScriptedPlannerLlm(input) {
+  return async function scriptedPlannerLlm(args) {
+    if (args.turn === 0 && args.tools && args.tools.propose_rebalance) {
+      return {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'Deriving the rebalance proposal via the deterministic planner.' },
+          {
+            type: 'toolCall',
+            id: crypto.randomBytes(4).toString('hex'),
+            name: 'propose_rebalance',
+            arguments: {
+              portfolio: input.portfolio || { cash: 0, balances: {} },
+              prices: input.prices || {},
+              targetWeights: input.targetWeights || {},
+              bounds: input.bounds,
+              cited_forecasts: input.cited_forecasts || [],
+              cited_analyses: input.cited_analyses || [],
+              substrate: input.substrate,
+              venueMap: input.venueMap,
+            },
+          },
+        ],
+        stopReason: 'tool_use',
+        timestamp: Date.now(),
+      };
+    }
+    const summary = summarizeProposalFromToolResults(args.messages);
+    return {
+      role: 'assistant',
+      content: [{ type: 'text', text: summary }],
+      stopReason: 'end_turn',
+      timestamp: Date.now(),
+    };
+  };
+}
+
+/**
+ * @param {Array<object>} messages
+ * @returns {string}
+ */
+function summarizeProposalFromToolResults(messages) {
+  for (let i = (messages || []).length - 1; i >= 0; i -= 1) {
+    const m = messages[i];
+    if (m.role !== 'toolResult') continue;
+    const jsonBlock = (m.content || []).find((c) => c && c.type === 'json');
+    if (jsonBlock && jsonBlock.value && jsonBlock.value.proposal_hash) {
+      const v = jsonBlock.value;
+      return `Planner decide complete: ${v.steps.length} step(s), hash=${v.proposal_hash.slice(0, 12)}`;
+    }
+  }
+  return 'Planner decide complete.';
 }

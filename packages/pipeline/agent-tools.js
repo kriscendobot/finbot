@@ -26,6 +26,7 @@ import { toolResult } from '@finbot/harness/schemas';
 
 import { observeOpportunities } from './oracle-watcher.js';
 import { analyze, realizedVolatility } from './analyzer.js';
+import { plan } from './planner.js';
 
 /**
  * Build the orient-phase pipeline tool registry (keyed by tool name), suitable
@@ -42,6 +43,86 @@ export function pipelineToolRegistry() {
 
 /** Names of the tools in {@link pipelineToolRegistry}, for capability subsets. */
 export const PIPELINE_TOOL_NAMES = ['score_opportunities', 'realized_volatility', 'observe_opportunities'];
+
+/**
+ * Build the decide-phase (planner) tool registry: the deterministic `plan`
+ * function exposed as `propose_rebalance`, so an inference-driven planner
+ * subagent can reason over the analyzer's target allocation and the forecast,
+ * then delegate the funds-flow-step derivation and hashing to the deterministic
+ * planner rather than composing the ymax-shaped proposal by hand. Read-only —
+ * a proposal is not a signed transaction; no wallet capability is reachable.
+ *
+ * @returns {Record<string, object>} a registry of `assertToolDef`-shaped tools
+ */
+export function plannerToolRegistry() {
+  const tools = [proposeRebalanceTool()];
+  const registry = {};
+  for (const t of tools) registry[t.name] = t;
+  return registry;
+}
+
+/** Names of the tools in {@link plannerToolRegistry}, for capability subsets. */
+export const PLANNER_TOOL_NAMES = ['propose_rebalance'];
+
+/**
+ * `plan` (the ymax-shaped rebalance planner) as a tool. This is the
+ * deterministic proposal-derivation the design asks an inference-driven
+ * planner to call: given the portfolio, the analyzer's target weights, a price
+ * book, risk bounds, and forecast/analysis citations, it returns the ordered
+ * funds-flow steps, the content hash, and the dry-run summary. Read-only — the
+ * planner emits a proposal; it never signs, so no wallet capability is reachable.
+ */
+function proposeRebalanceTool() {
+  return {
+    name: 'propose_rebalance',
+    description:
+      'Derive a ymax-shaped rebalance proposal. Given the current portfolio snapshot, the target '
+      + 'weights (from the analyzer), the latest price book, optional risk bounds and target '
+      + 'substrate, and citations of the forecasts/analyses that justify the move, returns the '
+      + 'ordered funds-flow steps, a deterministic proposal_hash over them, whether a risk bound '
+      + 'clamped a step, the NAV, and a human-readable dry_run_summary. Use this to compose the '
+      + 'proposal rather than deriving the steps and hash by hand — the auditor reproduces this '
+      + 'exact hash, so the plan must be the deterministic function of its inputs.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        portfolio: { type: 'object', description: 'current snapshot: { cash, balances: { ASSET: qty }, quoteCurrency? }' },
+        prices: { type: 'object', description: 'latest price book { ASSET: price }' },
+        targetWeights: { type: 'object', description: 'desired allocation { ASSET: weight } (from the analyzer)' },
+        bounds: { type: 'object', description: 'optional risk bounds: { maxStepFractionOfNav, maxWeightPerAsset, … }' },
+        cited_forecasts: { type: 'array', description: 'forecaster entry ids/paths that justify the plan' },
+        cited_analyses: { type: 'array', description: 'analyzer entry ids/paths that justify the plan' },
+        substrate: { type: 'string', description: "target substrate id ('sim' | 'agoric' | 'evm' | 'solana'); default 'sim'" },
+        venueMap: { type: 'object', description: 'optional asset -> venue/place id for the chosen substrate' },
+      },
+      required: ['portfolio', 'prices', 'targetWeights'],
+      additionalProperties: true,
+    },
+    run: async (args) => {
+      try {
+        const proposal = plan({
+          portfolio: args.portfolio || { cash: 0, balances: {} },
+          prices: args.prices || {},
+          targetWeights: args.targetWeights || {},
+          bounds: args.bounds,
+          cited_forecasts: args.cited_forecasts,
+          cited_analyses: args.cited_analyses,
+          substrate: args.substrate,
+          venueMap: args.venueMap,
+        });
+        const summary = `propose_rebalance: ${proposal.steps.length} step(s), `
+          + `hash=${proposal.proposal_hash.slice(0, 12)}…`
+          + (proposal.clamped ? ', clamped by a risk bound' : '');
+        return toolResult(true, [
+          { type: 'json', value: proposal },
+          { type: 'text', text: summary },
+        ]);
+      } catch (err) {
+        return toolResult(false, [{ type: 'text', text: `propose_rebalance failed: ${err.message || err}` }]);
+      }
+    },
+  };
+}
 
 /**
  * `analyze` (the analyzer's risk-adjusted scoring) as a tool. This is the

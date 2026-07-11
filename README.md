@@ -68,15 +68,21 @@ real provider (Anthropic, `claude-opus-4-8`, via `fetch`, no new dependency).
 `@finbot/pipeline` exposes the orient-phase scorers as harness tools
 (`pipelineToolRegistry`) and `dispatchAnalyzer` spawns the analyzer over an
 oracle-watcher observation so it reasons over the opportunities and **calls
-`score_opportunities` (the deterministic `analyze`) as a tool**:
+`score_opportunities` (the deterministic `analyze`) as a tool**. The DECIDE
+stage is wired the same way: `plannerToolRegistry` exposes the ymax-shaped
+planner as `propose_rebalance`, and `dispatchPlanner` spawns the planner over
+the analyzer's target allocation so it reasons then **calls `propose_rebalance`
+(the deterministic `plan`) as a tool** to emit the hashed proposal. The
+inference path reproduces the headless planner's `proposal_hash` byte-for-byte:
 
 ```
-node bin/finbot-dispatch --seed=7              # offline: deterministic scripted analyzer LLM
+node bin/finbot-dispatch --seed=7              # offline: deterministic scripted analyzer + planner LLMs
 node bin/finbot-dispatch --seed=7 --live-llm   # real inference (needs ANTHROPIC_API_KEY)
 ```
 
-This drives the ORIENT stage end-to-end in dry-run; the analyzer is read-only and
-its tool subset can reach no wallet capability.
+This drives the ORIENT and DECIDE stages end-to-end in dry-run (the planner runs
+only when the analyzer proposes a rebalance); both roles are read-only and their
+tool subsets can reach no wallet capability.
 
 Still scaffolding / follow-on work: the role `AGENT.md` briefs describe the
 LLM-dispatch form of each role (the pipeline is the computation those dispatches

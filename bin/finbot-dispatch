@@ -3,11 +3,14 @@
  * finbot-dispatch — drive one OODA stage by inference, in dry-run.
  *
  * Companion to `finbot-ooda` (which runs every stage as a deterministic
- * function with no LLM). This entry runs the ORIENT stage by **inference**: it
- * builds an oracle-watcher observation over the simulator, then dispatches the
- * analyzer as an LLM-shaped subagent that reasons over the opportunities and
- * CALLS the deterministic `score_opportunities` tool to do the scoring. The
- * stage's scored product is printed.
+ * function with no LLM). This entry runs the ORIENT and DECIDE stages by
+ * **inference**: it builds an oracle-watcher observation over the simulator,
+ * dispatches the analyzer as an LLM-shaped subagent that reasons over the
+ * opportunities and CALLS the deterministic `score_opportunities` tool, and
+ * then — when the analyzer proposes a rebalance — dispatches the planner
+ * subagent, which reasons over the target allocation and CALLS the
+ * deterministic `propose_rebalance` tool to emit the ymax-shaped proposal. Both
+ * stages' products are printed.
  *
  * Usage:
  *   finbot-dispatch                       # offline: a deterministic scripted analyzer LLM
@@ -27,8 +30,9 @@
  *   --json           print the structured result as JSON
  *   --help / -h
  *
- * DRY-RUN ONLY. The analyzer is read-only and its tool subset cannot reach a
- * wallet capability; this entry never enables live mode or reads a keystore.
+ * DRY-RUN ONLY. The analyzer and the planner are read-only and their tool
+ * subsets cannot reach a wallet capability; this entry never enables live mode
+ * or reads a keystore.
  */
 
 import process from 'node:process';
@@ -38,7 +42,10 @@ import { fileURLToPath } from 'node:url';
 import { makeWorld } from '../packages/simulator/world.js';
 import { runSimulator } from '../packages/simulator/runner.js';
 import { observeOpportunities, windowFromHistory } from '../packages/pipeline/oracle-watcher.js';
-import { dispatchAnalyzer, makeScriptedAnalyzerLlm } from '../packages/pipeline/role-dispatch.js';
+import {
+  dispatchAnalyzer, makeScriptedAnalyzerLlm,
+  dispatchPlanner, makeScriptedPlannerLlm,
+} from '../packages/pipeline/role-dispatch.js';
 import { spawn } from '../packages/harness/spawn.js';
 import { makeAnthropicLlm } from '../packages/harness/providers/anthropic.js';
 
@@ -118,6 +125,26 @@ async function main() {
 
   const dispatch = await dispatchAnalyzer(input, { spawn, finbotRoot: FINBOT_ROOT, llm });
 
+  // DECIDE: when the analyzer proposes a rebalance with a target allocation,
+  // dispatch the planner subagent over that target to emit the ymax-shaped
+  // proposal via the deterministic `propose_rebalance` tool. Read-only.
+  let planDispatch = null;
+  const targetWeights = dispatch.analysis ? dispatch.analysis.targetWeights || null : null;
+  const proposeRebalance = dispatch.analysis && dispatch.analysis.next_action === 'propose-rebalance' && targetWeights;
+  if (proposeRebalance) {
+    const planInput = {
+      portfolio: input.portfolio,
+      prices,
+      targetWeights,
+      cited_forecasts: [`oracle:seed${args.seed}`],
+      cited_analyses: [`analyzer:seed${args.seed}`],
+    };
+    const planLlm = args.liveLlm
+      ? makeAnthropicLlm(args.model ? { model: args.model } : {})
+      : makeScriptedPlannerLlm(planInput);
+    planDispatch = await dispatchPlanner(planInput, { spawn, finbotRoot: FINBOT_ROOT, llm: planLlm });
+  }
+
   const out = {
     mode: args.liveLlm ? 'inference (anthropic)' : 'inference (offline scripted)',
     status: dispatch.status,
@@ -125,13 +152,28 @@ async function main() {
     toolCalls: dispatch.toolCalls,
     scored: dispatch.scored,
     next_action: dispatch.analysis ? dispatch.analysis.next_action : null,
-    targetWeights: dispatch.analysis ? dispatch.analysis.targetWeights || null : null,
+    targetWeights,
     finalText: dispatch.finalText,
+    decide: planDispatch
+      ? {
+          status: planDispatch.status,
+          toolCalls: planDispatch.toolCalls,
+          proposed: planDispatch.proposed,
+          proposal_hash: planDispatch.proposal ? planDispatch.proposal.proposal_hash : null,
+          steps: planDispatch.proposal ? planDispatch.proposal.steps.length : 0,
+          dry_run_summary: planDispatch.proposal ? planDispatch.proposal.dry_run_summary : null,
+          finalText: planDispatch.finalText,
+        }
+      : null,
   };
 
   if (args.json) {
     // eslint-disable-next-line no-console
-    console.log(JSON.stringify({ ...out, analysis: dispatch.analysis }, null, 2));
+    console.log(JSON.stringify({
+      ...out,
+      analysis: dispatch.analysis,
+      proposal: planDispatch ? planDispatch.proposal : null,
+    }, null, 2));
   } else {
     printReport(out, args);
   }
@@ -145,6 +187,18 @@ async function main() {
     console.error('finbot-dispatch: analyzer never called the deterministic score_opportunities tool');
     process.exit(1);
   }
+  // When a rebalance was proposed, the DECIDE stage must have completed through
+  // the deterministic planner tool for the inference path to count.
+  if (planDispatch) {
+    if (planDispatch.status !== 'completed') {
+      console.error(`finbot-dispatch: planner dispatch did not complete (status=${planDispatch.status})`);
+      process.exit(1);
+    }
+    if (!planDispatch.toolCalls.includes('propose_rebalance')) {
+      console.error('finbot-dispatch: planner never called the deterministic propose_rebalance tool');
+      process.exit(1);
+    }
+  }
 }
 
 function printReport(out, args) {
@@ -157,7 +211,16 @@ function printReport(out, args) {
   log(`           next_action: ${out.next_action}`
     + (out.targetWeights ? ` target=${JSON.stringify(out.targetWeights)}` : ''));
   if (out.finalText) log(`  SUMMARY  ${out.finalText}`);
-  log('  DRY-RUN: analyzer is read-only; no wallet capability is reachable from its tool subset.');
+  if (out.decide) {
+    log(`  DECIDE   planner subagent: ${out.decide.status}`);
+    log(`           tool calls: ${out.decide.toolCalls.join(', ') || '(none)'}`);
+    log(`           proposal: ${out.decide.steps} step(s)`
+      + (out.decide.proposal_hash ? `, hash=${out.decide.proposal_hash.slice(0, 12)}…` : ''));
+    if (out.decide.dry_run_summary) log(`           dry-run: ${out.decide.dry_run_summary}`);
+  } else {
+    log('  DECIDE   (skipped — analyzer proposed no rebalance)');
+  }
+  log('  DRY-RUN: analyzer and planner are read-only; no wallet capability is reachable from their tool subsets.');
 }
 
 main().catch((err) => {
