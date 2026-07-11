@@ -41,6 +41,7 @@ export {
 } from './correlation.js';
 export { VolatilitySurface, surfaceFromPriceHistory } from './vol-surface.js';
 export { Garch11Surface, garchFromPriceHistory } from './garch.js';
+export { GjrGarch11Surface, gjrGarchFromPriceHistory } from './gjr-garch.js';
 export { slippageFill, gasCost } from './costs.js';
 export { bootstrapQuantileBands, quantileSorted } from './bootstrap.js';
 export { pathStatsOf } from './path-stats.js';

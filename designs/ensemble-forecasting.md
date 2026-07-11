@@ -150,3 +150,43 @@ plug as the empirical surface, distinguished by an `isGarch` flag:
 Still open on this axis: implied-vol surfaces (needs options-market data), leverage
 / asymmetric variants (GJR-GARCH, EGARCH), and full MLE fitting. PNG rasterization
 and far-ref vending of large forecasts remain deferred as before.
+
+## Notes from the field (2026-07-11 — GJR-GARCH leverage effect)
+
+The asymmetric branch of the GARCH axis is now closed. `packages/simulator/gjr-garch.js`
+adds `GjrGarch11Surface`, which extends the symmetric surface with the
+**leverage effect** — a large *drop* raises next-tick variance more than an
+equal-magnitude *rise*, the stylized fact symmetric GARCH(1,1) structurally
+cannot express (it keys off shock magnitude, blind to sign). The
+Glosten–Jagannathan–Runkle recursion adds one sign-gated ARCH term:
+
+    sigma^2_{t+1} = omega + (alpha + gamma * I[r_t < 0]) * r_t^2 + beta * sigma^2_t
+
+- **Drop-in, no feed change.** The surface exposes the identical
+  `isGarch`/`has`/`initialVariance`/`nextVariance(asset, varNow, shock)` interface
+  as `Garch11Surface`, and the leverage indicator keys off the sign of the very
+  standardized shock the feed already passes (`r_t = sigma_t * z_t`, sigma > 0, so
+  `sign(r_t) = sign(z_t)`). `GBMPriceFeed` drives it with zero new code; all the
+  clustering/clone/fork determinism guarantees carry over unchanged, and it draws
+  no RNG of its own.
+- **Collapse property.** `gamma = 0` reproduces symmetric GARCH byte-for-byte
+  (an asserted test), so GJR is a strict superset — the symmetric surface is the
+  no-leverage corner of the same family.
+- **Stationarity.** With a symmetric innovation the expected ARCH weight is
+  `alpha + gamma/2`, so persistence is `alpha + beta + gamma/2 < 1` and the
+  unconditional variance is `omega / (1 - alpha - beta - gamma/2)`; a
+  non-stationary request throws. Construction also rejects `alpha + gamma < 0`
+  (a down-move must never *reduce* variance).
+- **Fitting.** `gjrGarchFromPriceHistory()` fits by the same variance targeting as
+  the symmetric model (`omega = s^2 * (1 - alpha - beta - gamma/2)`), taking the
+  asymmetry gamma from config (defaults alpha=0.03, gamma=0.09, beta=0.90 — daily
+  equity/crypto shape). The unconditional variance is fit; gamma is supplied, not
+  estimated — deferred: estimating gamma from the realized down/up variance ratio,
+  EGARCH (log-variance asymmetry), and full per-asset MLE.
+
+The leverage signature is verified end-to-end: in a 6000-tick run the GJR feed's
+return-sign vs. next-tick squared-return correlation is clearly negative while the
+symmetric GARCH feed's sits near zero (test in `test/gjr-garch.test.js`).
+
+Still open on this axis: EGARCH, gamma estimation / full MLE, implied-vol surfaces.
+PNG rasterization and far-ref vending remain deferred as before.
