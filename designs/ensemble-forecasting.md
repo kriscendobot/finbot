@@ -117,3 +117,36 @@ live in `@finbot/simulator`; the pipeline `forecaster.project()` consumes them.
 
 Status: implemented (richer build). Open axes still deferred: GARCH/implied vol
 surfaces, PNG rasterization, far-ref vending of large forecasts to the analyzer.
+
+## Notes from the field (2026-07-11 — GARCH conditional-vol surface)
+
+The GARCH volatility-surface axis is now closed. `packages/simulator/garch.js`
+adds `Garch11Surface`, a *stateful* conditional-volatility surface that models
+**volatility clustering** — the property the empirical iid surface structurally
+cannot reproduce. The conditional variance evolves
+
+    sigma^2_{t+1} = omega + alpha * r_t^2 + beta * sigma^2_t
+                  = omega + (alpha * z_t^2 + beta) * sigma^2_t
+
+with persistence `alpha + beta < 1` (enforced at construction — a non-stationary
+request throws). It slots into `GBMPriceFeed` behind the same `cfg.volSurface`
+plug as the empirical surface, distinguished by an `isGarch` flag:
+
+- **State placement.** The surface holds only the immutable per-asset params; the
+  *evolving* variance lives in the feed instance (`feed.garchVar`), exactly as the
+  fixed `volatilities` config does. So one `Garch11Surface` is shared safely across
+  every child of a forecast ensemble — each `fork(seed)` starts a fresh variance
+  path from `initialVariance()` and drives it with that child's own price shocks.
+- **Zero extra RNG.** The recursion reuses the feed's *existing* per-asset price
+  shock (the same post-correlation `z_t` that moved the price), so GARCH draws no
+  numbers of its own. The determinism contract holds byte-for-byte, and a same-seed
+  `clone()` carries the evolved variance forward while a reseeded fork resets it.
+- **Fitting.** `garchFromPriceHistory()` fits by **variance targeting**: pin the
+  model's unconditional variance to the sample variance of log returns
+  (`omega = s^2 * (1 - alpha - beta)`) and take the ARCH/GARCH split from config
+  (defaults alpha=0.08, beta=0.90 — typical daily-series persistence). Deterministic,
+  no optimizer. Full per-asset MLE of (omega, alpha, beta) remains deferred.
+
+Still open on this axis: implied-vol surfaces (needs options-market data), leverage
+/ asymmetric variants (GJR-GARCH, EGARCH), and full MLE fitting. PNG rasterization
+and far-ref vending of large forecasts remain deferred as before.

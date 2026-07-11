@@ -100,6 +100,13 @@ export function gaussian(rng) {
  *     using a *separate* seeded RNG stream (so the main price-shock
  *     stream is undisturbed). Falls back to the fixed `cfg.volatilities`
  *     for any asset the surface does not cover.
+ *   - GARCH surface. Pass a `Garch11Surface` (a `volSurface` whose
+ *     `isGarch` is true) and each tick's sigma is sqrt of an evolving
+ *     conditional variance that the feed advances off the realized price
+ *     shock — modelling volatility clustering. Stateful and driven by the
+ *     price shocks, so it draws no RNG of its own; the state is per feed
+ *     instance, so a fork starts a fresh variance path. Assets the surface
+ *     does not cover fall back to `cfg.volatilities`.
  */
 export class GBMPriceFeed {
   /**
@@ -132,6 +139,19 @@ export class GBMPriceFeed {
     // price-shock stream's draw schedule independent of whether the
     // surface is in play.
     this.volRng = sfc32((this.seed ^ 0x9e3779b9) >>> 0);
+    // A GARCH surface is *stateful*: it evolves a conditional variance per
+    // asset off the realized price shocks (drawing no RNG of its own).
+    // That variance lives here, per feed instance, so every fork of an
+    // ensemble starts a fresh path from the surface's initial variance.
+    this.isGarch = !!(this.volSurface && this.volSurface.isGarch);
+    /** @type {Record<string, number> | null} */
+    this.garchVar = null;
+    if (this.isGarch) {
+      this.garchVar = {};
+      for (const a of this.assetOrder) {
+        if (this.volSurface.has(a)) this.garchVar[a] = this.volSurface.initialVariance(a);
+      }
+    }
   }
 
   /**
@@ -155,6 +175,13 @@ export class GBMPriceFeed {
       const drift = (mu - 0.5 * sigma * sigma) * this.dt;
       const diffusion = sigma * Math.sqrt(this.dt) * shocks[i];
       next[asset] = prev * Math.exp(drift + diffusion);
+      // GARCH: evolve this asset's conditional variance off the realized
+      // standardized shock (shocks[i]) that just moved its price. Done
+      // after sigmaFor consumed sigma^2_t so the recursion uses the
+      // variance that was actually in force this tick.
+      if (this.isGarch && this.garchVar[asset] != null) {
+        this.garchVar[asset] = this.volSurface.nextVariance(asset, this.garchVar[asset], shocks[i]);
+      }
     }
     this.prices = next;
     this.t += 1;
@@ -169,7 +196,13 @@ export class GBMPriceFeed {
    * @returns {number}
    */
   sigmaFor(asset) {
-    if (this.volSurface && this.volSurface.has(asset)) {
+    // GARCH surface: this tick's sigma is sqrt of the evolving conditional
+    // variance (no RNG draw — the variance is advanced in tick() off the
+    // realized shock).
+    if (this.isGarch && this.garchVar[asset] != null) {
+      return Math.sqrt(this.garchVar[asset]);
+    }
+    if (this.volSurface && !this.isGarch && this.volSurface.has(asset)) {
       return this.volSurface.sample(asset, this.volRng);
     }
     return this.volatilities[asset] != null ? this.volatilities[asset] : this.defaultVol;
@@ -206,14 +239,17 @@ export class GBMPriceFeed {
     if (opts.seed == null) {
       const draws = this.t * this.assetOrder.length * 2;
       for (let i = 0; i < draws; i += 1) copy.rng();
-      // The vol-surface stream draws once per *covered* asset per tick;
-      // resync it the same way so a same-seed clone continues the
-      // surface sampling sequence in lockstep with the price shocks.
-      if (this.volSurface) {
+      // The empirical vol-surface stream draws once per *covered* asset per
+      // tick; resync it the same way so a same-seed clone continues the
+      // surface sampling sequence in lockstep with the price shocks. A
+      // GARCH surface draws no RNG (it evolves off the price shocks), so it
+      // instead carries its evolved conditional variance forward directly.
+      if (this.volSurface && !this.isGarch) {
         const coveredCount = this.assetOrder.filter((a) => this.volSurface.has(a)).length;
         const volDraws = this.t * coveredCount;
         for (let i = 0; i < volDraws; i += 1) copy.volRng();
       }
+      if (this.isGarch) copy.garchVar = { ...this.garchVar };
     }
     return copy;
   }
