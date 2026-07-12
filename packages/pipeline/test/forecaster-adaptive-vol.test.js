@@ -142,3 +142,33 @@ test('degenerate windows fall back to the unadapted world (no throw)', () => {
   );
   assert.ok(flatProj.histogram.counts.reduce((a, b) => a + b, 0) === 40, 'a flat window still yields a full ensemble');
 });
+
+test("adaptiveVol estimate: 'mle' flows through the forecaster end to end", () => {
+  const readings = turbulentReadings(); // 14 frames -> 13 returns (>= MLE_MIN_RETURNS)
+  const fixed = project(
+    { world: calmWorld(7), targetWeights: TARGET, bounds: BOUNDS, readings },
+    { ensembleSize: 60, horizon: 12, baseSeed: 100, adaptiveVol: { kind: 'garch' } },
+  );
+  const mle = project(
+    { world: calmWorld(7), targetWeights: TARGET, bounds: BOUNDS, readings },
+    { ensembleSize: 60, horizon: 12, baseSeed: 100, adaptiveVol: { kind: 'garch', estimate: 'mle' } },
+  );
+
+  // The MLE path fits the surface (carries a volFit citing the observed window)
+  // and estimates (alpha, beta) from the data, so its persistence read differs
+  // from the fixed-split path's — proof the estimate flag reached the fitter.
+  assert.ok(mle.volFit, 'MLE projection carries a volFit');
+  assert.equal(mle.volFit.kind, 'garch');
+  assert.notEqual(mle.volFit.assets.ATOM.persistence, fixed.volFit.assets.ATOM.persistence);
+  // Variance targeting is preserved: the fitted unconditional vol still reflects
+  // the turbulent window either way.
+  assert.ok(mle.volFit.assets.ATOM.unconditionalVol > 0.04, 'MLE fit still targets the observed vol');
+
+  // Determinism: same window + seeds -> byte-identical projection.
+  const mle2 = project(
+    { world: calmWorld(7), targetWeights: TARGET, bounds: BOUNDS, readings },
+    { ensembleSize: 60, horizon: 12, baseSeed: 100, adaptiveVol: { kind: 'garch', estimate: 'mle' } },
+  );
+  assert.equal(histJson(mle), histJson(mle2));
+  assert.equal(projectionId(mle), projectionId(mle2));
+});

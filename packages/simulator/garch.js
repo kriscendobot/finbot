@@ -209,6 +209,160 @@ export function garchFromPriceHistory(priceFrames, opts = {}) {
   return new Garch11Surface(params, { floor: opts.floor });
 }
 
+// --- Variance-targeting maximum-likelihood estimation of (alpha, beta) --------
+//
+// `garchFromPriceHistory` pins the unconditional variance to the sample variance
+// but takes the ARCH/GARCH split (alpha, beta) from configuration. That models
+// *how much* the series varies but not *how it clusters* — a calm, mean-reverting
+// asset and a bursty, highly-persistent one get the same 0.08/0.90 shape. The
+// estimator below reads the clustering out of the data: holding the unconditional
+// variance pinned at the sample variance (variance targeting), it searches (alpha,
+// beta) to maximize the Gaussian likelihood of the conditional-variance recursion.
+//
+// The search is a **deterministic nested grid refinement** — a coarse grid over
+// the (alpha, beta) box, then successively finer grids around the best cell — so
+// it needs no optimizer library, draws no RNG, and returns byte-identical params
+// for identical input. It is a *light* MLE: full BFGS/Newton MLE of (omega, alpha,
+// beta) jointly is deferred; variance targeting removes omega from the search
+// (omega = s^2 * (1 - alpha - beta)) so only the two persistence coefficients are
+// fit, which is both cheaper and more stable on the short windows the OODA cycle
+// observes.
+
+const MLE_ALPHA_BOUNDS = [1e-4, 0.6];
+const MLE_BETA_BOUNDS = [0.0, 0.999];
+const MLE_MAX_PERSISTENCE = 0.9995;
+const MLE_GRID = 8;      // points per axis per refinement level
+const MLE_LEVELS = 5;    // refinement levels
+const MLE_MIN_RETURNS = 12; // below this a per-window MLE is too noisy → fixed split
+
+/**
+ * Gaussian negative log-likelihood of a variance-targeting GARCH(1,1) with the
+ * given (alpha, beta), evaluated on a demeaned return series. omega is pinned so
+ * the unconditional variance equals `sampleVar`. The conditional variance starts
+ * at the unconditional level and evolves by the GARCH recursion; each return is
+ * scored under its conditional variance. Returns +Infinity for a parameterization
+ * that makes omega non-positive or the variance collapse (so the search rejects it).
+ *
+ * @param {number[]} rets       demeaned log returns
+ * @param {number} sampleVar    sample variance the model is targeted to
+ * @param {number} alpha
+ * @param {number} beta
+ * @returns {number}            sum of per-observation NLL contributions
+ */
+function garchNegLogLik(rets, sampleVar, alpha, beta) {
+  const omega = sampleVar * (1 - alpha - beta);
+  if (!(omega > 0)) return Infinity;
+  let h = sampleVar; // start at the unconditional variance
+  let nll = 0;
+  for (let t = 0; t < rets.length; t += 1) {
+    if (!(h > 0)) return Infinity;
+    const r2 = rets[t] * rets[t];
+    nll += 0.5 * (Math.log(h) + r2 / h);
+    h = omega + alpha * r2 + beta * h;
+  }
+  return nll;
+}
+
+/**
+ * Estimate (alpha, beta) for one asset by maximizing the variance-targeting
+ * Gaussian likelihood over the demeaned returns, via deterministic nested grid
+ * refinement. Falls back to the fixed defaults when the window is too short for a
+ * per-window fit to mean anything.
+ *
+ * @param {number[]} rets       demeaned log returns
+ * @param {number} sampleVar
+ * @param {object} [opts]
+ * @param {number} [opts.alpha]  default split (fallback / seed)
+ * @param {number} [opts.beta]
+ * @returns {{ alpha: number, beta: number }}
+ */
+function estimateGarchParams(rets, sampleVar, opts = {}) {
+  const fallbackAlpha = opts.alpha != null ? opts.alpha : DEFAULT_ALPHA;
+  const fallbackBeta = opts.beta != null ? opts.beta : DEFAULT_BETA;
+  if (rets.length < MLE_MIN_RETURNS || !(sampleVar > 0)) {
+    return { alpha: fallbackAlpha, beta: fallbackBeta };
+  }
+  let aLo = MLE_ALPHA_BOUNDS[0];
+  let aHi = MLE_ALPHA_BOUNDS[1];
+  let bLo = MLE_BETA_BOUNDS[0];
+  let bHi = MLE_BETA_BOUNDS[1];
+  let best = { alpha: fallbackAlpha, beta: fallbackBeta, nll: Infinity };
+  for (let level = 0; level < MLE_LEVELS; level += 1) {
+    for (let i = 0; i <= MLE_GRID; i += 1) {
+      const alpha = aLo + ((aHi - aLo) * i) / MLE_GRID;
+      for (let j = 0; j <= MLE_GRID; j += 1) {
+        const beta = bLo + ((bHi - bLo) * j) / MLE_GRID;
+        if (alpha < 0 || beta < 0) continue;
+        if (alpha + beta > MLE_MAX_PERSISTENCE) continue;
+        const nll = garchNegLogLik(rets, sampleVar, alpha, beta);
+        // Strict `<` keeps the tie-break deterministic (first — i.e. lowest
+        // alpha then lowest beta — wins), independent of iteration platform.
+        if (nll < best.nll) best = { alpha, beta, nll };
+      }
+    }
+    if (!Number.isFinite(best.nll)) return { alpha: fallbackAlpha, beta: fallbackBeta };
+    // Refine one grid cell around the incumbent on each axis.
+    const aStep = (aHi - aLo) / MLE_GRID;
+    const bStep = (bHi - bLo) / MLE_GRID;
+    aLo = Math.max(MLE_ALPHA_BOUNDS[0], best.alpha - aStep);
+    aHi = Math.min(MLE_ALPHA_BOUNDS[1], best.alpha + aStep);
+    bLo = Math.max(MLE_BETA_BOUNDS[0], best.beta - bStep);
+    bHi = Math.min(MLE_BETA_BOUNDS[1], best.beta + bStep);
+  }
+  return { alpha: best.alpha, beta: best.beta };
+}
+
+/**
+ * Fit a GARCH(1,1) surface to a price history the same way
+ * `garchFromPriceHistory` does — variance targeting pins the unconditional
+ * variance to the sample variance — but **estimate (alpha, beta) per asset from
+ * the data** (light variance-targeting MLE) instead of taking a single fixed
+ * split for every asset. So a bursty, highly-persistent instrument and a calm,
+ * quickly mean-reverting one get different clustering shapes read from their own
+ * realized returns, not one config default imposed on both.
+ *
+ * Deterministic (grid search, no RNG; same frames → same params) and robust: an
+ * asset with too few returns for a meaningful per-window fit, or a degenerate
+ * constant-price asset, falls back to the fixed default split exactly as
+ * `garchFromPriceHistory` would. `opts.alpha` / `opts.beta` set that fallback.
+ *
+ * @param {Array<Record<string, number>>} priceFrames   per-tick { asset: price }
+ * @param {object} [opts]
+ * @param {number} [opts.alpha]     fallback ARCH coefficient (default 0.08)
+ * @param {number} [opts.beta]      fallback GARCH coefficient (default 0.90)
+ * @param {number} [opts.floor]     variance floor (default 1e-8)
+ * @returns {Garch11Surface}
+ */
+export function garchMleFromPriceHistory(priceFrames, opts = {}) {
+  if (!Array.isArray(priceFrames) || priceFrames.length < 2) {
+    throw new Error('garchMleFromPriceHistory: need at least two price frames');
+  }
+  const assets = Object.keys(priceFrames[0]);
+  /** @type {Record<string, GarchParams>} */
+  const params = {};
+  for (const a of assets) {
+    const rets = [];
+    for (let t = 1; t < priceFrames.length; t += 1) {
+      const prev = priceFrames[t - 1][a];
+      const cur = priceFrames[t][a];
+      if (prev > 0 && cur > 0) rets.push(Math.log(cur / prev));
+    }
+    const sampleVar = variance(rets);
+    const s2 = sampleVar > 0 ? sampleVar : (opts.floor != null ? opts.floor : DEFAULT_FLOOR);
+    // Estimate on demeaned returns so the fit targets the variance, not the drift.
+    const mean = rets.length ? rets.reduce((acc, x) => acc + x, 0) / rets.length : 0;
+    const demeaned = rets.map((x) => x - mean);
+    const { alpha, beta } = estimateGarchParams(demeaned, sampleVar, opts);
+    params[a] = {
+      omega: s2 * (1 - alpha - beta),
+      alpha,
+      beta,
+      sigma0: Math.sqrt(s2),
+    };
+  }
+  return new Garch11Surface(params, { floor: opts.floor });
+}
+
 /**
  * Sample variance (divisor n-1) of a return series; 0 for < 2 points.
  *

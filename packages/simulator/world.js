@@ -24,7 +24,7 @@
 import { Portfolio } from './portfolio.js';
 import { GBMPriceFeed, HarmonicPriceFeed, ReplayPriceFeed, parseCsvFrames } from './price-feed.js';
 import { surfaceFromPriceHistory } from './vol-surface.js';
-import { Garch11Surface, garchFromPriceHistory } from './garch.js';
+import { Garch11Surface, garchFromPriceHistory, garchMleFromPriceHistory } from './garch.js';
 import { GjrGarch11Surface, gjrGarchFromPriceHistory } from './gjr-garch.js';
 
 /**
@@ -89,6 +89,8 @@ const GJR_DEFAULTS = { alpha: 0.03, gamma: 0.09, beta: 0.9 };
  * Descriptor shapes (`{ kind, ... }`):
  *   - `{ kind: 'garch', params }`         explicit per-asset { omega, alpha, beta }
  *   - `{ kind: 'garch', history }`        fit by variance targeting from price frames
+ *   - `{ kind: 'garch', history, estimate: 'mle' }`  as above, but estimate (alpha,
+ *                                          beta) per asset from the data (light MLE)
  *   - `{ kind: 'garch', volatilities }`   variance-target from a per-asset base sigma
  *   - `{ kind: 'gjr-garch', ... }`        same three forms, with a leverage `gamma`
  *   - `{ kind: 'empirical', history }`    empirical bootstrap of realized vol
@@ -114,6 +116,14 @@ export function makeVolSurface(descriptor) {
         : new Garch11Surface(descriptor.params, { floor });
     }
     if (descriptor.history) {
+      if (descriptor.estimate === 'mle') {
+        if (gjr) {
+          throw new Error(
+            "makeVolSurface: estimate 'mle' is only supported for kind 'garch' (gjr-garch MLE is deferred)",
+          );
+        }
+        return garchMleFromPriceHistory(descriptor.history, descriptor);
+      }
       return gjr
         ? gjrGarchFromPriceHistory(descriptor.history, descriptor)
         : garchFromPriceHistory(descriptor.history, descriptor);

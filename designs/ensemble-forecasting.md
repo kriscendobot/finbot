@@ -291,3 +291,63 @@ green with all six invariants PASS and WALLET TOUCHED: false.
 Next on this axis: let the fit adapt per-instrument *parameters* (α/β via a light
 MLE or a rolling estimator) rather than variance-targeting fixed defaults, and
 let the analyzer weigh the fitted regime (a persistence/vol read) into its score.
+
+### Adaptive vol — estimating (alpha, beta) per instrument by light MLE (2026-07-12)
+
+The adaptive fit above pinned each instrument's *unconditional* variance to the
+observed sample variance but still took the ARCH/GARCH split (alpha, beta) from a
+single fixed config default (0.08 / 0.90) — so a bursty, highly-persistent asset
+and a calm, quickly mean-reverting one were stamped with the same clustering
+shape. This cycle reads that shape out of the data too.
+
+- **`garchMleFromPriceHistory(priceFrames, opts)`** (`packages/simulator/garch.js`)
+  fits like `garchFromPriceHistory` — variance targeting pins the unconditional
+  variance to the sample variance, `omega = s^2 (1 - alpha - beta)` — but
+  **estimates (alpha, beta) per asset** by maximizing the Gaussian likelihood of
+  the variance-targeting GARCH(1,1) recursion over the demeaned returns. The
+  search is a **deterministic nested grid refinement** (a coarse grid over the
+  (alpha, beta) box, then successively finer grids around the incumbent) — no
+  optimizer library, no RNG, byte-identical params for identical input. It is a
+  *light* MLE on purpose: variance targeting removes omega from the search, so
+  only the two persistence coefficients are fit, which is cheaper and far more
+  stable on the short windows the OODA cycle observes than a joint (omega, alpha,
+  beta) MLE would be.
+- **Descriptor wiring.** `makeVolSurface` routes
+  `{ kind: 'garch', history, estimate: 'mle' }` to the estimator; without
+  `estimate` it stays on the fixed-split fitter, so every existing path is
+  byte-identical. Because the forecaster's adaptive fit spreads its descriptor,
+  `config.adaptiveVol = { kind: 'garch', estimate: 'mle' }` (and thus
+  `makeDryRunCompute({ adaptiveVol: { kind: 'garch', estimate: 'mle' } })`) fits
+  per instrument from the live window end to end. `gjr-garch` + `estimate: 'mle'`
+  throws for now (asymmetric-MLE is deferred).
+- **What it recovers.** On a genuinely clustered GARCH process the estimator
+  recovers the ARCH reaction closely (true alpha 0.12 → fitted ~0.15) while iid
+  noise fits alpha ~0.02 — the ARCH coefficient is the well-identified signal.
+  Beta (the memory term) is only weakly identified on *near-iid* windows because
+  the variance-targeting likelihood is flat in persistence there; that is an
+  inherent limitation of a light variance-targeting MLE, not a bug, and alpha
+  carries the discriminating information the analyzer will eventually weigh.
+- **Robust + deterministic.** A window with fewer than 12 returns (too short for a
+  per-window fit to mean anything) or a degenerate constant-price asset falls back
+  to the fixed default split, exactly as `garchFromPriceHistory` would —
+  `opts.alpha` / `opts.beta` set that fallback. The whole fit draws no RNG, so the
+  forecast stays reproducible and the auditor's recompute-and-compare is intact.
+  Observed in the field: the current OODA oracle window is ~10 frames (9 returns),
+  so the live cycle *falls back today* and the MLE engages once the window is
+  longer — a natural next lever (accumulate a rolling window, or lengthen the
+  observation, so the live cycle fits rather than defaults).
+
+Proven by `packages/simulator/test/garch-mle.test.js` (deterministic params,
+variance targeting preserved, ARCH-reaction recovery clustered-vs-iid, short-window
+and custom-fallback behaviour, factory routing, gjr rejection) and a new
+`forecaster-adaptive-vol.test.js` case (the `estimate: 'mle'` descriptor flows
+through `project()` end to end, changes the fitted persistence vs the fixed split,
+preserves the variance target, and stays byte-identical across runs). Full suite
+497 pass; `finbot-ooda --seed=7` green with all six invariants PASS and
+WALLET TOUCHED: false.
+
+Next on this axis: **weigh the fitted regime into the analyzer's score** (a
+persistence / conditional-vol read shifting risk appetite), and lengthen or roll
+the OODA observation window so the live cycle actually engages the MLE instead of
+falling back. Deferred as before: gamma/asymmetric MLE, EGARCH, implied-vol
+surfaces, PNG rasterization, far-ref vending.
