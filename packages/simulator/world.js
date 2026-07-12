@@ -23,6 +23,9 @@
 
 import { Portfolio } from './portfolio.js';
 import { GBMPriceFeed, HarmonicPriceFeed, ReplayPriceFeed, parseCsvFrames } from './price-feed.js';
+import { surfaceFromPriceHistory } from './vol-surface.js';
+import { Garch11Surface, garchFromPriceHistory } from './garch.js';
+import { GjrGarch11Surface, gjrGarchFromPriceHistory } from './gjr-garch.js';
 
 /**
  * @typedef {object} World
@@ -66,6 +69,100 @@ export function makeWorld(cfg = {}) {
   return { portfolio, priceFeed, harnessConfig, seed, tag, instruments };
 }
 
+// Default GARCH / GJR-GARCH parameters, kept in sync with the module-level
+// defaults in garch.js / gjr-garch.js so a `volatilities`-only descriptor
+// (variance-targeting from a base vol) matches what the from-history fitters
+// would produce for the same target. Typical daily-series persistence.
+const GARCH_DEFAULTS = { alpha: 0.08, beta: 0.9 };
+const GJR_DEFAULTS = { alpha: 0.03, gamma: 0.09, beta: 0.9 };
+
+/**
+ * Build a conditional / empirical volatility surface from a plain config
+ * descriptor, so a caller that only holds config (the OODA pipeline's world
+ * builder) can request GARCH volatility clustering without importing the
+ * surface constructors itself.
+ *
+ * Accepts, and returns unchanged, an already-constructed surface (anything
+ * exposing `nextVariance` or `sample`), so `makePriceFeed` can route every
+ * `volSurface` value through here uniformly.
+ *
+ * Descriptor shapes (`{ kind, ... }`):
+ *   - `{ kind: 'garch', params }`         explicit per-asset { omega, alpha, beta }
+ *   - `{ kind: 'garch', history }`        fit by variance targeting from price frames
+ *   - `{ kind: 'garch', volatilities }`   variance-target from a per-asset base sigma
+ *   - `{ kind: 'gjr-garch', ... }`        same three forms, with a leverage `gamma`
+ *   - `{ kind: 'empirical', history }`    empirical bootstrap of realized vol
+ * `alpha` / `beta` / `gamma` / `floor` on the descriptor override the defaults.
+ *
+ * @param {object|null|undefined} descriptor
+ * @returns {object|null}  a surface (isGarch or empirical) or null
+ */
+export function makeVolSurface(descriptor) {
+  if (descriptor == null) return null;
+  // Already a constructed surface — pass through untouched.
+  if (typeof descriptor.nextVariance === 'function' || typeof descriptor.sample === 'function') {
+    return descriptor;
+  }
+  const kind = descriptor.kind || 'empirical';
+  const floor = descriptor.floor;
+
+  if (kind === 'garch' || kind === 'gjr-garch') {
+    const gjr = kind === 'gjr-garch';
+    if (descriptor.params) {
+      return gjr
+        ? new GjrGarch11Surface(descriptor.params, { floor })
+        : new Garch11Surface(descriptor.params, { floor });
+    }
+    if (descriptor.history) {
+      return gjr
+        ? gjrGarchFromPriceHistory(descriptor.history, descriptor)
+        : garchFromPriceHistory(descriptor.history, descriptor);
+    }
+    if (descriptor.volatilities) {
+      return volSurfaceFromBaseVol(descriptor.volatilities, descriptor, gjr, floor);
+    }
+    throw new Error(
+      `makeVolSurface: a '${kind}' descriptor needs one of { params, history, volatilities }`,
+    );
+  }
+  if (kind === 'empirical') {
+    if (!descriptor.history) {
+      throw new Error("makeVolSurface: an 'empirical' descriptor needs a { history } of price frames");
+    }
+    return surfaceFromPriceHistory(descriptor.history, descriptor);
+  }
+  throw new Error(`makeVolSurface: unknown volSurface kind '${kind}'`);
+}
+
+/**
+ * Variance-target a GARCH / GJR-GARCH surface directly from a per-asset base
+ * volatility: pin each asset's unconditional variance to sigma^2, take the
+ * ARCH/GARCH (and leverage) split from the descriptor or the defaults. This
+ * is the same variance-targeting the from-history fitters do, sourced from a
+ * base vol rather than a return sample — the ergonomic form for a driver that
+ * already holds a per-asset vol.
+ *
+ * @param {Record<string, number>} volatilities   asset -> base sigma
+ * @param {object} opts                            alpha / beta / gamma overrides
+ * @param {boolean} gjr                            build the asymmetric surface
+ * @param {number} [floor]
+ * @returns {Garch11Surface | GjrGarch11Surface}
+ */
+function volSurfaceFromBaseVol(volatilities, opts, gjr, floor) {
+  const alpha = opts.alpha != null ? opts.alpha : (gjr ? GJR_DEFAULTS.alpha : GARCH_DEFAULTS.alpha);
+  const beta = opts.beta != null ? opts.beta : (gjr ? GJR_DEFAULTS.beta : GARCH_DEFAULTS.beta);
+  const gamma = opts.gamma != null ? opts.gamma : GJR_DEFAULTS.gamma;
+  const persistence = gjr ? alpha + beta + gamma / 2 : alpha + beta;
+  const params = {};
+  for (const [asset, sigma] of Object.entries(volatilities)) {
+    const s2 = sigma * sigma;
+    params[asset] = gjr
+      ? { omega: s2 * (1 - persistence), alpha, gamma, beta, sigma0: sigma }
+      : { omega: s2 * (1 - persistence), alpha, beta, sigma0: sigma };
+  }
+  return gjr ? new GjrGarch11Surface(params, { floor }) : new Garch11Surface(params, { floor });
+}
+
 /**
  * Build a price feed from a config descriptor.
  *
@@ -82,7 +179,7 @@ export function makePriceFeed(cfg) {
       dt: cfg.dt,
       seed: cfg.seed != null ? cfg.seed : 42,
       correlations: cfg.correlations,
-      volSurface: cfg.volSurface,
+      volSurface: makeVolSurface(cfg.volSurface),
     });
   }
   if (kind === 'harmonic') {

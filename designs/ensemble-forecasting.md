@@ -190,3 +190,55 @@ symmetric GARCH feed's sits near zero (test in `test/gjr-garch.test.js`).
 
 Still open on this axis: EGARCH, gamma estimation / full MLE, implied-vol surfaces.
 PNG rasterization and far-ref vending remain deferred as before.
+
+## Notes from the field (2026-07-12 — conditional-vol surfaces reach the pipeline)
+
+The last two cycles built GARCH and GJR-GARCH volatility-clustering surfaces in
+`@finbot/simulator`, but the *pipeline* could not use them: `makePriceFeed`
+accepted only an already-constructed `volSurface` object, and the OODA world
+builder (`packages/pipeline/driver-compute.js`) always built a plain
+constant-sigma GBM feed. So the richer forecasting engine sat one wire short of
+the decision layer — the forecaster's Monte Carlo ensemble never saw clustering.
+
+This cycle closes that gap with a **descriptor-driven surface factory** rather
+than a fourth surface variant:
+
+- **`makeVolSurface(descriptor)`** (`packages/simulator/world.js`) builds an
+  empirical / GARCH / GJR-GARCH surface from a plain config descriptor, so a
+  caller that only holds config can request clustering without importing the
+  surface constructors. It passes an already-built surface through untouched, so
+  every `volSurface` value can route through it uniformly. Descriptor forms:
+  `{ kind: 'garch'|'gjr-garch', params }` (explicit per-asset params),
+  `{ ..., history }` (variance-target fit from price frames, delegating to the
+  existing `*FromPriceHistory` fitters), or `{ ..., volatilities }` (the
+  ergonomic form — variance-target from a per-asset base sigma, pinning the
+  unconditional variance to sigma² with the ARCH/GARCH/leverage split taken from
+  the descriptor or the module defaults). `{ kind: 'empirical', history }` builds
+  the realized-vol bootstrap surface.
+- **`makePriceFeed`** now routes `cfg.volSurface` through `makeVolSurface`, and
+  **`driver-compute.js`** forwards an optional `opts.volSurface` descriptor into
+  the world's price-feed config. A driver run can now ask for a GARCH-clustered
+  forecast ensemble with `makeDryRunCompute({ volSurface: { kind: 'garch',
+  volatilities: { ATOM: 0.03 } } })`.
+- **Determinism / back-compat preserved.** `makeVolSurface(undefined) === null`,
+  and the GBM feed already collapsed `undefined`/`null` volSurface to plain GBM,
+  so the default path is byte-for-byte the prior constant-sigma walk (asserted:
+  a factory-built world's ticks equal a raw `GBMPriceFeed`'s, and two default
+  computes replay an identical forecast histogram). A GARCH descriptor reshapes
+  the ensemble (different histogram at the same seed/tick) yet stays reproducible
+  (identical histogram across two runs of the same tick). The surfaces draw no
+  RNG of their own and each ensemble fork starts a fresh variance path, so the
+  determinism contract the auditor's recompute relies on is intact.
+
+Proven by `packages/simulator/test/vol-surface-factory.test.js` (factory forms,
+passthrough, variance targeting, byte-identical default walk, clustering-widens-
+the-tail signature) and `packages/pipeline/test/driver-vol-surface.test.js`
+(the descriptor flows end to end through the OODA cycle, reshapes the forecast,
+stays reproducible, and the default path is unchanged). Full suite 478 pass;
+`finbot-ooda --seed=7` still green with WALLET TOUCHED: false.
+
+Still open on this axis: EGARCH, gamma estimation / full MLE, implied-vol
+surfaces, PNG rasterization, far-ref vending. And a natural follow-on now that
+clustering is reachable: let the analyzer/planner *choose* a surface per
+instrument from the observed price window (fit a GARCH surface from the oracle
+history) rather than the driver naming it as static config.

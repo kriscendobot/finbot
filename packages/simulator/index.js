@@ -23,7 +23,7 @@ export {
   leastSquares,
   solveLinear,
 } from './harmonic.js';
-export { makeWorld, makePriceFeed, cloneWorld } from './world.js';
+export { makeWorld, makePriceFeed, makeVolSurface, cloneWorld } from './world.js';
 export { runSimulator, runSimulatorFromConfig } from './runner.js';
 export {
   perTickMetrics,

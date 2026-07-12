@@ -70,6 +70,12 @@ export function makeDryRunCompute(options = {}) {
         volatilities: { [opts.asset]: opts.vol },
         drifts: { [opts.asset]: opts.drift },
         seed,
+        // Optional conditional-volatility surface: a plain descriptor
+        // (e.g. `{ kind: 'garch', volatilities: { ATOM: 0.02 } }`) that
+        // makeWorld builds into a stateful GARCH / GJR-GARCH surface, so the
+        // forecaster's Monte Carlo ensemble models volatility clustering
+        // instead of a constant per-tick sigma. Absent → plain GBM, unchanged.
+        volSurface: opts.volSurface,
       },
       seed,
       tag: `driver-${seed}`,
