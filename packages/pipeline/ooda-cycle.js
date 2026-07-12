@@ -110,7 +110,7 @@ export async function runOodaCycle(input) {
 
   // ----- ORIENT (b): forecaster (Monte Carlo via simulator) -----
   const forecast = project(
-    { world, targetWeights: analysis.targetWeights, bounds: config.bounds || {} },
+    { world, targetWeights: analysis.targetWeights, bounds: config.bounds || {}, readings },
     config.forecaster || {},
   );
   const forecastId = await record({

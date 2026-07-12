@@ -94,7 +94,18 @@ export function makeDryRunCompute(options = {}) {
         windowTicks: opts.warmup,
         oracle: { thresholdBps: opts.threshold },
         analyzer: { scoreFloor: 0 },
-        forecaster: { ensembleSize: opts.ensemble, horizon: opts.horizon, baseSeed: 1000 + seed },
+        forecaster: {
+          ensembleSize: opts.ensemble,
+          horizon: opts.horizon,
+          baseSeed: 1000 + seed,
+          // Optional adaptive vol: a descriptor WITHOUT data (e.g.
+          // `{ kind: 'garch' }`) tells the forecaster to FIT a conditional-vol
+          // surface from THIS tick's observed oracle window and project the
+          // ensemble under it — per-instrument vol that tracks the regime the
+          // cycle actually saw, rather than a statically-named surface. Absent
+          // → the forecaster uses the world's feed unchanged.
+          adaptiveVol: opts.adaptiveVol,
+        },
         bounds: { maxStepPct: 0.25, maxDayPct: 0.5, concentrationCapPct: 0.9 },
         auditor: { tailFloorPct: opts.tailFloor, stalenessWindowTicks: opts.warmup + 1 },
       },

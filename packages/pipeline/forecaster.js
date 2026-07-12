@@ -15,7 +15,84 @@
 
 import { createHash } from 'node:crypto';
 import { forecast as simForecast } from '@finbot/simulator/forecast';
+import { makeVolSurface } from '@finbot/simulator/world';
 import { deriveSteps, applyStepsToPortfolio, navOf } from './rebalance.js';
+
+/**
+ * Extract the per-tick price frames (`[{ asset: price }, ...]`) an
+ * empirical / GARCH fitter wants from an oracle reading window
+ * (`[{ t, prices }, ...]`). A reading missing its `prices` map is skipped.
+ *
+ * @param {Array<{ t?: number, prices?: Record<string, number> }>} readings
+ * @returns {Array<Record<string, number>>}
+ */
+export function priceFramesFromReadings(readings) {
+  const frames = [];
+  for (const r of readings || []) {
+    if (r && r.prices && typeof r.prices === 'object') frames.push(r.prices);
+  }
+  return frames;
+}
+
+/**
+ * When the caller asks for an adaptive vol surface, fit one from the observed
+ * window and return a forecast world whose price feed carries it, plus a
+ * small descriptor of what was fit (for the projection's citation trail).
+ * Returns the world unchanged (and a null fit) when adaptive vol is off, the
+ * window is too short, the feed cannot host a surface, or the fit is degenerate
+ * — so the default path stays byte-identical to the pre-adaptive behaviour.
+ *
+ * The fit is deterministic (variance targeting over the observed returns; no
+ * RNG), so the whole forecast stays reproducible from its seeds.
+ *
+ * @param {import('@finbot/simulator/world').World} world
+ * @param {Array<{ t?: number, prices?: Record<string, number> }>} readings
+ * @param {object|undefined} adaptiveVol   a volSurface descriptor WITHOUT data
+ *   (e.g. `{ kind: 'garch' }` or `{ kind: 'gjr-garch', alpha, beta }`); its
+ *   `history` is filled from the observed window here.
+ * @returns {{ world: import('@finbot/simulator/world').World, fit: object|null }}
+ */
+export function fitForecastWorld(world, readings, adaptiveVol) {
+  if (!adaptiveVol) return { world, fit: null };
+  const feed = world && world.priceFeed;
+  if (!feed || typeof feed.withVolSurface !== 'function') return { world, fit: null };
+  const frames = priceFramesFromReadings(readings);
+  if (frames.length < 2) return { world, fit: null };
+  let surface;
+  try {
+    surface = makeVolSurface({ ...adaptiveVol, history: frames });
+  } catch (_err) {
+    // A degenerate window (constant prices → non-stationary params, etc.)
+    // must not sink the cycle; fall back to the unadapted world.
+    return { world, fit: null };
+  }
+  if (!surface) return { world, fit: null };
+  const fitWorld = { ...world, priceFeed: feed.withVolSurface(surface) };
+  const kind = adaptiveVol.kind || 'empirical';
+  const fit = { kind, source: 'observed-window', frames: frames.length };
+  // Surface a compact, deterministic per-asset summary when the surface can
+  // report it (GARCH/GJR expose stats()); it lands in the artifact so the
+  // audit's recompute-and-compare and the citation trail can see the regime.
+  if (typeof surface.stats === 'function' && typeof surface.has === 'function') {
+    const assets = {};
+    for (const asset of Object.keys(frames[frames.length - 1])) {
+      if (!surface.has(asset)) continue;
+      const st = surface.stats(asset);
+      assets[asset] = {
+        unconditionalVol: round12(st.unconditionalVol),
+        sigma0: round12(st.sigma0),
+        persistence: round12(st.persistence),
+      };
+    }
+    fit.assets = assets;
+  }
+  return { world: fitWorld, fit };
+}
+
+/** Round to 12 significant decimals so the fit summary hashes stably. */
+function round12(x) {
+  return typeof x === 'number' && Number.isFinite(x) ? Number(x.toFixed(12)) : x;
+}
 
 /**
  * @typedef {object} ForecastProjection
@@ -58,6 +135,7 @@ export function makeRebalanceAction(targetWeights, bounds) {
  * @param {import('@finbot/simulator/world').World} input.world
  * @param {Record<string, number>} input.targetWeights
  * @param {object} [input.bounds]            rebalance risk bounds (forwarded to deriveSteps)
+ * @param {Array<{ t?: number, prices?: Record<string, number> }>} [input.readings]  observed window, for an adaptive vol fit
  * @param {object} [config]
  * @param {number} [config.horizon]          ticks per child (default 20)
  * @param {number} [config.ensembleSize]     children (default 200)
@@ -65,6 +143,10 @@ export function makeRebalanceAction(targetWeights, bounds) {
  * @param {number} [config.bins]             histogram bins (default 12)
  * @param {boolean} [config.render]          attach a deterministic SVG projection (default true)
  * @param {string} [config.program]          program label carried into the render header
+ * @param {object} [config.adaptiveVol]      volSurface descriptor WITHOUT data (e.g. `{ kind: 'garch' }`); its
+ *                                           `history` is fit from `input.readings`, so the ensemble models the
+ *                                           volatility regime actually observed this cycle instead of the world's
+ *                                           statically-configured surface. Absent → the world is used unchanged.
  * @returns {ForecastProjection}
  */
 export function project(input, config = {}) {
@@ -76,12 +158,22 @@ export function project(input, config = {}) {
   const program = config.program || 'rebalance';
   const bounds = input.bounds || {};
 
+  // Current snapshot is read from the ORIGINAL world, so currentNav and the
+  // cited actionSteps stay byte-identical whether or not an adaptive fit runs
+  // — the fit reshapes the projected distribution, never the present state.
   const currentPrices = input.world.priceFeed.current();
   const currentNav = navOf(input.world.portfolio.markToMarket(currentPrices), currentPrices);
 
+  // Optionally fit a conditional-vol surface from the observed window and
+  // project the ensemble under it (adaptive per-instrument vol). Off by
+  // default and inert on a too-short/degenerate window → unchanged behaviour.
+  const { world: forecastWorld, fit: volFit } = fitForecastWorld(
+    input.world, input.readings, config.adaptiveVol,
+  );
+
   const action = makeRebalanceAction(input.targetWeights, bounds);
   const result = simForecast({
-    from: input.world,
+    from: forecastWorld,
     action,
     horizon,
     ensembleSize,
@@ -113,6 +205,7 @@ export function project(input, config = {}) {
     p50Equity: result.summary.p50,
     pProfit: result.summary.pProfit,
     actionSteps,
+    volFit,
     projectionSvg: result.projectionSvg,
   };
 }
@@ -126,7 +219,7 @@ export function project(input, config = {}) {
  * @returns {object}
  */
 export function projectionArtifact(projection) {
-  return {
+  const artifact = {
     program: projection.program,
     targetWeights: projection.targetWeights,
     horizon: projection.horizon,
@@ -142,6 +235,11 @@ export function projectionArtifact(projection) {
     pProfit: projection.pProfit,
     actionSteps: projection.actionSteps,
   };
+  // Only present when an adaptive vol surface was actually fit, so a plain
+  // (non-adaptive) projection's artifact JSON — and thus its content hash and
+  // the auditor's recompute-and-compare — stay byte-identical to before.
+  if (projection.volFit) artifact.volFit = projection.volFit;
+  return artifact;
 }
 
 /**

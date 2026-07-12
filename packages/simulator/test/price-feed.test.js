@@ -9,6 +9,7 @@ import {
   splitmix32,
   gaussian,
 } from '../price-feed.js';
+import { garchFromPriceHistory } from '../garch.js';
 
 test('sfc32: deterministic for same seed', () => {
   const a = sfc32(42);
@@ -137,4 +138,32 @@ test('parseCsvFrames: throws on too few lines', () => {
 
 test('parseCsvFrames: throws on NaN cell', () => {
   assert.throws(() => parseCsvFrames('t,ATOM\n0,banana\n'));
+});
+
+test('GBMPriceFeed.withVolSurface: swaps the surface, preserving prices and tick', () => {
+  const feed = new GBMPriceFeed({ initialPrices: { ATOM: 10 }, volatilities: { ATOM: 0.02 }, seed: 7 });
+  for (let i = 0; i < 5; i += 1) feed.tick();
+  const surface = garchFromPriceHistory(
+    [{ ATOM: 10 }, { ATOM: 10.6 }, { ATOM: 10.0 }, { ATOM: 10.7 }, { ATOM: 10.1 }],
+  );
+  const swapped = feed.withVolSurface(surface);
+  // Observable state carries over; the surface (and GARCH state) is the new one.
+  assert.deepEqual(swapped.current(), feed.current());
+  assert.equal(swapped.t, feed.t);
+  assert.equal(swapped.volSurface, surface);
+  assert.equal(swapped.isGarch, true);
+  assert.ok(swapped.garchVar.ATOM > 0, 'GARCH variance is initialized from the new surface');
+  // The original feed is untouched (no surface).
+  assert.equal(feed.volSurface, null);
+  assert.equal(feed.isGarch, false);
+});
+
+test('GBMPriceFeed.withVolSurface(null): clears a surface back to constant-sigma', () => {
+  const surface = garchFromPriceHistory([{ ATOM: 10 }, { ATOM: 10.5 }, { ATOM: 10.1 }]);
+  const feed = new GBMPriceFeed({ initialPrices: { ATOM: 10 }, volatilities: { ATOM: 0.02 }, seed: 7, volSurface: surface });
+  assert.equal(feed.isGarch, true);
+  const cleared = feed.withVolSurface(null);
+  assert.equal(cleared.volSurface, null);
+  assert.equal(cleared.isGarch, false);
+  assert.equal(cleared.sigmaFor('ATOM'), 0.02, 'a cleared feed falls back to the config sigma');
 });

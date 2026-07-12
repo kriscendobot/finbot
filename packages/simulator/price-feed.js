@@ -253,6 +253,44 @@ export class GBMPriceFeed {
     }
     return copy;
   }
+
+  /**
+   * Return a copy of this feed at the current state (same prices, tick
+   * counter, and seed) but with a *different* volatility surface installed.
+   *
+   * This is the swap the forecaster uses to project under a surface it fit
+   * from the observed window: the outer walk that produced the history keeps
+   * whatever surface (or none) it ran under, while each forecast child forks
+   * off a feed carrying the freshly-fit surface. Because the surface changes,
+   * any GARCH conditional-variance state is (re)initialized from the new
+   * surface's `initialVariance()` — a stale variance path from the old
+   * surface would be meaningless under new parameters — so every fork starts
+   * a clean clustering path, exactly as a from-scratch GARCH feed does.
+   *
+   * Passing `null` clears the surface, yielding a plain constant-sigma GBM
+   * feed at the current state.
+   *
+   * @param {object|null} surface   a VolatilitySurface / Garch11Surface / GjrGarch11Surface, or null
+   * @returns {GBMPriceFeed}
+   */
+  withVolSurface(surface) {
+    const copy = new GBMPriceFeed({
+      initialPrices: this.initialPrices,
+      drifts: this.drifts,
+      volatilities: this.volatilities,
+      dt: this.dt,
+      seed: this.seed,
+      correlations: this.correlations,
+      volSurface: surface || null,
+    });
+    // Preserve the observable state (current prices + tick counter). The RNG
+    // and any GARCH variance are fresh from the constructor: forecast forks
+    // always reseed, so no same-seed continuation is expected here, and a new
+    // surface must not inherit the old surface's evolved variance.
+    copy.prices = { ...this.prices };
+    copy.t = this.t;
+    return copy;
+  }
 }
 
 /**

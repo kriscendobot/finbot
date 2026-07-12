@@ -242,3 +242,52 @@ surfaces, PNG rasterization, far-ref vending. And a natural follow-on now that
 clustering is reachable: let the analyzer/planner *choose* a surface per
 instrument from the observed price window (fit a GARCH surface from the oracle
 history) rather than the driver naming it as static config.
+
+### Adaptive vol — fitting the surface from the observed window (2026-07-12)
+
+The follow-on above has landed. The forecaster can now **fit** a conditional-vol
+surface from the cycle's own observed oracle window instead of relying on a
+statically-named driver descriptor, so the Monte Carlo ensemble tracks the
+volatility regime the cycle *actually saw*, per instrument.
+
+- **`GBMPriceFeed.withVolSurface(surface)`** (`price-feed.js`) returns a copy of
+  the feed at its current state (prices + tick counter + seed) with a different
+  vol surface installed and a fresh GARCH variance path (a new surface must not
+  inherit the old one's evolved variance). `null` clears the surface back to
+  constant-sigma GBM. It is the non-mutating swap the forecaster forks under —
+  the outer walk keeps whatever surface produced the history; each forecast
+  child forks off the freshly-fit surface.
+- **`project()`** now accepts `input.readings` (the observed window) and
+  `config.adaptiveVol` (a volSurface descriptor **without data**, e.g.
+  `{ kind: 'garch' }` or `{ kind: 'gjr-garch', alpha, beta }`). When present,
+  `fitForecastWorld()` fills the descriptor's `history` from
+  `priceFramesFromReadings(readings)`, builds the surface via `makeVolSurface`,
+  and projects the ensemble from a forecast-world carrying it. The **current
+  snapshot** (currentNav + cited actionSteps) is still read from the original
+  world, so the fit reshapes only the projected distribution, never the present.
+- **`ooda-cycle.js`** threads the oracle `readings` into `project()`, and
+  **`driver-compute.js`** forwards `opts.adaptiveVol` into `config.forecaster`,
+  so `makeDryRunCompute({ adaptiveVol: { kind: 'garch' } })` fits per tick.
+- **Citation trail.** A fit populates `projection.volFit` — `{ kind, source:
+  'observed-window', frames, assets: { <asset>: { unconditionalVol, sigma0,
+  persistence } } }` — and, **only when a fit ran**, that summary is folded into
+  the canonical `projectionArtifact` (and thus the projection id). A non-adaptive
+  projection's artifact carries no `volFit` key, so its content hash and the
+  auditor's recompute-and-compare stay byte-identical to before.
+- **Robust + deterministic.** The fit is variance-targeting over the observed
+  returns (no RNG), so the whole forecast stays reproducible. A too-short
+  (< 2 frames) or degenerate (constant-price → non-stationary params) window
+  falls back to the unadapted world rather than sinking the cycle.
+
+Proven by `packages/pipeline/test/forecaster-adaptive-vol.test.js` (fit reshapes
+the ensemble and widens the tail, deterministic, gjr-garch accepted, default path
+inert with an unchanged artifact hash, degenerate windows fall back), the two new
+`driver-vol-surface.test.js` cases (adaptiveVol fits end to end through the OODA
+cycle, reshapes vs the plain feed, stays reproducible), and two
+`price-feed.test.js` cases (the swap preserves state and re-inits GARCH; `null`
+clears back to constant-sigma). Full suite 488 pass; `finbot-ooda --seed=7` still
+green with all six invariants PASS and WALLET TOUCHED: false.
+
+Next on this axis: let the fit adapt per-instrument *parameters* (α/β via a light
+MLE or a rolling estimator) rather than variance-targeting fixed defaults, and
+let the analyzer weigh the fitted regime (a persistence/vol read) into its score.

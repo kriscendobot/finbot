@@ -69,3 +69,32 @@ test('driver: omitting volSurface leaves the plain-GBM forecast unchanged', asyn
   assert.equal(histogramJson(a), histogramJson(b));
   assert.equal(a.summary, b.summary);
 });
+
+test('driver: adaptiveVol fits a surface from the live window end to end', async () => {
+  // No statically-named surface — the forecaster FITS one from THIS tick's
+  // observed oracle window. The cycle produces a volFit and stays wallet-safe.
+  const adaptive = makeDryRunCompute({ ...CHAIN, adaptiveVol: { kind: 'garch' } });
+  const res = await adaptive({ tickId: 'eeee05' });
+  assert.equal(res.walletTouched, false);
+  assert.ok(res.forecast, 'adaptive cycle produces a forecast');
+  if (res.forecast.volFit) {
+    // When the observed window drove a fit, it names the observed-window source.
+    assert.equal(res.forecast.volFit.source, 'observed-window');
+    assert.equal(res.forecast.volFit.kind, 'garch');
+  }
+});
+
+test('driver: adaptiveVol reshapes vs the plain feed and is reproducible', async () => {
+  const plain = makeDryRunCompute(CHAIN);
+  const adaptive = makeDryRunCompute({ ...CHAIN, adaptiveVol: { kind: 'garch' } });
+
+  const p = await plain({ tickId: 'ffff06' });
+  const a1 = await adaptive({ tickId: 'ffff06' });
+  const a2 = await adaptive({ tickId: 'ffff06' });
+
+  // Same tick, same seed: adaptive projects under the fitted surface, so its
+  // histogram differs from the plain constant-sigma feed — yet is reproducible.
+  assert.notEqual(histogramJson(p), histogramJson(a1));
+  assert.equal(histogramJson(a1), histogramJson(a2));
+  assert.equal(a1.proposal?.proposal_hash, a2.proposal?.proposal_hash);
+});
