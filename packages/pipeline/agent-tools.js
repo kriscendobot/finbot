@@ -23,11 +23,13 @@
  */
 
 import { toolResult } from '@finbot/harness/schemas';
+import { Portfolio } from '@finbot/simulator/portfolio';
 
 import { observeOpportunities } from './oracle-watcher.js';
 import { analyze, realizedVolatility } from './analyzer.js';
 import { plan } from './planner.js';
 import { audit } from './auditor.js';
+import { execute } from './executor.js';
 
 /**
  * Build the orient-phase pipeline tool registry (keyed by tool name), suitable
@@ -87,6 +89,125 @@ export function auditorToolRegistry() {
 
 /** Names of the tools in {@link auditorToolRegistry}, for capability subsets. */
 export const AUDITOR_TOOL_NAMES = ['audit_proposal'];
+
+/**
+ * Build the act-phase (executor) tool registry: the deterministic `execute`
+ * function, PINNED to dry-run, exposed as `simulate_execution`, so an
+ * inference-driven executor subagent can reason over the audited proposal then
+ * delegate the fire-time drift-guard re-audit, the clone-and-simulate of the
+ * steps, and the would-be substrate transaction build to the deterministic
+ * executor rather than mutating balances by hand.
+ *
+ * Safety is by construction: the tool hard-codes `mode: 'dry-run'` and vends
+ * NO parent capabilities, so the executor runs with an empty cap set — the
+ * capability attenuator never vends a wallet in dry-run, and the tool exposes
+ * no path to request `mode: 'live'` or a keystore. `walletTouched` is therefore
+ * always false, and it is returned as the proof the wallet was never reached.
+ * A live executor dispatch — with a real wallet capability behind CapTP — stays
+ * gated per `designs/cap-attenuation.md` and is not reachable from this tool.
+ *
+ * @returns {Record<string, object>} a registry of `assertToolDef`-shaped tools
+ */
+export function executorToolRegistry() {
+  const tools = [simulateExecutionTool()];
+  const registry = {};
+  for (const t of tools) registry[t.name] = t;
+  return registry;
+}
+
+/** Names of the tools in {@link executorToolRegistry}, for capability subsets. */
+export const EXECUTOR_TOOL_NAMES = ['simulate_execution'];
+
+/**
+ * `execute` (the act-phase executor), pinned to dry-run, as a tool. This is the
+ * deterministic simulation the design asks an inference-driven executor to
+ * call: given the audited proposal, a pre-trade portfolio snapshot, the price
+ * book, the forecast (the tail anchor for the fire-time drift-guard audit), the
+ * freshness clock, and the cited oracle readings, it re-runs the audit
+ * invariants at fire time, simulates the approved steps against a CLONE of the
+ * portfolio (the live book is never mutated), builds the would-be substrate
+ * transaction from the steps, and returns the execution result. Strictly
+ * dry-run: no wallet capability is vended, no keystore is read, nothing is
+ * signed or sent; `walletTouched` is always false and is the proof.
+ */
+function simulateExecutionTool() {
+  return {
+    name: 'simulate_execution',
+    description:
+      'Simulate execution of an audited rebalance proposal in DRY-RUN. Given the proposal (with its '
+      + 'ordered steps and proposal_hash), the pre-trade portfolio snapshot, the latest price book, '
+      + "the forecaster's terminal-equity projection (the tail anchor), the current tick (freshness "
+      + 'clock), and the cited oracle readings, it re-runs the audit invariants at fire time (the '
+      + 'drift guard), simulates the approved steps against a CLONE of the portfolio so the live '
+      + 'book is never mutated, builds the would-be substrate transaction from the steps, and '
+      + 'returns the completed steps, the post-execution balances, the prepared (unsigned) '
+      + 'transaction, and the fire-time audit verdict. Use this to simulate the act phase rather '
+      + 'than adjusting balances by hand. STRICTLY DRY-RUN: no wallet is vended, no keystore is '
+      + 'read, nothing is signed or sent — walletTouched is always false and is the proof the '
+      + 'wallet was never reached. A live execution is a separate, gated capability, never this tool.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        proposal: { type: 'object', description: 'the audited planner proposal: { steps, proposal_hash, cited_forecasts, cited_analyses, substrate? }' },
+        portfolio: { type: 'object', description: 'pre-trade snapshot: { cash, balances: { ASSET: qty }, quoteCurrency? }' },
+        prices: { type: 'object', description: 'latest price book { ASSET: price }' },
+        forecast: { type: 'object', description: 'the forecaster projection carrying p05Equity (the tail-risk anchor for the fire-time audit)' },
+        currentTick: { type: 'number', description: 'the freshness clock (cited readings must be within the staleness window of it)' },
+        oracleReadings: { type: 'array', description: 'cited oracle readings (carry observedAtTick for the freshness invariant)' },
+        config: { type: 'object', description: 'optional audit bounds for the fire-time drift guard: { maxStepPct, maxDayPct, concentrationCapPct, tailFloorPct, stalenessWindowTicks }' },
+        substrate: { type: 'string', description: "target substrate id ('sim' | 'agoric' | 'evm' | 'solana') for the prepared transaction; default the proposal's" },
+      },
+      required: ['proposal', 'portfolio', 'prices'],
+      additionalProperties: true,
+    },
+    run: async (args) => {
+      try {
+        const snapshot = args.portfolio || { cash: 0, balances: {} };
+        // Reconstruct a Portfolio from the plain snapshot and a minimal world
+        // whose priceFeed just reports the supplied book. The executor only
+        // reaches world.portfolio (clone / markToMarket) and world.priceFeed
+        // (current), so this is the whole surface it needs.
+        const portfolio = new Portfolio({
+          cash: snapshot.cash != null ? snapshot.cash : 0,
+          balances: snapshot.balances || {},
+          quoteCurrency: snapshot.quoteCurrency,
+        });
+        const prices = args.prices || {};
+        const world = {
+          portfolio,
+          priceFeed: { current: () => prices, t: args.currentTick },
+        };
+        // mode is hard-pinned to dry-run and no parentCaps are vended — the
+        // executor runs with an empty capability set, so no wallet is reachable.
+        const result = await execute(
+          {
+            proposal: args.proposal,
+            world,
+            forecast: args.forecast,
+            oracleReadings: args.oracleReadings || [],
+            currentTick: args.currentTick,
+            parentCaps: {},
+          },
+          {
+            mode: 'dry-run',
+            auditConfig: args.config || {},
+            substrate: args.substrate,
+          },
+        );
+        const summary = `simulate_execution: ${result.steps_completed.length} step(s) simulated, `
+          + `post-equity ${result.post_execution_balances.equity.toFixed(2)}, `
+          + `fire-time audit ${result.fire_time_audit ? result.fire_time_audit.verdict : 'n/a'}, `
+          + `wallet touched: ${result.walletTouched}`;
+        return toolResult(true, [
+          { type: 'json', value: result },
+          { type: 'text', text: summary },
+        ]);
+      } catch (err) {
+        return toolResult(false, [{ type: 'text', text: `simulate_execution failed: ${err.message || err}` }]);
+      }
+    },
+  };
+}
 
 /**
  * `audit` (the pre-execution invariant gate) as a tool. This is the

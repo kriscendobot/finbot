@@ -3,16 +3,19 @@
  * finbot-dispatch — drive one OODA stage by inference, in dry-run.
  *
  * Companion to `finbot-ooda` (which runs every stage as a deterministic
- * function with no LLM). This entry runs the ORIENT, DECIDE, and AUDIT stages by
- * **inference**: it builds an oracle-watcher observation over the simulator,
- * dispatches the analyzer as an LLM-shaped subagent that reasons over the
- * opportunities and CALLS the deterministic `score_opportunities` tool;
- * then — when the analyzer proposes a rebalance — dispatches the planner
- * subagent, which reasons over the target allocation and CALLS the
- * deterministic `propose_rebalance` tool to emit the ymax-shaped proposal;
- * then dispatches the auditor subagent, which reasons over that proposal plus a
- * Monte Carlo forecast and CALLS the deterministic `audit_proposal` gate for
- * the pre-execution invariant verdict. Every stage's product is printed.
+ * function with no LLM). This entry runs the FULL OODA loop by **inference**:
+ * it builds an oracle-watcher observation over the simulator, dispatches the
+ * analyzer as an LLM-shaped subagent that reasons over the opportunities and
+ * CALLS the deterministic `score_opportunities` tool; then — when the analyzer
+ * proposes a rebalance — dispatches the planner subagent, which reasons over
+ * the target allocation and CALLS the deterministic `propose_rebalance` tool to
+ * emit the ymax-shaped proposal; then dispatches the auditor subagent, which
+ * reasons over that proposal plus a Monte Carlo forecast and CALLS the
+ * deterministic `audit_proposal` gate for the pre-execution invariant verdict;
+ * then — when the auditor APPROVES — dispatches the executor subagent, which
+ * CALLS the deterministic `simulate_execution` tool to simulate the approved
+ * steps in DRY-RUN against a clone of the portfolio. Every stage's product is
+ * printed.
  *
  * Usage:
  *   finbot-dispatch                       # offline: a deterministic scripted analyzer LLM
@@ -32,10 +35,11 @@
  *   --json           print the structured result as JSON
  *   --help / -h
  *
- * DRY-RUN ONLY. The analyzer, the planner, and the auditor are read-only and
- * their tool subsets cannot reach a wallet capability; this entry never enables
- * live mode or reads a keystore. The auditor's verdict is a precondition for a
- * live executor dispatch, never an authorization in itself.
+ * DRY-RUN ONLY. The analyzer, the planner, the auditor, and the executor are
+ * read-only and their tool subsets cannot reach a wallet capability; the
+ * executor tool is pinned to `mode: 'dry-run'` and vends no wallet, so
+ * walletTouched is always false. This entry never enables live mode or reads a
+ * keystore. A *live* executor dispatch is a separate, gated capability.
  */
 
 import process from 'node:process';
@@ -50,6 +54,7 @@ import {
   dispatchAnalyzer, makeScriptedAnalyzerLlm,
   dispatchPlanner, makeScriptedPlannerLlm,
   dispatchAuditor, makeScriptedAuditorLlm,
+  dispatchExecutor, makeScriptedExecutorLlm,
 } from '../packages/pipeline/role-dispatch.js';
 import { spawn } from '../packages/harness/spawn.js';
 import { makeAnthropicLlm } from '../packages/harness/providers/anthropic.js';
@@ -176,6 +181,36 @@ async function main() {
     auditDispatch = await dispatchAuditor(auditInput, { spawn, finbotRoot: FINBOT_ROOT, llm: auditLlm });
   }
 
+  // ACT: when the auditor APPROVED the proposal, dispatch the executor subagent
+  // over it to simulate execution in DRY-RUN. The executor reasons then CALLS
+  // the deterministic `simulate_execution` tool, which re-runs the audit
+  // invariants at fire time (the drift guard), simulates the approved steps
+  // against a CLONE of the portfolio (the live book is never mutated), and
+  // builds the would-be substrate transaction. STRICTLY DRY-RUN: the tool is
+  // pinned to `mode: 'dry-run'` and vends no wallet, so no capability path
+  // reaches a signer — walletTouched is always false. A live execution is a
+  // separate, gated capability per `designs/cap-attenuation.md`, never this bin.
+  let actDispatch = null;
+  if (auditDispatch && auditDispatch.verdict && auditDispatch.verdict.verdict === 'approved') {
+    const actInput = {
+      proposal: planDispatch.proposal,
+      portfolio: input.portfolio,
+      prices,
+      // A fresh Monte Carlo forecast as the fire-time tail anchor for the
+      // executor's drift-guard re-audit (same shape the auditor saw).
+      forecast: project(
+        { world, targetWeights, bounds: {} },
+        { ensembleSize: 64, horizon: 12, render: false },
+      ),
+      currentTick: world.priceFeed.t,
+      oracleReadings: observed.crossings,
+    };
+    const actLlm = args.liveLlm
+      ? makeAnthropicLlm(args.model ? { model: args.model } : {})
+      : makeScriptedExecutorLlm(actInput);
+    actDispatch = await dispatchExecutor(actInput, { spawn, finbotRoot: FINBOT_ROOT, llm: actLlm });
+  }
+
   const out = {
     mode: args.liveLlm ? 'inference (anthropic)' : 'inference (offline scripted)',
     status: dispatch.status,
@@ -207,6 +242,20 @@ async function main() {
           finalText: auditDispatch.finalText,
         }
       : null,
+    act: actDispatch
+      ? {
+          status: actDispatch.status,
+          toolCalls: actDispatch.toolCalls,
+          executed: actDispatch.executed,
+          walletTouched: actDispatch.walletTouched,
+          steps: actDispatch.execution ? actDispatch.execution.steps_completed.length : 0,
+          post_equity: actDispatch.execution ? actDispatch.execution.post_execution_balances.equity : null,
+          fire_time_verdict: actDispatch.execution && actDispatch.execution.fire_time_audit
+            ? actDispatch.execution.fire_time_audit.verdict : null,
+          substrate: actDispatch.execution ? actDispatch.execution.substrate : null,
+          finalText: actDispatch.finalText,
+        }
+      : null,
   };
 
   if (args.json) {
@@ -216,6 +265,7 @@ async function main() {
       analysis: dispatch.analysis,
       proposal: planDispatch ? planDispatch.proposal : null,
       audit_verdict: auditDispatch ? auditDispatch.verdict : null,
+      execution: actDispatch ? actDispatch.execution : null,
     }, null, 2));
   } else {
     printReport(out, args);
@@ -254,6 +304,23 @@ async function main() {
       process.exit(1);
     }
   }
+  // When the auditor approved and the executor was dispatched, the ACT stage
+  // must have completed through the deterministic dry-run executor — and, the
+  // load-bearing safety check, the wallet must NEVER have been touched.
+  if (actDispatch) {
+    if (actDispatch.status !== 'completed') {
+      console.error(`finbot-dispatch: executor dispatch did not complete (status=${actDispatch.status})`);
+      process.exit(1);
+    }
+    if (!actDispatch.toolCalls.includes('simulate_execution')) {
+      console.error('finbot-dispatch: executor never called the deterministic simulate_execution tool');
+      process.exit(1);
+    }
+    if (actDispatch.walletTouched !== false) {
+      console.error('finbot-dispatch: SAFETY VIOLATION — dry-run executor reported walletTouched != false');
+      process.exit(1);
+    }
+  }
 }
 
 function printReport(out, args) {
@@ -285,7 +352,19 @@ function printReport(out, args) {
   } else if (out.decide) {
     log('  AUDIT    (skipped — planner proposed no steps to audit)');
   }
-  log('  DRY-RUN: analyzer, planner, and auditor are read-only; no wallet capability is reachable from their tool subsets.');
+  if (out.act) {
+    log(`  ACT      executor subagent: ${out.act.status}`);
+    log(`           tool calls: ${out.act.toolCalls.join(', ') || '(none)'}`);
+    log(`           dry-run: ${out.act.steps} step(s) simulated`
+      + (out.act.post_equity != null ? `, post-equity ${out.act.post_equity.toFixed(2)}` : '')
+      + (out.act.fire_time_verdict ? `, fire-time audit ${out.act.fire_time_verdict}` : ''));
+    log(`           WALLET TOUCHED: ${out.act.walletTouched}`);
+  } else if (out.audit && out.audit.verdict === 'approved') {
+    log('  ACT      (executor dispatch produced no result)');
+  } else if (out.audit) {
+    log('  ACT      (skipped — auditor did not approve)');
+  }
+  log('  DRY-RUN: analyzer, planner, auditor, and executor are read-only; no wallet capability is reachable from their tool subsets.');
 }
 
 main().catch((err) => {

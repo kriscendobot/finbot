@@ -40,10 +40,12 @@ export {
   pipelineToolRegistry, PIPELINE_TOOL_NAMES,
   plannerToolRegistry, PLANNER_TOOL_NAMES,
   auditorToolRegistry, AUDITOR_TOOL_NAMES,
+  executorToolRegistry, EXECUTOR_TOOL_NAMES,
 } from './agent-tools.js';
 export {
   dispatchAnalyzer, analyzerBrief, makeScriptedAnalyzerLlm,
   extractToolCalls, lastScoringResult,
   dispatchPlanner, plannerBrief, makeScriptedPlannerLlm, lastProposalResult,
   dispatchAuditor, auditorBrief, makeScriptedAuditorLlm, lastAuditResult,
+  dispatchExecutor, executorBrief, makeScriptedExecutorLlm, lastExecutionResult,
 } from './role-dispatch.js';

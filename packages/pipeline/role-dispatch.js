@@ -22,11 +22,14 @@
  * inference, or `makeScriptedAnalyzerLlm(input)` for a faithful offline double
  * that calls the scoring tool with the real opportunity data.
  *
- * DRY-RUN by construction: this drives the ORIENT and DECIDE stages only —
- * both are read-only (the analyzer scores, the planner proposes; neither
- * trades). A proposal is not a signed transaction, so no wallet capability is
- * reachable from either stage's tool subset. Live execution stays gated behind
- * the executor per `designs/cap-attenuation.md`.
+ * DRY-RUN by construction: this drives every OODA stage — ORIENT (analyzer),
+ * DECIDE (planner), and ACT's two halves, the auditor gate and the executor —
+ * with no wallet capability reachable from any stage's tool subset. The
+ * analyzer scores, the planner proposes, the auditor adjudicates, and the
+ * executor SIMULATES against a clone of the portfolio: none trades. The
+ * executor's tool is pinned to `mode: 'dry-run'` and vends no wallet, so
+ * `walletTouched` is always false. A *live* executor dispatch — a real wallet
+ * capability behind CapTP — stays gated per `designs/cap-attenuation.md`.
  */
 
 import crypto from 'node:crypto';
@@ -35,6 +38,7 @@ import {
   pipelineToolRegistry, PIPELINE_TOOL_NAMES,
   plannerToolRegistry, PLANNER_TOOL_NAMES,
   auditorToolRegistry, AUDITOR_TOOL_NAMES,
+  executorToolRegistry, EXECUTOR_TOOL_NAMES,
 } from './agent-tools.js';
 
 /**
@@ -544,4 +548,179 @@ function summarizeVerdictFromToolResults(messages) {
     }
   }
   return 'Auditor gate complete.';
+}
+
+// --- ACT stage (b): inference-driven executor dispatch (DRY-RUN) ------------
+
+/**
+ * Compose the executor's dispatch brief from the audited proposal, the
+ * pre-trade portfolio snapshot, a price book, the forecast (the tail anchor for
+ * the fire-time drift-guard audit), the freshness clock, and the cited oracle
+ * readings. The brief embeds the structured inputs as JSON and tells the
+ * subagent to simulate via the deterministic tool rather than adjusting
+ * balances by hand — and that it is strictly dry-run: no wallet is reachable.
+ *
+ * @param {object} input
+ * @returns {string}
+ */
+export function executorBrief(input) {
+  const payload = {
+    proposal: input.proposal || null,
+    portfolio: input.portfolio || { cash: 0, balances: {} },
+    prices: input.prices || {},
+    forecast: input.forecast || null,
+    currentTick: input.currentTick != null ? input.currentTick : null,
+    oracleReadings: input.oracleReadings || [],
+  };
+  return [
+    'The auditor approved a rebalance proposal. Simulate executing it in DRY-RUN. You are the act',
+    'phase, but strictly dry-run: you never sign, send, or touch a wallet — no wallet capability is',
+    'reachable from your tools. A live execution is a separate, gated capability, never yours here.',
+    '',
+    'Use the `simulate_execution` tool for the simulation — pass it the proposal, the pre-trade',
+    'portfolio snapshot, the price book, the forecast, the current tick, and the cited oracle',
+    'readings below. Do not adjust balances yourself; the tool re-runs the audit invariants at fire',
+    'time (the drift guard), simulates the approved steps against a CLONE of the portfolio (the live',
+    'book is never mutated), and builds the would-be substrate transaction from the steps.',
+    '',
+    'Then report the number of steps simulated, the post-execution equity, and — always — that the',
+    'wallet was never touched (walletTouched: false is the proof).',
+    '',
+    'Inputs (JSON):',
+    JSON.stringify(payload, null, 2),
+  ].join('\n');
+}
+
+/**
+ * Dispatch the executor as an inference-driven subagent over the audited
+ * proposal, with the dry-run executor available as a tool. The stage's
+ * product — the ExecutionResult — is extracted from the tool-execution events,
+ * so the inference-driven path and the headless path yield the same dry-run
+ * simulation. DRY-RUN by construction: the tool vends no wallet and pins
+ * `mode: 'dry-run'`, so `walletTouched` is always false.
+ *
+ * @param {object} input  { proposal, portfolio, prices, forecast?, currentTick?, oracleReadings?, config?, substrate? }
+ * @param {object} deps
+ * @param {Function} deps.spawn        the harness `spawn` function
+ * @param {string}   deps.finbotRoot   root holding `roles/<role>/AGENT.md`
+ * @param {Function} [deps.llm]        injected LLM; omit to use the harness stub (offline)
+ * @param {Record<string, object>} [deps.tools]  tool registry (default: executor dry-run tools)
+ * @param {string[]} [deps.capabilities]         tool subset the executor may call (default: executor tool names)
+ * @returns {Promise<object>} { handle, status, execution, executed, walletTouched, toolCalls, finalText }
+ */
+export async function dispatchExecutor(input, deps) {
+  if (!deps || typeof deps.spawn !== 'function') {
+    throw new Error('dispatchExecutor: deps.spawn (the harness spawn function) is required');
+  }
+  const tools = deps.tools || executorToolRegistry();
+  const capabilities = deps.capabilities || EXECUTOR_TOOL_NAMES;
+
+  const handle = await deps.spawn(
+    {
+      role: 'executor',
+      brief: executorBrief(input),
+      capabilities,
+      llm: deps.llm,
+    },
+    { finbotRoot: deps.finbotRoot, tools },
+  );
+  await handle.done;
+
+  const toolCalls = extractToolCalls(handle.events);
+  const execution = lastExecutionResult(handle.events);
+
+  return {
+    handle,
+    status: handle.status,
+    execution,
+    executed: execution != null,
+    // Always false in dry-run; surfaced explicitly as the wallet-never-touched proof.
+    walletTouched: execution ? execution.walletTouched === true : false,
+    toolCalls,
+    finalText: handle.result ? handle.result.finalText : '',
+  };
+}
+
+/**
+ * Find the ExecutionResult produced by the most recent successful
+ * `simulate_execution` tool call (the act stage's structured product).
+ *
+ * @param {Array<object>} events
+ * @returns {object|null}
+ */
+export function lastExecutionResult(events) {
+  for (let i = (events || []).length - 1; i >= 0; i -= 1) {
+    const e = events[i];
+    if (e.type !== 'tool_execution_end' || !e.toolCall || e.toolCall.name !== 'simulate_execution') continue;
+    const result = e.result;
+    if (!result || result.isError) continue;
+    const jsonBlock = (result.content || []).find((c) => c && c.type === 'json');
+    if (jsonBlock) return jsonBlock.value;
+  }
+  return null;
+}
+
+/**
+ * A deterministic, offline stand-in for an inference-driven executor LLM: it
+ * calls `simulate_execution` with the real proposal + snapshot on turn 0, then
+ * ends with a one-line summary on turn 1. The act-stage (dry-run) counterpart
+ * to {@link makeScriptedAuditorLlm} — exercises the same dispatch wiring as a
+ * real provider with no network call.
+ *
+ * @param {object} input  same shape passed to {@link dispatchExecutor}
+ * @returns {Function} an `llm` matching the spawn contract
+ */
+export function makeScriptedExecutorLlm(input) {
+  return async function scriptedExecutorLlm(args) {
+    if (args.turn === 0 && args.tools && args.tools.simulate_execution) {
+      return {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'Simulating the approved proposal via the deterministic dry-run executor.' },
+          {
+            type: 'toolCall',
+            id: crypto.randomBytes(4).toString('hex'),
+            name: 'simulate_execution',
+            arguments: {
+              proposal: input.proposal || null,
+              portfolio: input.portfolio || { cash: 0, balances: {} },
+              prices: input.prices || {},
+              forecast: input.forecast || null,
+              currentTick: input.currentTick,
+              oracleReadings: input.oracleReadings || [],
+              config: input.config,
+              substrate: input.substrate,
+            },
+          },
+        ],
+        stopReason: 'tool_use',
+        timestamp: Date.now(),
+      };
+    }
+    const summary = summarizeExecutionFromToolResults(args.messages);
+    return {
+      role: 'assistant',
+      content: [{ type: 'text', text: summary }],
+      stopReason: 'end_turn',
+      timestamp: Date.now(),
+    };
+  };
+}
+
+/**
+ * @param {Array<object>} messages
+ * @returns {string}
+ */
+function summarizeExecutionFromToolResults(messages) {
+  for (let i = (messages || []).length - 1; i >= 0; i -= 1) {
+    const m = messages[i];
+    if (m.role !== 'toolResult') continue;
+    const jsonBlock = (m.content || []).find((c) => c && c.type === 'json');
+    if (jsonBlock && jsonBlock.value && jsonBlock.value.mode) {
+      const v = jsonBlock.value;
+      return `Executor dry-run complete: ${v.steps_completed.length} step(s), `
+        + `post-equity ${v.post_execution_balances.equity.toFixed(2)}, walletTouched=${v.walletTouched}`;
+    }
+  }
+  return 'Executor dry-run complete.';
 }
