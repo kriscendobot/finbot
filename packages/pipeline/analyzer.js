@@ -128,6 +128,11 @@ export function realizedVolatility(readings, asset) {
  * @param {object} input
  * @param {import('./oracle-watcher.js').Opportunity[]} input.opportunities
  * @param {Array<{ t: number, prices: Record<string, number> }>} input.readings
+ * @param {Array<{ t: number, prices: Record<string, number> }>} [input.fitReadings]  a LONGER rolling
+ *   window used ONLY for the `config.regimeVol` GARCH fit, so the per-asset MLE (which wants >=12
+ *   returns) can engage even when the deviation/realized-vol window is short. Absent → the regime
+ *   fits from `input.readings`, exactly as before. Both windows end at the same current tick, so the
+ *   conditional-vol read still lands at "where in the vol cycle we are now".
  * @param {{ cash: number, balances: Record<string, number> }} input.portfolio  current snapshot
  * @param {Record<string, number>} input.prices  latest price book
  * @param {Record<string, object>} [input.instruments]   asset -> live instrument descriptor (carry/APR source)
@@ -181,7 +186,13 @@ export function analyze(input, config = {}) {
   // sink the analysis — fall back to the all-realized-vol denominator (empty map).
   let regime = {};
   if (config.regimeVol) {
-    const frames = readings.map((r) => r.prices).filter((p) => p && typeof p === 'object');
+    // The regime fits from the LONGER `fitReadings` when the caller supplies one
+    // (so the per-asset MLE can clear its returns threshold on a short deviation
+    // window); otherwise it fits from the same `readings` as before.
+    const fitWindow = input.fitReadings && input.fitReadings.length >= readings.length
+      ? input.fitReadings
+      : readings;
+    const frames = fitWindow.map((r) => r.prices).filter((p) => p && typeof p === 'object');
     if (frames.length >= 2) {
       try {
         regime = conditionalVolFromPriceHistory(frames, config.regimeVol);

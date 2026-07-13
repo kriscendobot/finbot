@@ -136,6 +136,9 @@ export function makeRebalanceAction(targetWeights, bounds) {
  * @param {Record<string, number>} input.targetWeights
  * @param {object} [input.bounds]            rebalance risk bounds (forwarded to deriveSteps)
  * @param {Array<{ t?: number, prices?: Record<string, number> }>} [input.readings]  observed window, for an adaptive vol fit
+ * @param {Array<{ t?: number, prices?: Record<string, number> }>} [input.fitReadings]  a LONGER rolling
+ *   window used ONLY for the adaptive vol fit, so the per-asset GARCH MLE can engage on a short live
+ *   cycle. Absent → the fit uses `input.readings`, byte-identical to before.
  * @param {object} [config]
  * @param {number} [config.horizon]          ticks per child (default 20)
  * @param {number} [config.ensembleSize]     children (default 200)
@@ -167,8 +170,14 @@ export function project(input, config = {}) {
   // Optionally fit a conditional-vol surface from the observed window and
   // project the ensemble under it (adaptive per-instrument vol). Off by
   // default and inert on a too-short/degenerate window → unchanged behaviour.
+  // The adaptive fit prefers a longer `fitReadings` when the caller supplies one
+  // (engaging the per-asset MLE on a short live window); else it fits from the
+  // same `readings` as before. Both windows end at the current tick.
+  const fitReadings = input.fitReadings && input.fitReadings.length >= (input.readings || []).length
+    ? input.fitReadings
+    : input.readings;
   const { world: forecastWorld, fit: volFit } = fitForecastWorld(
-    input.world, input.readings, config.adaptiveVol,
+    input.world, fitReadings, config.adaptiveVol,
   );
 
   const action = makeRebalanceAction(input.targetWeights, bounds);

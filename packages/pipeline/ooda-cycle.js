@@ -45,8 +45,9 @@ import { navOf } from './rebalance.js';
  * @param {object} input
  * @param {import('@finbot/simulator/world').World} input.world   already warmed up (history present on its sim, or pass `readings`)
  * @param {Array<{ t: number, prices: Record<string, number> }>} [input.readings]   oracle window; else derived from `input.history`
+ * @param {Array<{ t: number, prices: Record<string, number> }>} [input.fitReadings]   longer rolling window for the vol-surface fit only; else derived from `input.history` via `config.fitWindowTicks`, else the oracle window
  * @param {Array<object>} [input.history]   simulator history to window from when `readings` absent
- * @param {object} [input.config]           per-stage config (see below)
+ * @param {object} [input.config]           per-stage config; `config.windowTicks` (oracle/realized-vol window, default 10) and `config.fitWindowTicks` (longer vol-fit window, default = windowTicks) among them
  * @param {object} [input.recorder]         optional { record(entry): Promise<string> }
  * @param {string} [input.cycleId]
  * @returns {Promise<OodaResult>}
@@ -67,8 +68,24 @@ export async function runOodaCycle(input) {
   // planner than auditor would otherwise self-reject every cycle).
   const auditorConfig = { ...(config.bounds || {}), ...(config.auditor || {}) };
 
+  const windowTicks = config.windowTicks || 10;
   const readings = input.readings
-    || windowFromHistory(input.history || [], config.windowTicks || 10);
+    || windowFromHistory(input.history || [], windowTicks);
+
+  // Separable fit window: the oracle deviation and realized-vol reads want a
+  // short, recent window (`readings`), but the GARCH vol-surface fit wants a
+  // LONGER rolling history so the per-asset MLE (>=12 returns) can engage on a
+  // live cycle. `config.fitWindowTicks` (default = windowTicks) draws that
+  // longer window from the same history; it ends at the same current tick, so
+  // the regime read still lands "where in the vol cycle we are now". Absent or
+  // <= windowTicks → fitReadings === readings and the cycle is byte-identical.
+  const fitWindowTicks = config.fitWindowTicks && config.fitWindowTicks > windowTicks
+    ? config.fitWindowTicks
+    : windowTicks;
+  const fitReadings = input.fitReadings
+    || (fitWindowTicks > windowTicks && !input.readings
+      ? windowFromHistory(input.history || [], fitWindowTicks)
+      : readings);
 
   // ----- OBSERVE: oracle-watcher -----
   const observed = observeOpportunities({ readings }, config.oracle || {});
@@ -99,6 +116,7 @@ export async function runOodaCycle(input) {
     {
       opportunities: observed.crossings,
       readings,
+      fitReadings,
       portfolio: world.portfolio.markToMarket(prices),
       prices,
       instruments: world.instruments,
@@ -118,7 +136,7 @@ export async function runOodaCycle(input) {
 
   // ----- ORIENT (b): forecaster (Monte Carlo via simulator) -----
   const forecast = project(
-    { world, targetWeights: analysis.targetWeights, bounds: config.bounds || {}, readings },
+    { world, targetWeights: analysis.targetWeights, bounds: config.bounds || {}, readings, fitReadings },
     config.forecaster || {},
   );
   const forecastId = await record({

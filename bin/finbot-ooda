@@ -20,6 +20,9 @@
  *   --drift=F        per-tick GBM drift for ATOM (default -0.01, biases a dip)
  *   --vol=F          per-tick GBM volatility for ATOM (default 0.02)
  *   --warmup=N       price-feed warmup ticks before the cycle (default 10)
+ *   --fit-window=N   longer rolling window for the GARCH vol-surface fit only (default = warmup);
+ *                    set > warmup (e.g. 13+) so `--adaptive-vol=mle` engages the per-asset MLE while
+ *                    the oracle deviation / realized-vol reads stay on the short `warmup` window
  *   --threshold=BPS  oracle deviation threshold in basis points (default 30)
  *   --ensemble=N     forecaster ensemble size (default 200)
  *   --horizon=N      forecaster horizon in ticks (default 20)
@@ -47,7 +50,7 @@ function parseArgs(argv) {
   const args = {
     seed: 7, drift: -0.01, vol: 0.02, warmup: 10, threshold: 30,
     ensemble: 200, horizon: 20, tailFloor: 0.6, journal: null, json: false,
-    multi: false, adaptiveVol: null,
+    multi: false, adaptiveVol: null, fitWindow: 0,
   };
   for (const arg of argv) {
     const eq = arg.indexOf('=');
@@ -57,6 +60,7 @@ function parseArgs(argv) {
     else if (key === '--drift') args.drift = Number(val);
     else if (key === '--vol') args.vol = Number(val);
     else if (key === '--warmup') args.warmup = Number(val);
+    else if (key === '--fit-window') args.fitWindow = Number(val);
     else if (key === '--threshold') args.threshold = Number(val);
     else if (key === '--ensemble') args.ensemble = Number(val);
     else if (key === '--horizon') args.horizon = Number(val);
@@ -84,7 +88,7 @@ function printHelp() {
     'finbot-ooda — one dry-run OODA cycle over the simulator',
     '',
     'Usage:',
-    '  finbot-ooda [--seed=N] [--drift=F] [--vol=F] [--warmup=N]',
+    '  finbot-ooda [--seed=N] [--drift=F] [--vol=F] [--warmup=N] [--fit-window=N]',
     '              [--threshold=BPS] [--ensemble=N] [--horizon=N]',
     '              [--tail-floor=F] [--multi] [--adaptive-vol[=mle]]',
     '              [--journal=PATH] [--json]',
@@ -117,6 +121,7 @@ function buildSingleWorld(args) {
   });
   const config = {
     windowTicks: args.warmup,
+    fitWindowTicks: args.fitWindow,
     oracle: { thresholdBps: args.threshold },
     analyzer: { scoreFloor: 0 },
     forecaster: { ensembleSize: args.ensemble, horizon: args.horizon, baseSeed: 1000 + args.seed, adaptiveVol: args.adaptiveVol },
@@ -150,6 +155,7 @@ function buildMultiWorld(args) {
   });
   const config = {
     windowTicks: args.warmup,
+    fitWindowTicks: args.fitWindow,
     oracle: { thresholdBps: args.threshold },
     analyzer: {
       scoreFloor: 0, maxPositions: 3, maxTotalWeight: 0.8, maxTargetWeight: 0.5,
@@ -168,7 +174,11 @@ async function main() {
   const { world, config } = args.multi ? buildMultiWorld(args) : buildSingleWorld(args);
 
   const sim = runSimulator(world);
-  for (let i = 0; i < args.warmup; i += 1) sim.tick();
+  // Warm enough ticks for the LONGER of the two windows: the oracle/realized-vol
+  // read still takes the last `warmup` ticks, but a longer `--fit-window` needs
+  // that much history present for the GARCH MLE fit to see it.
+  const warmupTicks = Math.max(args.warmup, args.fitWindow || 0);
+  for (let i = 0; i < warmupTicks; i += 1) sim.tick();
   // Income the instrument registry accrued over the warm-up (0 when no
   // yield/dividend leg is present).
   args._accruedIncome = world.portfolio.markToMarket(world.priceFeed.current()).accruedIncome || 0;
