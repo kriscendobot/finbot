@@ -27,6 +27,8 @@
  *   --ensemble=N     forecaster ensemble size (default 200)
  *   --horizon=N      forecaster horizon in ticks (default 20)
  *   --tail-floor=F   auditor tail-risk floor as a fraction of NAV (default 0.6)
+ *   --regime-tail-bump=F  extra tail floor a fully persistent vol regime adds (default: 0.1 when
+ *                    --adaptive-vol is on, else 0); a persistent GARCH regime tightens the audit gate
  *   --multi          run the multi-instrument world (correlated growth legs + a yield leg)
  *   --adaptive-vol[=mle]  fit a conditional-vol GARCH surface from the window; the
  *                    forecaster projects the ensemble under it and the analyzer
@@ -50,7 +52,7 @@ function parseArgs(argv) {
   const args = {
     seed: 7, drift: -0.01, vol: 0.02, warmup: 10, threshold: 30,
     ensemble: 200, horizon: 20, tailFloor: 0.6, journal: null, json: false,
-    multi: false, adaptiveVol: null, fitWindow: 0,
+    multi: false, adaptiveVol: null, fitWindow: 0, regimeTailBump: null,
   };
   for (const arg of argv) {
     const eq = arg.indexOf('=');
@@ -65,6 +67,7 @@ function parseArgs(argv) {
     else if (key === '--ensemble') args.ensemble = Number(val);
     else if (key === '--horizon') args.horizon = Number(val);
     else if (key === '--tail-floor') args.tailFloor = Number(val);
+    else if (key === '--regime-tail-bump') args.regimeTailBump = Number(val);
     else if (key === '--journal') args.journal = val;
     else if (key === '--json') args.json = true;
     else if (key === '--multi') args.multi = true;
@@ -90,7 +93,7 @@ function printHelp() {
     'Usage:',
     '  finbot-ooda [--seed=N] [--drift=F] [--vol=F] [--warmup=N] [--fit-window=N]',
     '              [--threshold=BPS] [--ensemble=N] [--horizon=N]',
-    '              [--tail-floor=F] [--multi] [--adaptive-vol[=mle]]',
+    '              [--tail-floor=F] [--regime-tail-bump=F] [--multi] [--adaptive-vol[=mle]]',
     '              [--journal=PATH] [--json]',
     '',
     'DRY-RUN ONLY. Never reads a keystore; never constructs a wallet.',
@@ -126,7 +129,12 @@ function buildSingleWorld(args) {
     analyzer: { scoreFloor: 0 },
     forecaster: { ensembleSize: args.ensemble, horizon: args.horizon, baseSeed: 1000 + args.seed, adaptiveVol: args.adaptiveVol },
     bounds: { maxStepPct: 0.25, maxDayPct: 0.5, concentrationCapPct: 0.9 },
-    auditor: { tailFloorPct: args.tailFloor, stalenessWindowTicks: args.warmup + 1 },
+    auditor: {
+      tailFloorPct: args.tailFloor, stalenessWindowTicks: args.warmup + 1,
+      // Explicit flag pins the regime bump; otherwise the ooda-cycle defaults it
+      // to 0.1 when --adaptive-vol is on and leaves it 0 (unchanged gate) when off.
+      ...(args.regimeTailBump != null ? { regimeTailBump: args.regimeTailBump } : {}),
+    },
   };
   return { world, config };
 }
@@ -163,7 +171,12 @@ function buildMultiWorld(args) {
     },
     forecaster: { ensembleSize: args.ensemble, horizon: args.horizon, baseSeed: 1000 + args.seed, adaptiveVol: args.adaptiveVol },
     bounds: { maxStepPct: 0.4, maxDayPct: 1.0, concentrationCapPct: 0.9 },
-    auditor: { tailFloorPct: args.tailFloor, stalenessWindowTicks: args.warmup + 1 },
+    auditor: {
+      tailFloorPct: args.tailFloor, stalenessWindowTicks: args.warmup + 1,
+      // Explicit flag pins the regime bump; otherwise the ooda-cycle defaults it
+      // to 0.1 when --adaptive-vol is on and leaves it 0 (unchanged gate) when off.
+      ...(args.regimeTailBump != null ? { regimeTailBump: args.regimeTailBump } : {}),
+    },
   };
   return { world, config };
 }

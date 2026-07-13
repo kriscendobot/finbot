@@ -37,6 +37,14 @@ import { stepHasRealRoute } from './substrates.js';
  * @param {number} [config.maxDayPct]                default 0.50
  * @param {number} [config.concentrationCapPct]      default 0.80
  * @param {number} [config.tailFloorPct]             p05 terminal equity >= this * NAV (default 0.80)
+ * @param {number} [config.regimeTailBump]           max extra floor (as a fraction of NAV) a fully
+ *   persistent vol regime adds to `tailFloorPct` (default 0 → OFF, gate unchanged). The forecast's
+ *   per-instrument GARCH persistence tightens the tail-risk gate: a highly persistent (clustering,
+ *   slow-decaying) regime has fatter downside tails than its p05 point estimate alone conveys, so a
+ *   persistent regime must clear a *higher* downside floor. Inert without a `forecast.volFit`.
+ * @param {number} [config.regimePersistenceLo]      persistence at/below which the bump is 0 (default 0.70)
+ * @param {number} [config.regimePersistenceHi]      persistence at/above which the bump is full (default 0.98)
+ * @param {number} [config.regimeTailFloorCap]       the regime-tightened floor never exceeds this * NAV (default 0.98)
  * @param {number} [config.stalenessWindowTicks]     cited readings no older than this (default 5)
  * @returns {AuditVerdict}
  */
@@ -45,6 +53,10 @@ export function audit(input, config = {}) {
   const maxDayPct = config.maxDayPct != null ? config.maxDayPct : 0.50;
   const concentrationCapPct = config.concentrationCapPct != null ? config.concentrationCapPct : 0.80;
   const tailFloorPct = config.tailFloorPct != null ? config.tailFloorPct : 0.80;
+  const regimeTailBump = config.regimeTailBump != null ? config.regimeTailBump : 0;
+  const regimePersistenceLo = config.regimePersistenceLo != null ? config.regimePersistenceLo : 0.70;
+  const regimePersistenceHi = config.regimePersistenceHi != null ? config.regimePersistenceHi : 0.98;
+  const regimeTailFloorCap = config.regimeTailFloorCap != null ? config.regimeTailFloorCap : 0.98;
   const stalenessWindowTicks = config.stalenessWindowTicks != null ? config.stalenessWindowTicks : 5;
 
   const { proposal, forecast, prices } = input;
@@ -93,14 +105,25 @@ export function audit(input, config = {}) {
   results.push({ name: 'risk-bound-compliance', pass: riskPass, detail: riskDetail });
 
   // 3. Tail-risk floor: forecast 5th-percentile terminal equity clears floor.
-  const floor = tailFloorPct * nav;
+  // A persistent vol regime (per-instrument GARCH persistence in the forecast's
+  // volFit) tightens the floor: high persistence clusters shocks and fattens the
+  // downside beyond what the p05 point estimate alone shows, so a persistent
+  // regime must clear a higher floor. `regimeTailBump` = 0 (default) or a plain
+  // forecast without a volFit leaves the floor at `tailFloorPct` exactly.
+  const regime = regimeTailFloor({
+    forecast, tailFloorPct, regimeTailBump,
+    regimePersistenceLo, regimePersistenceHi, regimeTailFloorCap,
+  });
+  const floor = regime.floorPct * nav;
   const tailPass = forecast != null && forecast.p05Equity >= floor - 1e-6;
   results.push({
     name: 'tail-risk-floor',
     pass: tailPass,
     detail: forecast == null
       ? 'no forecast supplied'
-      : `forecast p05 terminal equity ${forecast.p05Equity.toFixed(2)} vs floor ${floor.toFixed(2)} (${(tailFloorPct * 100).toFixed(0)}% of NAV)`,
+      : `forecast p05 terminal equity ${forecast.p05Equity.toFixed(2)} vs floor ${floor.toFixed(2)} (${(regime.floorPct * 100).toFixed(1)}% of NAV${regime.tightened
+          ? `; regime-tightened from ${(tailFloorPct * 100).toFixed(1)}% on persistence ${regime.persistence.toFixed(3)} of ${regime.worstAsset}`
+          : ''})`,
   });
 
   // 4. Reproducibility: recompute the hash from the steps.
@@ -150,5 +173,61 @@ export function audit(input, config = {}) {
     verdict: failed.length === 0 ? 'approved' : 'rejected',
     invariant_results: results,
     failed_invariants: failed,
+  };
+}
+
+/**
+ * Compute the (possibly regime-tightened) tail-risk floor as a fraction of NAV.
+ *
+ * The forecast's `volFit.assets[asset].persistence` (α+β, the GARCH clustering
+ * coefficient) is the signal: a highly persistent regime holds an elevated
+ * conditional variance for many ticks, so a shock this cycle compounds into a
+ * deeper drawdown than an equal-variance-but-mean-reverting regime would. The
+ * forecast's p05 already prices *some* of this (the ensemble projects under the
+ * fitted surface), but a single-window persistence estimate is noisy and a
+ * point p05 gives no margin for that estimation error — so a persistent regime
+ * must clear extra downside headroom before the gate approves live execution.
+ *
+ * The bump is a deterministic linear ramp of the WORST asset's persistence from
+ * `lo` (no bump) to `hi` (full `regimeTailBump`), added to `tailFloorPct` and
+ * capped at `regimeTailFloorCap`. Deterministic, bounded, and — when
+ * `regimeTailBump` is 0 or the forecast carries no volFit — exactly the
+ * unadjusted `tailFloorPct`, so the default gate is byte-identical to before.
+ *
+ * @returns {{ floorPct: number, tightened: boolean, persistence: number, worstAsset: string|null }}
+ */
+function regimeTailFloor({
+  forecast, tailFloorPct, regimeTailBump,
+  regimePersistenceLo, regimePersistenceHi, regimeTailFloorCap,
+}) {
+  const base = { floorPct: tailFloorPct, tightened: false, persistence: 0, worstAsset: null };
+  if (!(regimeTailBump > 0)) return base;
+  const assets = forecast && forecast.volFit && forecast.volFit.assets;
+  if (!assets || typeof assets !== 'object') return base;
+
+  // The portfolio is only as safe as its most persistent instrument's regime;
+  // take the max persistence across the fitted assets (worst-case tail).
+  let worstAsset = null;
+  let maxPersistence = -Infinity;
+  for (const [asset, st] of Object.entries(assets)) {
+    const p = st && typeof st.persistence === 'number' ? st.persistence : null;
+    if (p == null || !Number.isFinite(p)) continue;
+    if (p > maxPersistence) { maxPersistence = p; worstAsset = asset; }
+  }
+  if (worstAsset == null) return base;
+
+  const span = regimePersistenceHi - regimePersistenceLo;
+  const stress = span > 0
+    ? Math.max(0, Math.min(1, (maxPersistence - regimePersistenceLo) / span))
+    : (maxPersistence >= regimePersistenceHi ? 1 : 0);
+  if (stress <= 0) {
+    return { floorPct: tailFloorPct, tightened: false, persistence: maxPersistence, worstAsset };
+  }
+  const bumped = Math.min(regimeTailFloorCap, tailFloorPct + regimeTailBump * stress);
+  return {
+    floorPct: bumped,
+    tightened: bumped > tailFloorPct + 1e-12,
+    persistence: maxPersistence,
+    worstAsset,
   };
 }

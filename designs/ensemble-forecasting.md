@@ -351,3 +351,44 @@ persistence / conditional-vol read shifting risk appetite), and lengthen or roll
 the OODA observation window so the live cycle actually engages the MLE instead of
 falling back. Deferred as before: gamma/asymmetric MLE, EGARCH, implied-vol
 surfaces, PNG rasterization, far-ref vending.
+
+## Notes from the field (2026-07-13 — regime-aware tail floor)
+
+The prior cuts *measured* the per-instrument regime (adaptive GARCH vol surface,
+light per-asset MLE of α/β, a separable vol-fit window that engages the MLE on a
+live cycle, and an analyzer that scores under the current regime). This cut closes
+the loop: **the regime now changes what the auditor decides.**
+
+- **Regime-aware tail-risk floor** (`packages/pipeline/auditor.js`). The forecast's
+  per-instrument GARCH persistence (α+β, carried in `forecast.volFit.assets`)
+  tightens the auditor's tail floor. A highly persistent regime holds an elevated
+  conditional variance for many ticks, so a shock this cycle compounds into a
+  deeper drawdown than an equal-variance-but-mean-reverting regime — and a
+  single-window persistence estimate is itself noisy, so a point p05 gives no
+  margin for that estimation error. The gate therefore demands extra downside
+  headroom: `effectiveFloorPct = min(cap, tailFloorPct + regimeTailBump · stress)`,
+  where `stress` is a deterministic linear ramp of the **worst** asset's
+  persistence from `regimePersistenceLo` (0.70, no bump) to `regimePersistenceHi`
+  (0.98, full bump). Bounded by `regimeTailFloorCap` (0.98).
+- **Off by default, byte-identical when inert.** `regimeTailBump` defaults to 0, so
+  a plain (non-adaptive) audit — and every existing gate — is unchanged. The
+  `ooda-cycle` defaults the bump to 0.1 **only when `forecaster.adaptiveVol` is
+  set**, mirroring how it already threads the analyzer's `regimeVol`; a caller can
+  pin or disable it with `config.auditor.regimeTailBump`. The CLI exposes
+  `--regime-tail-bump=F`.
+- **Proven end to end.** New `packages/pipeline/test/regime-tail-floor.test.js`
+  (plain-GARCH fit carries persistence 0.98 into the floor; the ooda-cycle defaults
+  the 0.1 bump when adaptive vol is on and leaves it untightened when off) plus six
+  auditor unit cases in `roles.test.js` (off-by-default, tightens-and-rejects,
+  calm-regime-no-tighten, worst-asset keying, inert-without-volFit, cap-bounded).
+  Full suite **520 pass / 0 fail**; `finbot-ooda --seed=7` across every mode green
+  with **WALLET TOUCHED: false**. Demonstrated flip: an adaptive cycle at
+  `--tail-floor=0.7` tightens to 80% and still approves (p05 clears), while
+  `--regime-tail-bump=0.5` caps the floor at 98% and **rejects** the same proposal —
+  the regime measurably moved the pre-execution decision, wallet untouched.
+
+Next on this axis: feed regime persistence into the **forecaster horizon** (a
+high-persistence regime argues for a longer projection, so a transient shock is not
+amortized away), or into the **analyzer's risk appetite** more directly. Deferred as
+before: gamma/asymmetric MLE, EGARCH, implied-vol surfaces, PNG rasterization,
+far-ref vending.

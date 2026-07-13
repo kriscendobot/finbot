@@ -142,6 +142,73 @@ test('auditor: rejects on tail-risk floor breach', () => {
   assert.ok(v.failed_invariants.includes('tail-risk-floor'));
 });
 
+// A forecast whose p05 sits between the base floor (0.8·NAV = 800) and a
+// regime-tightened floor, so the persistence bump is what flips the gate.
+function volFitForecast(persistenceByAsset) {
+  const assets = {};
+  for (const [a, p] of Object.entries(persistenceByAsset)) {
+    assets[a] = { unconditionalVol: 0.02, sigma0: 0.02, persistence: p };
+  }
+  return {
+    p05Equity: 950, p50Equity: 1000, p95Equity: 1100,
+    summary: { p05: 950, p50: 1000, p95: 1100 },
+    volFit: { kind: 'garch', source: 'observed-window', frames: 16, assets },
+  };
+}
+
+test('auditor: regime bump off by default — a persistent regime leaves the gate byte-identical', () => {
+  const ctx = auditCtx({ forecast: volFitForecast({ ATOM: 0.98 }) });
+  const v = audit(ctx, { maxStepPct: 1, tailFloorPct: 0.8 }); // regimeTailBump defaults to 0
+  assert.equal(v.verdict, 'approved', JSON.stringify(v.failed_invariants));
+  const tail = v.invariant_results.find((r) => r.name === 'tail-risk-floor');
+  assert.doesNotMatch(tail.detail, /regime-tightened/);
+});
+
+test('auditor: a persistent vol regime tightens the tail floor and rejects', () => {
+  const ctx = auditCtx({ forecast: volFitForecast({ ATOM: 0.98 }) });
+  // bump 0.2 at full persistence → floor min(0.98, 1.0)=0.98 → 980 > p05 950.
+  const v = audit(ctx, { maxStepPct: 1, tailFloorPct: 0.8, regimeTailBump: 0.2 });
+  assert.equal(v.verdict, 'rejected');
+  assert.ok(v.failed_invariants.includes('tail-risk-floor'));
+  const tail = v.invariant_results.find((r) => r.name === 'tail-risk-floor');
+  assert.match(tail.detail, /regime-tightened.*persistence 0\.980 of ATOM/);
+});
+
+test('auditor: a calm (low-persistence) regime does not tighten — approves', () => {
+  const ctx = auditCtx({ forecast: volFitForecast({ ATOM: 0.5 }) }); // below lo=0.7
+  const v = audit(ctx, { maxStepPct: 1, tailFloorPct: 0.8, regimeTailBump: 0.2 });
+  assert.equal(v.verdict, 'approved', JSON.stringify(v.failed_invariants));
+  const tail = v.invariant_results.find((r) => r.name === 'tail-risk-floor');
+  assert.doesNotMatch(tail.detail, /regime-tightened/);
+});
+
+test('auditor: tightening keys on the WORST asset persistence across the portfolio', () => {
+  const ctx = auditCtx({ forecast: volFitForecast({ ATOM: 0.5, OSMO: 0.98 }) });
+  const v = audit(ctx, { maxStepPct: 1, tailFloorPct: 0.8, regimeTailBump: 0.2 });
+  assert.equal(v.verdict, 'rejected');
+  const tail = v.invariant_results.find((r) => r.name === 'tail-risk-floor');
+  assert.match(tail.detail, /of OSMO/);
+});
+
+test('auditor: regime bump is inert without a forecast volFit even when enabled', () => {
+  // Plain forecast (no volFit) + bump enabled → floor stays at the base 0.8.
+  const ctx = auditCtx();
+  const v = audit(ctx, { maxStepPct: 1, tailFloorPct: 0.8, regimeTailBump: 0.2 });
+  assert.equal(v.verdict, 'approved', JSON.stringify(v.failed_invariants));
+  const tail = v.invariant_results.find((r) => r.name === 'tail-risk-floor');
+  assert.doesNotMatch(tail.detail, /regime-tightened/);
+});
+
+test('auditor: the regime-tightened floor is capped by regimeTailFloorCap', () => {
+  // Huge bump would push far past 1.0, but the cap holds it; with cap 0.9 the
+  // floor is 900 < p05 950 → still approves, proving the cap bounds the bump.
+  const ctx = auditCtx({ forecast: volFitForecast({ ATOM: 0.98 }) });
+  const v = audit(ctx, { maxStepPct: 1, tailFloorPct: 0.8, regimeTailBump: 5, regimeTailFloorCap: 0.9 });
+  assert.equal(v.verdict, 'approved', JSON.stringify(v.failed_invariants));
+  const tail = v.invariant_results.find((r) => r.name === 'tail-risk-floor');
+  assert.match(tail.detail, /90\.0% of NAV/);
+});
+
 test('auditor: rejects on hash tamper (reproducibility)', () => {
   const ctx = auditCtx();
   ctx.proposal = { ...ctx.proposal, steps: ctx.proposal.steps.map((s) => ({ ...s, qty: s.qty + 1 })) };

@@ -67,6 +67,15 @@ export async function runOodaCycle(input) {
   // bounds keeps the gate consistent with the plan by construction (a looser
   // planner than auditor would otherwise self-reject every cycle).
   const auditorConfig = { ...(config.bounds || {}), ...(config.auditor || {}) };
+  // When the forecaster fits an adaptive vol surface, its per-instrument GARCH
+  // persistence lands in the forecast's volFit — so let the audit gate tighten
+  // the tail floor on a persistent regime by default (the caller can still pin
+  // or disable it with an explicit `config.auditor.regimeTailBump`). Mirrors the
+  // regimeVol threading below: adaptive vol on → the regime informs the gate too.
+  if (auditorConfig.regimeTailBump === undefined
+      && config.forecaster && config.forecaster.adaptiveVol) {
+    auditorConfig.regimeTailBump = 0.1;
+  }
 
   const windowTicks = config.windowTicks || 10;
   const readings = input.readings
