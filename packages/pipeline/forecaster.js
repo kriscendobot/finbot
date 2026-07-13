@@ -95,6 +95,96 @@ function round12(x) {
 }
 
 /**
+ * The single most persistent instrument in a fitted vol regime — the portfolio
+ * is only as calm as its worst (most clustering) asset, so every regime read
+ * keys off the max per-asset GARCH persistence (α+β). Returns `{ worstAsset,
+ * persistence }`, with `worstAsset: null` / `persistence: 0` when the fit
+ * carries no usable per-asset persistence (no `volFit`, no `assets`, or every
+ * entry non-finite) — the inert case every caller treats as "no regime signal".
+ *
+ * Shared by the auditor's regime-tail-floor and the forecaster's regime-horizon
+ * so the two levers key off the SAME worst-asset the same way.
+ *
+ * @param {object|null|undefined} volFit   a forecast's `volFit` (`{ assets: { [asset]: { persistence } } }`)
+ * @returns {{ worstAsset: string|null, persistence: number }}
+ */
+export function worstAssetPersistence(volFit) {
+  const assets = volFit && volFit.assets;
+  if (!assets || typeof assets !== 'object') return { worstAsset: null, persistence: 0 };
+  let worstAsset = null;
+  let maxPersistence = -Infinity;
+  for (const [asset, st] of Object.entries(assets)) {
+    const p = st && typeof st.persistence === 'number' ? st.persistence : null;
+    if (p == null || !Number.isFinite(p)) continue;
+    if (p > maxPersistence) { maxPersistence = p; worstAsset = asset; }
+  }
+  if (worstAsset == null) return { worstAsset: null, persistence: 0 };
+  return { worstAsset, persistence: maxPersistence };
+}
+
+/**
+ * Deterministic linear ramp of a persistence value from `lo` (→ 0, no stress) to
+ * `hi` (→ 1, full stress), clamped to [0, 1]. A degenerate `lo === hi` window is
+ * a step at `hi`. Shared by every regime lever so a given persistence produces
+ * the identical stress fraction whether it tightens the tail floor or stretches
+ * the horizon.
+ *
+ * @param {number} persistence
+ * @param {number} lo
+ * @param {number} hi
+ * @returns {number}
+ */
+export function persistenceStress(persistence, lo, hi) {
+  const span = hi - lo;
+  if (span > 0) return Math.max(0, Math.min(1, (persistence - lo) / span));
+  return persistence >= hi ? 1 : 0;
+}
+
+/**
+ * Compute the (possibly regime-stretched) projection horizon. A persistent vol
+ * regime (high worst-asset GARCH persistence in the fitted `volFit`) holds its
+ * elevated conditional variance for many ticks, so a shock this cycle compounds
+ * rather than mean-reverting away inside a short window — projecting LONGER lets
+ * the drawdown-and-recovery dynamics the auditor's pathStats read out resolve
+ * instead of truncating mid-shock. The stretch is a deterministic linear ramp of
+ * the WORST asset's persistence (the same worst-asset the tail floor keys off)
+ * from `lo` (→ no stretch) to `hi` (→ full `stretch`), multiplied into the base
+ * horizon and rounded, bounded by `cap`. When `stretch` is 0 (default) or the
+ * forecast carries no persistent-enough regime, the horizon is exactly
+ * `baseHorizon` and `regime` is null — so the projection stays byte-identical.
+ *
+ * The companion of the auditor's `regimeTailFloor`: measure-the-regime (adaptive
+ * vol fit) then let-the-regime-decide, here on the projection depth.
+ *
+ * @param {object} args
+ * @param {number} args.baseHorizon
+ * @param {object|null} args.volFit          the forecast's fitted vol regime (`{ assets: {...} }`)
+ * @param {number} args.stretch              max fractional extension at full persistence (0 → off)
+ * @param {number} args.lo                   persistence at/below which the stretch is 0
+ * @param {number} args.hi                   persistence at/above which the stretch is full
+ * @param {number} args.cap                  the stretched horizon never exceeds this many ticks
+ * @returns {{ horizon: number, regime: { baseHorizon: number, persistence: number, worstAsset: string, stress: number }|null }}
+ */
+export function regimeHorizon({ baseHorizon, volFit, stretch, lo, hi, cap }) {
+  if (!(stretch > 0) || !volFit) return { horizon: baseHorizon, regime: null };
+  const { worstAsset, persistence } = worstAssetPersistence(volFit);
+  if (worstAsset == null) return { horizon: baseHorizon, regime: null };
+  const stress = persistenceStress(persistence, lo, hi);
+  if (stress <= 0) return { horizon: baseHorizon, regime: null };
+  const stretched = Math.min(cap, Math.round(baseHorizon * (1 + stretch * stress)));
+  if (stretched <= baseHorizon) return { horizon: baseHorizon, regime: null };
+  return {
+    horizon: stretched,
+    regime: {
+      baseHorizon,
+      persistence: round12(persistence),
+      worstAsset,
+      stress: round12(stress),
+    },
+  };
+}
+
+/**
  * @typedef {object} ForecastProjection
  * @property {Record<string, number>} targetWeights
  * @property {number} horizon
@@ -109,6 +199,8 @@ function round12(x) {
  * @property {number} p50Equity
  * @property {number} pProfit
  * @property {Array<object>} actionSteps   the steps the projection applied at t=1
+ * @property {object} [horizonRegime]      present only when a persistent regime stretched the horizon:
+ *   `{ baseHorizon, persistence, worstAsset, stress }` (the citation trail for why `horizon > baseHorizon`)
  * @property {string} [projectionSvg]      deterministic SVG render of the histogram
  */
 
@@ -150,16 +242,28 @@ export function makeRebalanceAction(targetWeights, bounds) {
  *                                           `history` is fit from `input.readings`, so the ensemble models the
  *                                           volatility regime actually observed this cycle instead of the world's
  *                                           statically-configured surface. Absent → the world is used unchanged.
+ * @param {number} [config.regimeHorizonStretch]   max FRACTIONAL horizon extension a fully persistent vol regime
+ *   adds to the base horizon (default 0 → OFF, horizon unchanged). The adaptive fit's worst-asset GARCH persistence
+ *   ramps this: a persistent regime holds elevated conditional variance for many ticks, so a shock this cycle isn't
+ *   mean-reverted away inside a short horizon — projecting it LONGER lets the drawdown-and-recovery dynamics the
+ *   auditor reads resolve instead of truncating mid-shock. Inert without an `adaptiveVol` fit (no `volFit`).
+ * @param {number} [config.regimePersistenceLo]    persistence at/below which the stretch is 0 (default 0.70)
+ * @param {number} [config.regimePersistenceHi]    persistence at/above which the stretch is full (default 0.98)
+ * @param {number} [config.regimeHorizonCap]       the regime-stretched horizon never exceeds this many ticks (default 60)
  * @returns {ForecastProjection}
  */
 export function project(input, config = {}) {
-  const horizon = config.horizon != null ? config.horizon : 20;
+  const baseHorizon = config.horizon != null ? config.horizon : 20;
   const ensembleSize = config.ensembleSize != null ? config.ensembleSize : 200;
   const baseSeed = config.baseSeed != null ? config.baseSeed : 1000;
   const bins = config.bins != null ? config.bins : 12;
   const render = config.render !== false;
   const program = config.program || 'rebalance';
   const bounds = input.bounds || {};
+  const regimeHorizonStretch = config.regimeHorizonStretch != null ? config.regimeHorizonStretch : 0;
+  const regimePersistenceLo = config.regimePersistenceLo != null ? config.regimePersistenceLo : 0.70;
+  const regimePersistenceHi = config.regimePersistenceHi != null ? config.regimePersistenceHi : 0.98;
+  const regimeHorizonCap = config.regimeHorizonCap != null ? config.regimeHorizonCap : 60;
 
   // Current snapshot is read from the ORIGINAL world, so currentNav and the
   // cited actionSteps stay byte-identical whether or not an adaptive fit runs
@@ -179,6 +283,17 @@ export function project(input, config = {}) {
   const { world: forecastWorld, fit: volFit } = fitForecastWorld(
     input.world, fitReadings, config.adaptiveVol,
   );
+
+  // Regime-aware horizon: a persistent vol regime projects LONGER so a clustered
+  // shock resolves inside the window instead of truncating mid-shock. Off by
+  // default (stretch 0) or on a non-persistent regime → `horizon === baseHorizon`
+  // and `horizonRegime === null`, so the projection — and its content hash — stay
+  // byte-identical to before.
+  const { horizon, regime: horizonRegime } = regimeHorizon({
+    baseHorizon, volFit,
+    stretch: regimeHorizonStretch,
+    lo: regimePersistenceLo, hi: regimePersistenceHi, cap: regimeHorizonCap,
+  });
 
   const action = makeRebalanceAction(input.targetWeights, bounds);
   const result = simForecast({
@@ -215,6 +330,7 @@ export function project(input, config = {}) {
     pProfit: result.summary.pProfit,
     actionSteps,
     volFit,
+    horizonRegime,
     projectionSvg: result.projectionSvg,
   };
 }
@@ -248,6 +364,9 @@ export function projectionArtifact(projection) {
   // (non-adaptive) projection's artifact JSON — and thus its content hash and
   // the auditor's recompute-and-compare — stay byte-identical to before.
   if (projection.volFit) artifact.volFit = projection.volFit;
+  // Likewise, only present when the regime actually stretched the horizon, so a
+  // projection with the stretch off (or an inert regime) hashes exactly as before.
+  if (projection.horizonRegime) artifact.horizonRegime = projection.horizonRegime;
   return artifact;
 }
 

@@ -144,9 +144,19 @@ export async function runOodaCycle(input) {
   }
 
   // ----- ORIENT (b): forecaster (Monte Carlo via simulator) -----
+  // When the forecaster fits an adaptive vol surface, its worst-asset GARCH
+  // persistence can also stretch the projection horizon so a persistent regime's
+  // shock is projected long enough to resolve rather than truncate. Default it on
+  // (the caller can pin or disable it with `config.forecaster.regimeHorizonStretch`),
+  // mirroring how the audit gate defaults `regimeTailBump` above: adaptive vol on →
+  // the regime informs BOTH the horizon and the gate.
+  const forecasterConfig = { ...(config.forecaster || {}) };
+  if (forecasterConfig.regimeHorizonStretch === undefined && forecasterConfig.adaptiveVol) {
+    forecasterConfig.regimeHorizonStretch = 0.5;
+  }
   const forecast = project(
     { world, targetWeights: analysis.targetWeights, bounds: config.bounds || {}, readings, fitReadings },
-    config.forecaster || {},
+    forecasterConfig,
   );
   const forecastId = await record({
     kind: 'forecast', role: 'forecaster', project: 'finbot',

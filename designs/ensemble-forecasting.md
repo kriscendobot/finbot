@@ -392,3 +392,51 @@ high-persistence regime argues for a longer projection, so a transient shock is 
 amortized away), or into the **analyzer's risk appetite** more directly. Deferred as
 before: gamma/asymmetric MLE, EGARCH, implied-vol surfaces, PNG rasterization,
 far-ref vending.
+
+## Notes from the field (2026-07-13 — regime-aware forecaster horizon)
+
+The prior cut let a persistent regime change what the *auditor* decides (the
+regime-tail-floor). This cut applies the same measure-then-decide loop to the
+*forecaster's projection depth*: **a persistent vol regime projects longer.**
+
+- **Regime-aware horizon** (`packages/pipeline/forecaster.js`, `regimeHorizon`).
+  The adaptive fit's **worst-asset** GARCH persistence (α+β, the same worst-asset
+  the tail floor keys off) stretches the Monte-Carlo horizon:
+  `horizon = min(cap, round(baseHorizon · (1 + regimeHorizonStretch · stress)))`,
+  where `stress` is the shared deterministic ramp of persistence from
+  `regimePersistenceLo` (0.70, no stretch) to `regimePersistenceHi` (0.98, full
+  stretch), bounded by `regimeHorizonCap` (60 ticks). Rationale: a highly
+  persistent regime holds its elevated conditional variance for many ticks, so a
+  shock *this* cycle compounds rather than mean-reverting away inside a short
+  window — a horizon that truncates mid-shock understates the drawdown-and-recovery
+  dynamics the auditor's `pathStats` read out. Projecting longer resolves them.
+- **A shared worst-asset/stress helper.** The worst-asset-persistence scan and the
+  persistence→stress ramp, previously inline in the auditor's `regimeTailFloor`,
+  are now `worstAssetPersistence()` + `persistenceStress()` in `forecaster.js`,
+  imported by both levers — so the horizon and the tail floor key off the SAME
+  worst instrument the SAME way, by construction rather than by coincidence.
+- **Off by default, byte-identical when inert.** `regimeHorizonStretch` defaults to
+  0, so a plain (non-adaptive) or explicitly-pinned projection keeps its base
+  horizon and carries no `horizonRegime`, leaving its artifact JSON — and thus its
+  content hash and the auditor's recompute-and-compare — byte-identical. The
+  `ooda-cycle` defaults the stretch to **0.5 only when `forecaster.adaptiveVol` is
+  set**, mirroring how it already defaults the audit gate's `regimeTailBump`; a
+  caller can pin or disable it with `config.forecaster.regimeHorizonStretch`. The
+  CLI exposes `--regime-horizon-stretch=F`.
+- **Proven end to end.** New `packages/pipeline/test/regime-horizon.test.js`: the
+  two shared helpers (worst-asset keying, inert cases, the clamped ramp, degenerate
+  span), the `regimeHorizon` unit (off / inert / calm / persistent / cap-bounded /
+  too-small-to-round), a `project()` integration on the DIP window (persistence
+  0.98 → horizon 10→15, a genuinely different terminal distribution, `horizonRegime`
+  cited, byte-identical when off, deterministic across runs), and the ooda-cycle
+  default-on/off. Full suite **528 pass / 0 fail**; `finbot-ooda --seed=7` across
+  every mode green with **WALLET TOUCHED: false**, including
+  `--regime-horizon-stretch=0.8`.
+
+Next on this axis: the live GBM world fits worst-asset persistence ~0.68 (just shy
+of the 0.70 `lo`), so the live cycle is inert **today** — the stretch engages once
+a genuinely clustered regime is observed (a longer/rolling fit window, or a
+non-GBM feed). The paired lever left is feeding persistence into the analyzer's
+**risk appetite** more directly (position sizing, not just the gate and horizon).
+Deferred as before: gamma/asymmetric MLE, EGARCH, implied-vol surfaces, PNG
+rasterization, far-ref vending.

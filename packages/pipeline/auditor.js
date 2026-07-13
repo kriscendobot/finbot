@@ -15,6 +15,7 @@
 import { hashProposal } from './planner.js';
 import { navOf } from './rebalance.js';
 import { stepHasRealRoute } from './substrates.js';
+import { worstAssetPersistence, persistenceStress } from './forecaster.js';
 
 /**
  * @typedef {object} AuditVerdict
@@ -202,32 +203,22 @@ function regimeTailFloor({
 }) {
   const base = { floorPct: tailFloorPct, tightened: false, persistence: 0, worstAsset: null };
   if (!(regimeTailBump > 0)) return base;
-  const assets = forecast && forecast.volFit && forecast.volFit.assets;
-  if (!assets || typeof assets !== 'object') return base;
 
   // The portfolio is only as safe as its most persistent instrument's regime;
-  // take the max persistence across the fitted assets (worst-case tail).
-  let worstAsset = null;
-  let maxPersistence = -Infinity;
-  for (const [asset, st] of Object.entries(assets)) {
-    const p = st && typeof st.persistence === 'number' ? st.persistence : null;
-    if (p == null || !Number.isFinite(p)) continue;
-    if (p > maxPersistence) { maxPersistence = p; worstAsset = asset; }
-  }
+  // key off the worst (max-persistence) fitted asset — the SAME worst-asset the
+  // forecaster's regime-horizon stretch keys off, via the shared helper.
+  const { worstAsset, persistence } = worstAssetPersistence(forecast && forecast.volFit);
   if (worstAsset == null) return base;
 
-  const span = regimePersistenceHi - regimePersistenceLo;
-  const stress = span > 0
-    ? Math.max(0, Math.min(1, (maxPersistence - regimePersistenceLo) / span))
-    : (maxPersistence >= regimePersistenceHi ? 1 : 0);
+  const stress = persistenceStress(persistence, regimePersistenceLo, regimePersistenceHi);
   if (stress <= 0) {
-    return { floorPct: tailFloorPct, tightened: false, persistence: maxPersistence, worstAsset };
+    return { floorPct: tailFloorPct, tightened: false, persistence, worstAsset };
   }
   const bumped = Math.min(regimeTailFloorCap, tailFloorPct + regimeTailBump * stress);
   return {
     floorPct: bumped,
     tightened: bumped > tailFloorPct + 1e-12,
-    persistence: maxPersistence,
+    persistence,
     worstAsset,
   };
 }
