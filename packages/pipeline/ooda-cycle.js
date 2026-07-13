@@ -87,6 +87,14 @@ export async function runOodaCycle(input) {
   // feed's correlation spec feed the analyzer's carry and correlation-cluster
   // scoring. Either may be absent (single risk asset, no correlation), in
   // which case those terms are zero.
+  // Thread the regime read through: when the forecaster fits an adaptive vol
+  // surface but the analyzer was given no explicit `regimeVol`, read the
+  // CURRENT conditional-vol regime with the SAME descriptor, so the orient
+  // stage scores under the very surface the ensemble will project under.
+  const analyzerConfig = { ...(config.analyzer || {}) };
+  if (analyzerConfig.regimeVol === undefined && config.forecaster && config.forecaster.adaptiveVol) {
+    analyzerConfig.regimeVol = config.forecaster.adaptiveVol;
+  }
   const analysis = analyze(
     {
       opportunities: observed.crossings,
@@ -96,7 +104,7 @@ export async function runOodaCycle(input) {
       instruments: world.instruments,
       correlations: config.correlations || (world.priceFeed && world.priceFeed.correlations) || undefined,
     },
-    config.analyzer || {},
+    analyzerConfig,
   );
   const analysisId = await record({
     kind: 'analysis', role: 'analyzer', project: 'finbot',

@@ -364,6 +364,83 @@ export function garchMleFromPriceHistory(priceFrames, opts = {}) {
 }
 
 /**
+ * @typedef {object} RegimeRead
+ * @property {number} conditionalVol   sqrt of the variance the model carries into the NEXT tick
+ * @property {number} unconditionalVol the long-run level sqrt(omega / (1 - persistence))
+ * @property {number} persistence      alpha + beta (how slowly an elevated regime decays)
+ * @property {number} sigma0           the variance a fresh trajectory starts from, as a vol
+ * @property {number} alpha
+ * @property {number} beta
+ */
+
+/**
+ * Read the *current* volatility regime out of an observed window: fit a
+ * GARCH(1,1) surface (variance targeting, optionally with a per-asset MLE of
+ * the (alpha, beta) split) and roll each asset's conditional variance forward
+ * over its own realized (demeaned) returns, ending at the variance the model
+ * carries into the NEXT tick. That terminal conditional volatility is the
+ * regime read a scorer wants: after a burst of shocks a highly-persistent
+ * asset's conditional vol sits ABOVE its unconditional level (elevated,
+ * lingering risk); in the calm after a storm it sits BELOW — neither of which
+ * the window-averaged realized (unconditional) vol can see.
+ *
+ * The recursion reuses the fitted surface's own `initialVariance`/`nextVariance`,
+ * so the regime read matches the engine the forecaster projects the ensemble
+ * under (same clustering, same params). Deterministic end to end: the fit is
+ * variance targeting / a deterministic grid search and the roll-forward is a
+ * plain recursion — no RNG — so a score that folds this in stays reproducible.
+ *
+ * @param {Array<Record<string, number>>} priceFrames  per-tick { asset: price }
+ * @param {object} [opts]
+ * @param {'mle'|'fixed'} [opts.estimate]  'mle' fits (alpha, beta) per asset; else the fixed split
+ * @param {number} [opts.alpha]  fixed / fallback ARCH coefficient
+ * @param {number} [opts.beta]   fixed / fallback GARCH coefficient
+ * @param {number} [opts.floor]  variance floor
+ * @returns {Record<string, RegimeRead>}   per-asset regime read (assets the surface could not host are omitted)
+ */
+export function conditionalVolFromPriceHistory(priceFrames, opts = {}) {
+  if (!Array.isArray(priceFrames) || priceFrames.length < 2) {
+    throw new Error('conditionalVolFromPriceHistory: need at least two price frames');
+  }
+  const surface = opts.estimate === 'mle'
+    ? garchMleFromPriceHistory(priceFrames, opts)
+    : garchFromPriceHistory(priceFrames, opts);
+  const assets = Object.keys(priceFrames[0]);
+  /** @type {Record<string, RegimeRead>} */
+  const out = {};
+  for (const a of assets) {
+    if (!surface.has(a)) continue;
+    const rets = [];
+    for (let t = 1; t < priceFrames.length; t += 1) {
+      const prev = priceFrames[t - 1][a];
+      const cur = priceFrames[t][a];
+      if (prev > 0 && cur > 0) rets.push(Math.log(cur / prev));
+    }
+    // Demean so the roll-forward tracks variance, not drift — matching the
+    // way the MLE fitter scores its returns.
+    const mean = rets.length ? rets.reduce((acc, x) => acc + x, 0) / rets.length : 0;
+    let h = surface.initialVariance(a);
+    for (const r of rets) {
+      const sd = Math.sqrt(h);
+      // z_t = r_t / sigma_t; nextVariance(...,z) reproduces the variance-form
+      // recursion sigma^2_{t+1} = omega + alpha*r_t^2 + beta*sigma^2_t.
+      const shock = sd > 0 ? (r - mean) / sd : 0;
+      h = surface.nextVariance(a, h, shock);
+    }
+    const st = surface.stats(a);
+    out[a] = {
+      conditionalVol: Math.sqrt(h),
+      unconditionalVol: st.unconditionalVol,
+      persistence: st.persistence,
+      sigma0: st.sigma0,
+      alpha: st.alpha,
+      beta: st.beta,
+    };
+  }
+  return out;
+}
+
+/**
  * Sample variance (divisor n-1) of a return series; 0 for < 2 points.
  *
  * @param {number[]} xs

@@ -15,6 +15,7 @@
     "./forecast": "./forecast.js",
     "./correlation": "./correlation.js",
     "./vol-surface": "./vol-surface.js",
+  "./garch": "./garch.js",
     "./costs": "./costs.js",
     "./bootstrap": "./bootstrap.js",
     "./path-stats": "./path-stats.js",

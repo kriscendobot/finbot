@@ -1,7 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { Garch11Surface, garchFromPriceHistory } from '../garch.js';
+import {
+  Garch11Surface,
+  garchFromPriceHistory,
+  conditionalVolFromPriceHistory,
+} from '../garch.js';
 import { GBMPriceFeed } from '../price-feed.js';
 
 test('Garch11Surface: stats reports persistence and unconditional vol', () => {
@@ -140,4 +144,48 @@ test('garchFromPriceHistory: rejects a non-stationary alpha/beta and too-short h
   const frames = [{ A: 100 }, { A: 101 }, { A: 99 }];
   assert.throws(() => garchFromPriceHistory(frames, { alpha: 0.6, beta: 0.5 }), /alpha \+ beta < 1/);
   assert.throws(() => garchFromPriceHistory([{ A: 100 }]), /at least two/);
+});
+
+// ---------- conditionalVolFromPriceHistory (the regime read) ----------
+
+test('conditionalVolFromPriceHistory: a recent burst lifts conditional vol above unconditional', () => {
+  // A calm run, then a cluster of large shocks at the end. A persistent GARCH
+  // regime should carry an ELEVATED conditional vol into the next tick.
+  const calm = [];
+  let p = 100;
+  for (let i = 0; i < 40; i += 1) { p *= i % 2 === 0 ? 1.001 : 0.999; calm.push({ A: p }); }
+  const burst = [1.06, 0.94, 1.07, 0.93, 1.05].map((m) => { p *= m; return { A: p }; });
+  const frames = [...calm, ...burst];
+  const read = conditionalVolFromPriceHistory(frames, { alpha: 0.15, beta: 0.8 });
+  assert.ok(read.A, 'asset A has a regime read');
+  assert.ok(read.A.conditionalVol > read.A.unconditionalVol,
+    `recent burst → conditional (${read.A.conditionalVol}) > unconditional (${read.A.unconditionalVol})`);
+  assert.ok(Math.abs(read.A.persistence - 0.95) < 1e-12, 'persistence from the fixed split');
+});
+
+test('conditionalVolFromPriceHistory: calm after a storm pulls conditional vol below unconditional', () => {
+  // A cluster of shocks early, then a long calm tail. The conditional vol
+  // should have decayed BELOW the (shock-inflated) unconditional level.
+  let p = 100;
+  const storm = [1.08, 0.92, 1.09, 0.91, 1.07].map((m) => { p *= m; return { A: p }; });
+  const calm = [];
+  for (let i = 0; i < 60; i += 1) { p *= i % 2 === 0 ? 1.0005 : 0.9995; calm.push({ A: p }); }
+  const frames = [{ A: 100 }, ...storm, ...calm];
+  const read = conditionalVolFromPriceHistory(frames, { alpha: 0.15, beta: 0.8 });
+  assert.ok(read.A.conditionalVol < read.A.unconditionalVol,
+    `calm tail → conditional (${read.A.conditionalVol}) < unconditional (${read.A.unconditionalVol})`);
+});
+
+test('conditionalVolFromPriceHistory: deterministic and MLE-routed', () => {
+  const src = new GBMPriceFeed({ initialPrices: { A: 100 }, volatilities: { A: 0.03 }, seed: 5 });
+  const frames = [src.current()];
+  for (let i = 0; i < 60; i += 1) frames.push(src.tick());
+  const a = conditionalVolFromPriceHistory(frames, { estimate: 'mle' });
+  const b = conditionalVolFromPriceHistory(frames, { estimate: 'mle' });
+  assert.deepEqual(a, b, 'byte-identical for identical input (no RNG)');
+  assert.ok(a.A.conditionalVol > 0 && a.A.unconditionalVol > 0);
+});
+
+test('conditionalVolFromPriceHistory: too-short history throws', () => {
+  assert.throws(() => conditionalVolFromPriceHistory([{ A: 100 }]), /at least two/);
 });

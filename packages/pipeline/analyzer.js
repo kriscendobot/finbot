@@ -20,7 +20,15 @@
  *     candidate's correlation-weighted exposure to the current cluster is
  *     subtracted from its score.
  *
- * In single-position mode (the default, `maxPositions: 1`) the analyzer emits
+ * The risk denominator each signal is divided by is the realized (window-averaged)
+volatility by default. When a GARCH regime descriptor is supplied
+(`config.regimeVol`), the analyzer fits it from the same window and blends the
+fitted surface's terminal *conditional* volatility into that denominator, so the
+score reads the CURRENT regime — an elevated, persistent conditional vol
+discounts a candidate; the calm after a storm does not over-penalize a real edge
+the stale window average would.
+
+In single-position mode (the default, `maxPositions: 1`) the analyzer emits
  * one target weight for the top asset, exactly as before. In multi-position
  * mode it spreads a bounded risk budget across the top-scoring candidates —
  * including registry yield legs that did not themselves deviate — so a
@@ -35,6 +43,7 @@
  */
 
 import { aprOf } from '@finbot/simulator/yield-accrual';
+import { conditionalVolFromPriceHistory } from '@finbot/simulator/garch';
 
 import { navOf } from './rebalance.js';
 
@@ -133,6 +142,9 @@ export function realizedVolatility(readings, asset) {
  * @param {number} [config.carryHorizonTicks]  ticks over which APR carry accrues for scoring (default window length)
  * @param {number} [config.ticksPerYear]       APR -> per-tick conversion base (default 365)
  * @param {number} [config.correlationPenalty] strength of the correlated-cluster penalty (default 0.5)
+ * @param {object} [config.regimeVol]          GARCH descriptor WITHOUT data (e.g. `{ kind: 'garch' }` or
+ *   `{ kind: 'garch', estimate: 'mle' }`) fit from the window to read the current conditional-vol regime; absent → realized vol only
+ * @param {number} [config.regimeWeight]       blend of conditional vol into the risk denominator when a regime read exists (default 0.5)
  * @returns {AnalyzerResult}
  */
 export function analyze(input, config = {}) {
@@ -144,6 +156,13 @@ export function analyze(input, config = {}) {
   const maxTotalWeight = config.maxTotalWeight != null ? config.maxTotalWeight : 0.8;
   const ticksPerYear = config.ticksPerYear != null ? config.ticksPerYear : 365;
   const correlationPenaltyStrength = config.correlationPenalty != null ? config.correlationPenalty : 0.5;
+  // Regime read (opt-in). `config.regimeVol` is a GARCH descriptor WITHOUT data
+  // (e.g. `{ kind: 'garch' }` or `{ kind: 'garch', estimate: 'mle' }`), fit from
+  // this window here; its terminal conditional vol replaces part of the
+  // window-averaged realized vol in the risk denominator so the score reads the
+  // CURRENT regime, not the window average. Absent → the risk denominator is
+  // byte-for-byte the prior realized-vol behaviour.
+  const regimeWeight = config.regimeWeight != null ? config.regimeWeight : 0.5;
 
   const opportunities = input.opportunities || [];
   const readings = input.readings || [];
@@ -156,6 +175,21 @@ export function analyze(input, config = {}) {
 
   const assetOrder = Object.keys(prices);
   const corr = correlationLookup(input.correlations, assetOrder);
+
+  // Fit the volatility regime from the observed window when asked. A degenerate
+  // window (constant prices → non-stationary params) or too few frames must not
+  // sink the analysis — fall back to the all-realized-vol denominator (empty map).
+  let regime = {};
+  if (config.regimeVol) {
+    const frames = readings.map((r) => r.prices).filter((p) => p && typeof p === 'object');
+    if (frames.length >= 2) {
+      try {
+        regime = conditionalVolFromPriceHistory(frames, config.regimeVol);
+      } catch (_err) {
+        regime = {};
+      }
+    }
+  }
 
   // Correlation-weighted exposure of `asset` to the rest of the held book:
   // the sum of each other held position's weight times its positive
@@ -207,9 +241,20 @@ export function analyze(input, config = {}) {
     // Current concentration of this asset.
     const heldValue = (input.portfolio.balances[cand.asset] || 0) * (prices[cand.asset] || 0);
     const concentration = nav > 0 ? heldValue / nav : 0;
+    // Regime-aware risk: when a GARCH regime read is available for this asset,
+    // blend its terminal CONDITIONAL vol into the risk denominator. In a
+    // high-vol regime (recent shocks that persist) the conditional vol sits
+    // above the window-averaged realized vol, so the score is discounted; in
+    // the calm after a storm it sits below, so a real edge is not over-penalized
+    // by a stale window. Persistence rides along in the record as the regime's
+    // decay speed. With no regime read, riskVol === vol (legacy).
+    const reg = regime[cand.asset];
+    const riskVol = reg
+      ? (1 - regimeWeight) * vol + regimeWeight * reg.conditionalVol
+      : vol;
     // Risk-adjusted: (price edge + carry) per unit volatility, less a penalty
     // for adding to an already-concentrated or already-correlated position.
-    const riskDenom = vol + 0.01;
+    const riskDenom = riskVol + 0.01;
     const buying = expectedEdge > 0 || carry > 0;
     const concentrationPenalty = buying ? concentration * 0.25 : 0;
     const clusterExposure = clusterExposureOf(cand.asset);
@@ -222,6 +267,9 @@ export function analyze(input, config = {}) {
       carry,
       apr,
       volatility: vol,
+      riskVol,
+      conditionalVol: reg ? reg.conditionalVol : null,
+      persistence: reg ? reg.persistence : null,
       concentration,
       clusterExposure,
       correlationPenalty,
@@ -230,6 +278,10 @@ export function analyze(input, config = {}) {
       rationale:
         `${cand.asset}: ${cand.carryOnly ? 'carry leg' : (cand.direction === 'down' ? 'price dipped' : 'price lifted')} `
         + `${cand.deviationBps.toFixed(0)}bps; realized vol ${(vol * 100).toFixed(2)}%; `
+        + (reg
+          ? `conditional vol ${(reg.conditionalVol * 100).toFixed(2)}% (persistence ${reg.persistence.toFixed(3)}); `
+            + `risk vol ${(riskVol * 100).toFixed(2)}%; `
+          : '')
         + `APR ${(apr * 100).toFixed(2)}%; current weight ${(concentration * 100).toFixed(1)}%; `
         + `cluster exposure ${(clusterExposure * 100).toFixed(1)}%; `
         + `risk-adjusted score ${score.toFixed(4)}.`,

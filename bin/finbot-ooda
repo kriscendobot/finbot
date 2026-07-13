@@ -25,6 +25,9 @@
  *   --horizon=N      forecaster horizon in ticks (default 20)
  *   --tail-floor=F   auditor tail-risk floor as a fraction of NAV (default 0.6)
  *   --multi          run the multi-instrument world (correlated growth legs + a yield leg)
+ *   --adaptive-vol[=mle]  fit a conditional-vol GARCH surface from the window; the
+ *                    forecaster projects the ensemble under it and the analyzer
+ *                    scores under its current-regime read (=mle also fits alpha/beta per asset)
  *   --journal=PATH   journal worktree to record entries into (local commit only)
  *   --json           print the structured result as JSON instead of a report
  *   --help / -h      print this and exit
@@ -44,7 +47,7 @@ function parseArgs(argv) {
   const args = {
     seed: 7, drift: -0.01, vol: 0.02, warmup: 10, threshold: 30,
     ensemble: 200, horizon: 20, tailFloor: 0.6, journal: null, json: false,
-    multi: false,
+    multi: false, adaptiveVol: null,
   };
   for (const arg of argv) {
     const eq = arg.indexOf('=');
@@ -61,6 +64,14 @@ function parseArgs(argv) {
     else if (key === '--journal') args.journal = val;
     else if (key === '--json') args.json = true;
     else if (key === '--multi') args.multi = true;
+    else if (key === '--adaptive-vol') {
+      // Fit a conditional-vol GARCH surface from the observed window: the
+      // forecaster projects the ensemble under it AND the analyzer scores under
+      // its current-regime read (threaded in ooda-cycle). `--adaptive-vol=mle`
+      // additionally estimates (alpha, beta) per asset; plain fits the fixed split.
+      const kind = 'garch';
+      args.adaptiveVol = val === 'mle' ? { kind, estimate: 'mle' } : { kind };
+    }
     else if (key === '--help' || key === '-h') { printHelp(); process.exit(0); }
     else { console.error(`finbot-ooda: unknown flag ${arg}`); process.exit(2); }
   }
@@ -75,7 +86,8 @@ function printHelp() {
     'Usage:',
     '  finbot-ooda [--seed=N] [--drift=F] [--vol=F] [--warmup=N]',
     '              [--threshold=BPS] [--ensemble=N] [--horizon=N]',
-    '              [--tail-floor=F] [--multi] [--journal=PATH] [--json]',
+    '              [--tail-floor=F] [--multi] [--adaptive-vol[=mle]]',
+    '              [--journal=PATH] [--json]',
     '',
     'DRY-RUN ONLY. Never reads a keystore; never constructs a wallet.',
     '',
@@ -107,7 +119,7 @@ function buildSingleWorld(args) {
     windowTicks: args.warmup,
     oracle: { thresholdBps: args.threshold },
     analyzer: { scoreFloor: 0 },
-    forecaster: { ensembleSize: args.ensemble, horizon: args.horizon, baseSeed: 1000 + args.seed },
+    forecaster: { ensembleSize: args.ensemble, horizon: args.horizon, baseSeed: 1000 + args.seed, adaptiveVol: args.adaptiveVol },
     bounds: { maxStepPct: 0.25, maxDayPct: 0.5, concentrationCapPct: 0.9 },
     auditor: { tailFloorPct: args.tailFloor, stalenessWindowTicks: args.warmup + 1 },
   };
@@ -143,7 +155,7 @@ function buildMultiWorld(args) {
       scoreFloor: 0, maxPositions: 3, maxTotalWeight: 0.8, maxTargetWeight: 0.5,
       carryHorizonTicks: 40, correlationPenalty: 0.5,
     },
-    forecaster: { ensembleSize: args.ensemble, horizon: args.horizon, baseSeed: 1000 + args.seed },
+    forecaster: { ensembleSize: args.ensemble, horizon: args.horizon, baseSeed: 1000 + args.seed, adaptiveVol: args.adaptiveVol },
     bounds: { maxStepPct: 0.4, maxDayPct: 1.0, concentrationCapPct: 0.9 },
     auditor: { tailFloorPct: args.tailFloor, stalenessWindowTicks: args.warmup + 1 },
   };
