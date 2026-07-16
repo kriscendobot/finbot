@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { Garch11Surface, garchFromPriceHistory, garchMleFromPriceHistory } from '../garch.js';
+import { gjrGarchMleFromPriceHistory } from '../gjr-garch.js';
 import { GBMPriceFeed } from '../price-feed.js';
 import { makeVolSurface } from '../world.js';
 
@@ -98,10 +99,12 @@ test("makeVolSurface: { kind: 'garch', history, estimate: 'mle' } routes to the 
   assert.ok(Math.abs(viaFactory.persistence - fixed.persistence) > 1e-6, 'MLE fit differs from fixed split');
 });
 
-test("makeVolSurface: gjr-garch + estimate 'mle' throws (deferred)", () => {
-  const frames = [{ A: 100 }, { A: 101 }, { A: 100.5 }];
-  assert.throws(
-    () => makeVolSurface({ kind: 'gjr-garch', history: frames, estimate: 'mle' }),
-    /only supported for kind 'garch'/,
-  );
+test("makeVolSurface: gjr-garch + estimate 'mle' routes to the GJR MLE fitter", () => {
+  // Formerly deferred; the GJR MLE now estimates (alpha, gamma, beta) — see
+  // gjr-garch-mle.test.js for the recovery evidence. Here just prove routing.
+  const surf = new Garch11Surface({ A: { omega: 0.0002, alpha: 0.12, beta: 0.85 } });
+  const frames = historyFrom(new GBMPriceFeed({ initialPrices: { A: 100 }, volSurface: surf, seed: 8 }), 1500);
+  const viaFactory = makeVolSurface({ kind: 'gjr-garch', history: frames, estimate: 'mle' }).stats('A');
+  const direct = gjrGarchMleFromPriceHistory(frames).stats('A');
+  assert.deepEqual(viaFactory, direct, 'factory routing matches the direct GJR MLE fit');
 });

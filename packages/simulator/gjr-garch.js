@@ -238,6 +238,191 @@ export function gjrGarchFromPriceHistory(priceFrames, opts = {}) {
   return new GjrGarch11Surface(params, { floor: opts.floor });
 }
 
+// --- Variance-targeting maximum-likelihood estimation of (alpha, gamma, beta) --
+//
+// `gjrGarchFromPriceHistory` pins the unconditional variance to the sample
+// variance but takes the ARCH split *and the leverage gamma* from configuration.
+// That models *how much* the series varies but not *how asymmetrically it
+// clusters* — a symmetric, magnitude-only instrument and a leverage-heavy one
+// (a big drop stokes far more forward vol than a big rise) get the same fixed
+// gamma. The estimator below reads the asymmetry out of the data: holding the
+// unconditional variance pinned at the sample variance (variance targeting), it
+// searches (alpha, gamma, beta) to maximize the Gaussian likelihood of the
+// sign-gated GJR conditional-variance recursion. gamma emerges from the realized
+// down/up variance ratio rather than a config default — the refinement the
+// `gjrGarchFromPriceHistory` doc names as "the natural next" one.
+//
+// Like the symmetric fitter (`garchMleFromPriceHistory`) the search is a
+// **deterministic nested grid refinement**: a coarse grid over the (alpha, gamma,
+// beta) box, then successively finer grids around the best cell — no optimizer
+// library, no RNG, byte-identical params for identical input. It is a *light* MLE:
+// variance targeting removes omega from the search (omega = s^2 * (1 - alpha -
+// beta - gamma/2)) so only the three persistence coefficients are fit, which is
+// both cheaper and more stable on the short windows the OODA cycle observes. gamma
+// is bounded non-negative — the standard leverage sign — so the fit stays
+// identified on the ~half of the sample that is down-moves; the fixed-config path
+// still admits a mild reverse-leverage (negative) gamma.
+
+const MLE_ALPHA_BOUNDS = [0.0, 0.6];
+const MLE_GAMMA_BOUNDS = [0.0, 0.6];
+const MLE_BETA_BOUNDS = [0.0, 0.999];
+const MLE_MAX_PERSISTENCE = 0.9995; // alpha + beta + gamma/2
+const MLE_GRID = 6;       // points per axis per refinement level (7^3 = 343 cells/level)
+const MLE_LEVELS = 5;     // refinement levels
+const MLE_MIN_RETURNS = 12; // below this a per-window MLE is too noisy → fixed split
+
+/**
+ * Gaussian negative log-likelihood of a variance-targeting GJR-GARCH(1,1) with
+ * the given (alpha, gamma, beta), evaluated on a demeaned return series. omega is
+ * pinned so the unconditional variance equals `sampleVar`. The conditional
+ * variance starts at the unconditional level and evolves by the sign-gated GJR
+ * recursion — the ARCH weight is `alpha` on an up-move and `alpha + gamma` on a
+ * down-move, exactly as `GjrGarch11Surface.nextVariance` applies it (the sign of
+ * the demeaned return is the sign of the standardized innovation z_t). Returns
+ * +Infinity for a parameterization that makes omega non-positive or the variance
+ * collapse (so the search rejects it).
+ *
+ * @param {number[]} rets       demeaned log returns
+ * @param {number} sampleVar    sample variance the model is targeted to
+ * @param {number} alpha
+ * @param {number} gamma
+ * @param {number} beta
+ * @returns {number}            sum of per-observation NLL contributions
+ */
+function gjrNegLogLik(rets, sampleVar, alpha, gamma, beta) {
+  const omega = sampleVar * (1 - alpha - beta - gamma / 2);
+  if (!(omega > 0)) return Infinity;
+  let h = sampleVar; // start at the unconditional variance
+  let nll = 0;
+  for (let t = 0; t < rets.length; t += 1) {
+    if (!(h > 0)) return Infinity;
+    const r = rets[t];
+    const r2 = r * r;
+    nll += 0.5 * (Math.log(h) + r2 / h);
+    const archWeight = r < 0 ? alpha + gamma : alpha;
+    h = omega + archWeight * r2 + beta * h;
+  }
+  return nll;
+}
+
+/**
+ * Estimate (alpha, gamma, beta) for one asset by maximizing the variance-targeting
+ * Gaussian likelihood of the sign-gated GJR recursion over the demeaned returns,
+ * via deterministic nested grid refinement. Falls back to the fixed defaults when
+ * the window is too short for a per-window fit to mean anything.
+ *
+ * @param {number[]} rets       demeaned log returns
+ * @param {number} sampleVar
+ * @param {object} [opts]
+ * @param {number} [opts.alpha]  default split (fallback / seed)
+ * @param {number} [opts.gamma]
+ * @param {number} [opts.beta]
+ * @returns {{ alpha: number, gamma: number, beta: number }}
+ */
+function estimateGjrGarchParams(rets, sampleVar, opts = {}) {
+  const fallbackAlpha = opts.alpha != null ? opts.alpha : DEFAULT_ALPHA;
+  const fallbackGamma = opts.gamma != null ? opts.gamma : DEFAULT_GAMMA;
+  const fallbackBeta = opts.beta != null ? opts.beta : DEFAULT_BETA;
+  if (rets.length < MLE_MIN_RETURNS || !(sampleVar > 0)) {
+    return { alpha: fallbackAlpha, gamma: fallbackGamma, beta: fallbackBeta };
+  }
+  let aLo = MLE_ALPHA_BOUNDS[0];
+  let aHi = MLE_ALPHA_BOUNDS[1];
+  let gLo = MLE_GAMMA_BOUNDS[0];
+  let gHi = MLE_GAMMA_BOUNDS[1];
+  let bLo = MLE_BETA_BOUNDS[0];
+  let bHi = MLE_BETA_BOUNDS[1];
+  let best = { alpha: fallbackAlpha, gamma: fallbackGamma, beta: fallbackBeta, nll: Infinity };
+  for (let level = 0; level < MLE_LEVELS; level += 1) {
+    for (let i = 0; i <= MLE_GRID; i += 1) {
+      const alpha = aLo + ((aHi - aLo) * i) / MLE_GRID;
+      for (let k = 0; k <= MLE_GRID; k += 1) {
+        const gamma = gLo + ((gHi - gLo) * k) / MLE_GRID;
+        for (let j = 0; j <= MLE_GRID; j += 1) {
+          const beta = bLo + ((bHi - bLo) * j) / MLE_GRID;
+          if (alpha < 0 || gamma < 0 || beta < 0) continue;
+          if (alpha + gamma < 0) continue;
+          if (alpha + beta + gamma / 2 > MLE_MAX_PERSISTENCE) continue;
+          const nll = gjrNegLogLik(rets, sampleVar, alpha, gamma, beta);
+          // Strict `<` keeps the tie-break deterministic (first — i.e. lowest
+          // alpha, then gamma, then beta — wins), independent of platform.
+          if (nll < best.nll) best = { alpha, gamma, beta, nll };
+        }
+      }
+    }
+    if (!Number.isFinite(best.nll)) {
+      return { alpha: fallbackAlpha, gamma: fallbackGamma, beta: fallbackBeta };
+    }
+    // Refine one grid cell around the incumbent on each axis.
+    const aStep = (aHi - aLo) / MLE_GRID;
+    const gStep = (gHi - gLo) / MLE_GRID;
+    const bStep = (bHi - bLo) / MLE_GRID;
+    aLo = Math.max(MLE_ALPHA_BOUNDS[0], best.alpha - aStep);
+    aHi = Math.min(MLE_ALPHA_BOUNDS[1], best.alpha + aStep);
+    gLo = Math.max(MLE_GAMMA_BOUNDS[0], best.gamma - gStep);
+    gHi = Math.min(MLE_GAMMA_BOUNDS[1], best.gamma + gStep);
+    bLo = Math.max(MLE_BETA_BOUNDS[0], best.beta - bStep);
+    bHi = Math.min(MLE_BETA_BOUNDS[1], best.beta + bStep);
+  }
+  return { alpha: best.alpha, gamma: best.gamma, beta: best.beta };
+}
+
+/**
+ * Fit a GJR-GARCH(1,1) surface to a price history the same way
+ * `gjrGarchFromPriceHistory` does — variance targeting pins the unconditional
+ * variance to the sample variance — but **estimate (alpha, gamma, beta) per asset
+ * from the data** (light variance-targeting MLE) instead of taking a single fixed
+ * split for every asset. So an instrument with a strong leverage effect (down-moves
+ * stoke far more forward vol than up-moves) and a symmetric one get different
+ * asymmetries read from their own realized returns, not one config gamma imposed on
+ * both.
+ *
+ * Deterministic (grid search, no RNG; same frames → same params) and robust: an
+ * asset with too few returns for a meaningful per-window fit, or a degenerate
+ * constant-price asset, falls back to the fixed default split exactly as
+ * `gjrGarchFromPriceHistory` would. `opts.alpha` / `opts.gamma` / `opts.beta` set
+ * that fallback.
+ *
+ * @param {Array<Record<string, number>>} priceFrames   per-tick { asset: price }
+ * @param {object} [opts]
+ * @param {number} [opts.alpha]     fallback symmetric ARCH coefficient (default 0.03)
+ * @param {number} [opts.gamma]     fallback leverage coefficient (default 0.09)
+ * @param {number} [opts.beta]      fallback GARCH coefficient (default 0.90)
+ * @param {number} [opts.floor]     variance floor (default 1e-8)
+ * @returns {GjrGarch11Surface}
+ */
+export function gjrGarchMleFromPriceHistory(priceFrames, opts = {}) {
+  if (!Array.isArray(priceFrames) || priceFrames.length < 2) {
+    throw new Error('gjrGarchMleFromPriceHistory: need at least two price frames');
+  }
+  const assets = Object.keys(priceFrames[0]);
+  /** @type {Record<string, GjrGarchParams>} */
+  const params = {};
+  for (const a of assets) {
+    const rets = [];
+    for (let t = 1; t < priceFrames.length; t += 1) {
+      const prev = priceFrames[t - 1][a];
+      const cur = priceFrames[t][a];
+      if (prev > 0 && cur > 0) rets.push(Math.log(cur / prev));
+    }
+    const sampleVar = variance(rets);
+    const s2 = sampleVar > 0 ? sampleVar : (opts.floor != null ? opts.floor : DEFAULT_FLOOR);
+    // Estimate on demeaned returns so the fit targets the variance, not the drift,
+    // and the down/up sign gate keys off the shock rather than the trend.
+    const mean = rets.length ? rets.reduce((acc, x) => acc + x, 0) / rets.length : 0;
+    const demeaned = rets.map((x) => x - mean);
+    const { alpha, gamma, beta } = estimateGjrGarchParams(demeaned, sampleVar, opts);
+    params[a] = {
+      omega: s2 * (1 - alpha - beta - gamma / 2),
+      alpha,
+      gamma,
+      beta,
+      sigma0: Math.sqrt(s2),
+    };
+  }
+  return new GjrGarch11Surface(params, { floor: opts.floor });
+}
+
 /**
  * Sample variance (divisor n-1) of a return series; 0 for < 2 points.
  *

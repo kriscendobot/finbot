@@ -46,7 +46,11 @@ export {
   garchMleFromPriceHistory,
   conditionalVolFromPriceHistory,
 } from './garch.js';
-export { GjrGarch11Surface, gjrGarchFromPriceHistory } from './gjr-garch.js';
+export {
+  GjrGarch11Surface,
+  gjrGarchFromPriceHistory,
+  gjrGarchMleFromPriceHistory,
+} from './gjr-garch.js';
 export { slippageFill, gasCost } from './costs.js';
 export { bootstrapQuantileBands, quantileSorted } from './bootstrap.js';
 export { pathStatsOf } from './path-stats.js';

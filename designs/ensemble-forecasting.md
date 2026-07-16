@@ -474,3 +474,53 @@ The remaining forecasting-model extensions are asymmetric-MLE, EGARCH,
 implied-vol surfaces, PNG rasterization, and far-reference vending. Live
 execution remains separately blocked on an explicit paper-wallet/test-net
 authorization and a selected CapTP transport.
+
+## Notes from the field (2026-07-16 — asymmetric (leverage) MLE)
+
+The volatility-regime *decision* loop is closed (the analyzer scores, the
+forecaster projects, the auditor gates, and the position sizer all key off fitted
+GARCH persistence). This cut deepens the *model* the whole loop reads from: it
+lifts the longest-standing deferral on the forecasting axis, **live estimation of
+the GJR leverage parameter gamma**.
+
+- **`gjrGarchMleFromPriceHistory`** (`packages/simulator/gjr-garch.js`). The GJR
+  surface already models the leverage effect (a down-move stokes more forward
+  variance than an equal up-move: `sigma^2 += (alpha + gamma·I[r<0])·r^2 + …`), but
+  `gjrGarchFromPriceHistory` *supplied* gamma from config — its own doc named
+  "estimating gamma from the realized down/up variance ratio" as the natural next
+  refinement. The new fitter reads it from the data: holding the unconditional
+  variance pinned to the sample variance (variance targeting, so
+  `omega = s^2·(1 - alpha - beta - gamma/2)` and omega leaves the search), it fits
+  **(alpha, gamma, beta)** per asset by maximizing the Gaussian likelihood of the
+  sign-gated GJR recursion. gamma emerges from the realized asymmetry, not a default.
+- **Same deterministic engine as the symmetric MLE.** The search is the same
+  nested grid refinement as `estimateGarchParams` (a coarse grid over the
+  (alpha, gamma, beta) box, then finer grids around the incumbent), extended to
+  three axes — no optimizer library, no RNG, byte-identical params for identical
+  input, strict-`<` deterministic tie-break. gamma is bounded non-negative (the
+  standard leverage sign) so the fit stays identified on the ~half of the sample
+  that is down-moves; the fixed-config path still admits a mild reverse-leverage
+  (negative) gamma. Short windows (< 12 returns) and degenerate constant-price
+  assets fall back to the fixed default split exactly as the variance-targeting
+  fitter does.
+- **Routed and exported.** `makeVolSurface({ kind: 'gjr-garch', history, estimate:
+  'mle' })` now routes to the new fitter (it previously threw "gjr-garch MLE is
+  deferred"); `gjrGarchMleFromPriceHistory` is exported from the simulator index
+  alongside `garchMleFromPriceHistory`.
+- **Proven end to end.** New `packages/simulator/test/gjr-garch-mle.test.js`:
+  determinism, variance-targeting preserved, **recovery** (a genuine leverage DGP
+  fits gamma clearly > 0.05 with downWeight > upWeight, while a symmetric GARCH DGP
+  through the same seed fits gamma < 0.05 — the estimator reads the asymmetry it is
+  meant to), short-window and constant-price fallback, custom fallback, throws, and
+  factory routing that differs from the fixed split. The old "gjr MLE throws
+  (deferred)" case in `garch-mle.test.js` is replaced by a routing assertion. Full
+  suite **538 pass / 0 fail**; `finbot-ooda --seed=7` green with **WALLET TOUCHED:
+  false**.
+
+Next on this axis: feed the fitted asymmetry into the live regime read the pipeline
+cites (`conditionalVolFromPriceHistory` currently rolls the *symmetric* surface even
+when the world is GJR — a `estimate: 'gjr-mle'` roll-forward would let the auditor's
+tail floor and the analyzer's sizing see the *down-move-conditional* vol, not just
+the magnitude-conditional one). Deferred as before: EGARCH, implied-vol surfaces,
+PNG rasterization, far-reference vending. Live execution remains separately blocked
+on an explicit paper-wallet/test-net authorization and a selected CapTP transport.
