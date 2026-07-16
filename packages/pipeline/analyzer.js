@@ -46,6 +46,7 @@ import { aprOf } from '@finbot/simulator/yield-accrual';
 import { conditionalVolFromPriceHistory } from '@finbot/simulator/garch';
 
 import { navOf } from './rebalance.js';
+import { persistenceStress } from './forecaster.js';
 
 /**
  * Build a correlation lookup `(a, b) => rho` from a sparse pair spec, a
@@ -150,6 +151,11 @@ export function realizedVolatility(readings, asset) {
  * @param {object} [config.regimeVol]          GARCH descriptor WITHOUT data (e.g. `{ kind: 'garch' }` or
  *   `{ kind: 'garch', estimate: 'mle' }`) fit from the window to read the current conditional-vol regime; absent → realized vol only
  * @param {number} [config.regimeWeight]       blend of conditional vol into the risk denominator when a regime read exists (default 0.5)
+ * @param {number} [config.regimePositionShrink] maximum fractional reduction of a target allocation in a fully
+ *   persistent regime (default 0 → OFF). Each asset's own GARCH persistence ramps its target down from
+ *   `regimePersistenceLo` to `regimePersistenceHi`.
+ * @param {number} [config.regimePersistenceLo] persistence at/below which position sizing is unchanged (default 0.70)
+ * @param {number} [config.regimePersistenceHi] persistence at/above which the full position reduction applies (default 0.98)
  * @returns {AnalyzerResult}
  */
 export function analyze(input, config = {}) {
@@ -168,6 +174,13 @@ export function analyze(input, config = {}) {
   // CURRENT regime, not the window average. Absent → the risk denominator is
   // byte-for-byte the prior realized-vol behaviour.
   const regimeWeight = config.regimeWeight != null ? config.regimeWeight : 0.5;
+  // Position sizing is a separate, opt-in regime lever. The score already
+  // reads conditional volatility; this one changes the allocation itself when
+  // an asset's volatility is especially persistent. It defaults off so legacy
+  // scores, targets, and rationale remain byte-identical.
+  const regimePositionShrink = config.regimePositionShrink != null ? config.regimePositionShrink : 0;
+  const regimePersistenceLo = config.regimePersistenceLo != null ? config.regimePersistenceLo : 0.70;
+  const regimePersistenceHi = config.regimePersistenceHi != null ? config.regimePersistenceHi : 0.98;
 
   const opportunities = input.opportunities || [];
   const readings = input.readings || [];
@@ -271,7 +284,16 @@ export function analyze(input, config = {}) {
     const clusterExposure = clusterExposureOf(cand.asset);
     const correlationPenalty = buying ? correlationPenaltyStrength * clusterExposure : 0;
     const score = (expectedEdge + carry) / riskDenom - concentrationPenalty - correlationPenalty;
-    scores.push({
+    const positionStress = reg && regimePositionShrink > 0
+      ? persistenceStress(reg.persistence, regimePersistenceLo, regimePersistenceHi)
+      : 0;
+    // Clamp a malformed caller value instead of producing a negative target.
+    // No usable regime, a calm regime, or an off shrink leaves this null, which
+    // deliberately preserves the old score-record shape and rationale.
+    const positionScale = positionStress > 0
+      ? Math.max(0, 1 - Math.min(1, Math.max(0, regimePositionShrink)) * positionStress)
+      : null;
+    const scored = {
       asset: cand.asset,
       score,
       expectedEdge,
@@ -295,8 +317,17 @@ export function analyze(input, config = {}) {
           : '')
         + `APR ${(apr * 100).toFixed(2)}%; current weight ${(concentration * 100).toFixed(1)}%; `
         + `cluster exposure ${(clusterExposure * 100).toFixed(1)}%; `
-        + `risk-adjusted score ${score.toFixed(4)}.`,
-    });
+        + `risk-adjusted score ${score.toFixed(4)}.`
+        + (positionScale != null
+          ? ` Persistent regime scales target ${(positionScale * 100).toFixed(1)}% `
+            + `(persistence ${reg.persistence.toFixed(3)}, stress ${(positionStress * 100).toFixed(1)}%).`
+          : ''),
+    };
+    if (positionScale != null) {
+      scored.positionScale = positionScale;
+      scored.positionStress = positionStress;
+    }
+    scores.push(scored);
   }
   scores.sort((a, b) => b.score - a.score);
   const recommendations = scores.slice(0, k);
@@ -319,6 +350,10 @@ export function analyze(input, config = {}) {
     let targetWeight = currentWeight + Math.max(0, top.expectedEdge) * 4; // amplify the small fractional edge
     if (targetWeight > maxTargetWeight) targetWeight = maxTargetWeight;
     if (targetWeight < 0) targetWeight = 0;
+    // A persistent regime reduces the whole desired exposure, not merely the
+    // next buy increment. That makes a riskier-held asset eligible for a
+    // protective trim as well as making a fresh allocation smaller.
+    if (top.positionScale != null) targetWeight *= top.positionScale;
     return {
       trigger: opportunities[0],
       scores,
@@ -344,6 +379,7 @@ export function analyze(input, config = {}) {
   for (const s of eligible) {
     let weight = scoreSum > 0 ? maxTotalWeight * (s.score / scoreSum) : maxTotalWeight / eligible.length;
     if (weight > maxTargetWeight) weight = maxTargetWeight;
+    if (s.positionScale != null) weight *= s.positionScale;
     if (weight > 0) targetWeights[s.asset] = weight;
   }
 

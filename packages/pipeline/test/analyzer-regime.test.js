@@ -83,7 +83,60 @@ test('analyzer: regimeWeight blends conditional and realized vol', () => {
   assert.ok(half.riskVol < full.riskVol, 'more weight on the elevated conditional vol → higher risk vol');
 });
 
-test('ooda-cycle: analyzer inherits the forecaster adaptiveVol descriptor as its regimeVol', async () => {
+test('analyzer: persistent-regime position sizing is opt-in and scales the target', () => {
+  const r = readings({ ATOM: BURST_DIP });
+  const opp = observeOpportunities({ readings: r }, { thresholdBps: 30 }).crossings;
+  const portfolio = { cash: 1000, balances: { ATOM: 50 } };
+  const prices = { ATOM: r[r.length - 1].prices.ATOM };
+  // alpha + beta is 0.95, exactly the configured full-stress threshold.
+  const common = {
+    scoreFloor: 0,
+    regimeVol: { kind: 'garch', alpha: 0.2, beta: 0.75 },
+    regimePersistenceLo: 0.7,
+    regimePersistenceHi: 0.95,
+  };
+  const off = analyze(
+    { opportunities: opp, readings: r, portfolio, prices },
+    { ...common, regimePositionShrink: 0 },
+  );
+  const on = analyze(
+    { opportunities: opp, readings: r, portfolio, prices },
+    { ...common, regimePositionShrink: 0.5 },
+  );
+
+  const score = on.scores.find((x) => x.asset === 'ATOM');
+  assert.equal(score.positionStress, 1, 'persistence at the high threshold is full stress');
+  assert.equal(score.positionScale, 0.5, 'a full-stress regime applies the configured half-size cap');
+  assert.ok(score.rationale.includes('Persistent regime scales target 50.0%'));
+  assert.equal(on.targetWeights.ATOM, off.targetWeights.ATOM * 0.5,
+    'the entire desired exposure is scaled, allowing a protective trim');
+  assert.equal(off.scores[0].positionScale, undefined, 'shrink off preserves the prior score-record shape');
+});
+
+test('analyzer: regime position sizing scales every multi-position target within its risk budget', () => {
+  const r = readings({ ATOM: BURST_DIP, OSMO: BURST_DIP });
+  const opp = observeOpportunities({ readings: r }, { thresholdBps: 30 }).crossings;
+  const portfolio = { cash: 1000, balances: { ATOM: 0, OSMO: 0 } };
+  const prices = { ATOM: r[r.length - 1].prices.ATOM, OSMO: r[r.length - 1].prices.OSMO };
+  const common = {
+    scoreFloor: 0, maxPositions: 2, maxTotalWeight: 0.8, maxTargetWeight: 0.6,
+    regimeVol: { kind: 'garch', alpha: 0.2, beta: 0.75 },
+    regimePersistenceLo: 0.7, regimePersistenceHi: 0.95,
+  };
+  const off = analyze({ opportunities: opp, readings: r, portfolio, prices }, common);
+  const on = analyze(
+    { opportunities: opp, readings: r, portfolio, prices },
+    { ...common, regimePositionShrink: 0.5 },
+  );
+
+  for (const asset of Object.keys(on.targetWeights)) {
+    assert.equal(on.targetWeights[asset], off.targetWeights[asset] * 0.5);
+  }
+  const total = Object.values(on.targetWeights).reduce((sum, weight) => sum + weight, 0);
+  assert.ok(total <= 0.4 + 1e-12, 'the half-scale allocation stays within the original 0.8 risk budget');
+});
+
+test('ooda-cycle: adaptive vol defaults the analyzer to regime-aware half-size targets', async () => {
   const world = makeWorld({
     portfolio: { cash: 1000, balances: { ATOM: 50 }, initialPrice: 10 },
     priceFeed: { kind: 'gbm', initialPrices: { ATOM: 10 }, volatilities: { ATOM: 0.05 }, drifts: { ATOM: -0.2 }, seed: 7 },
@@ -107,11 +160,13 @@ test('ooda-cycle: analyzer inherits the forecaster adaptiveVol descriptor as its
     },
   });
 
-  // The cycle must not touch a wallet, and where the analyzer acted its scores
-  // carry the regime read threaded from the forecaster's descriptor.
+  // The cycle must not touch a wallet. Where the analyzer acted, its scores
+  // carry the regime read threaded from the forecaster's descriptor and the
+  // adaptive-cycle default applies the full-persistence half-size target cap.
   assert.equal(result.walletTouched, false);
   if (result.analysis && result.analysis.scores.length) {
     const scored = result.analysis.scores.find((s) => s.conditionalVol != null);
     assert.ok(scored, 'at least one score carries a threaded conditional-vol regime read');
+    assert.equal(scored.positionScale, 0.5, 'adaptive OODA defaults full persistence to half-size targets');
   }
 });

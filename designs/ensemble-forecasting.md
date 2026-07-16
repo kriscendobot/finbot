@@ -440,3 +440,37 @@ non-GBM feed). The paired lever left is feeding persistence into the analyzer's
 **risk appetite** more directly (position sizing, not just the gate and horizon).
 Deferred as before: gamma/asymmetric MLE, EGARCH, implied-vol surfaces, PNG
 rasterization, far-ref vending.
+
+## Notes from the field (2026-07-16 - regime-aware position sizing)
+
+The final direct decision lever now closes the volatility-regime loop. The
+analyzer already scored under an asset's current conditional volatility, the
+forecaster projects longer under persistent volatility, and the auditor demands
+more tail headroom. It now also **sizes the allocation itself** by persistence.
+
+- **Per-asset target scale** (`packages/pipeline/analyzer.js`). With
+  `regimePositionShrink > 0`, an asset's fitted GARCH persistence is mapped by
+  the shared `persistenceStress()` ramp from `regimePersistenceLo` (0.70) to
+  `regimePersistenceHi` (0.98). Its desired target is multiplied by
+  `1 - regimePositionShrink * stress`, bounded to [0, 1]. A fully persistent
+  asset with the standard 0.5 shrink receives half of its ordinary target.
+  This applies to the entire desired exposure, so it can reduce an existing
+  risky holding as well as limit a new buy. Multi-position allocations scale
+  each leg independently and leave the unused budget in cash.
+- **Safe defaults.** The analyzer API defaults `regimePositionShrink` to zero,
+  preserving legacy score records, rationale, and target weights. An OODA cycle
+  that explicitly enables `forecaster.adaptiveVol` defaults the shrink to 0.5,
+  alongside the existing regime-aware horizon and tail-floor defaults. A caller
+  can pin zero to retain score-only regime handling. `finbot-ooda` exposes
+  `--regime-position-shrink=F` for demonstrations and calibration.
+- **Evidence.** The analyzer tests prove full-stress half-size targets in both
+  single- and multi-position allocations, retain the original risk-budget
+  bound, and preserve the score record when the option is off. The OODA test
+  proves adaptive-vol cycles pick up the half-size default. The dry-run CLI
+  with a 16-tick MLE fit reduced its ATOM target from 21.50% to 10.75% at fitted
+  persistence 0.98, while the auditor approved and `WALLET TOUCHED: false`.
+
+The remaining forecasting-model extensions are asymmetric-MLE, EGARCH,
+implied-vol surfaces, PNG rasterization, and far-reference vending. Live
+execution remains separately blocked on an explicit paper-wallet/test-net
+authorization and a selected CapTP transport.

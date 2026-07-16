@@ -121,6 +121,13 @@ export async function runOodaCycle(input) {
   if (analyzerConfig.regimeVol === undefined && config.forecaster && config.forecaster.adaptiveVol) {
     analyzerConfig.regimeVol = config.forecaster.adaptiveVol;
   }
+  // The analyzer's direct regime-position-sizing lever is opt-in at its own
+  // API boundary, but an adaptive OODA cycle has explicitly elected to fit a
+  // live volatility regime. In that mode default to cutting a fully persistent
+  // asset's target by half. Callers can pin 0 to retain score-only behavior.
+  if (analyzerConfig.regimePositionShrink === undefined && config.forecaster && config.forecaster.adaptiveVol) {
+    analyzerConfig.regimePositionShrink = 0.5;
+  }
   const analysis = analyze(
     {
       opportunities: observed.crossings,
