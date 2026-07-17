@@ -189,3 +189,51 @@ test('conditionalVolFromPriceHistory: deterministic and MLE-routed', () => {
 test('conditionalVolFromPriceHistory: too-short history throws', () => {
   assert.throws(() => conditionalVolFromPriceHistory([{ A: 100 }]), /at least two/);
 });
+
+// ---------- conditionalVolFromPriceHistory: the asymmetric (GJR) read ----------
+
+// Build a calm run of 40 alternating small moves, then a terminal burst whose
+// per-tick multipliers are `endMult`. Signing the terminal burst down vs up
+// (with the same magnitudes) is what separates the leverage read from a
+// magnitude-only read.
+function windowEndingIn(endMult) {
+  let p = 100;
+  const frames = [{ A: p }];
+  for (let i = 0; i < 40; i += 1) { p *= i % 2 === 0 ? 1.002 : 0.998; frames.push({ A: p }); }
+  for (const m of endMult) { p *= m; frames.push({ A: p }); }
+  return frames;
+}
+
+test('conditionalVolFromPriceHistory: a GJR read runs hotter than symmetric after a drawdown', () => {
+  // Same down-ending window, same (alpha, beta). The GJR read applies the extra
+  // `gamma` ARCH weight on the terminal DOWN shocks, so its conditional vol must
+  // sit above the sign-blind symmetric read.
+  const frames = windowEndingIn([0.95, 0.94, 0.96, 0.93]);
+  const sym = conditionalVolFromPriceHistory(frames, { alpha: 0.05, beta: 0.9 });
+  const gjr = conditionalVolFromPriceHistory(frames, { kind: 'gjr-garch', alpha: 0.05, gamma: 0.08, beta: 0.9 });
+  assert.ok(gjr.A.conditionalVol > sym.A.conditionalVol,
+    `GJR (${gjr.A.conditionalVol}) > symmetric (${sym.A.conditionalVol}) after a drawdown`);
+  assert.ok(gjr.A.gamma != null && gjr.A.gamma > 0, 'a GJR read carries a positive gamma');
+  assert.ok(sym.A.gamma == null, 'a symmetric read carries no gamma');
+});
+
+test('conditionalVolFromPriceHistory: GJR is sign-driven — a drawdown reads hotter than its mirror rally', () => {
+  // Identical magnitudes, opposite terminal sign, identical params. A pure
+  // magnitude model would read the two the same; the leverage model reads the
+  // drawdown strictly hotter.
+  const opts = { kind: 'gjr-garch', alpha: 0.05, gamma: 0.1, beta: 0.85 };
+  const down = conditionalVolFromPriceHistory(windowEndingIn([0.93, 0.92, 0.94, 0.91]), opts);
+  const up = conditionalVolFromPriceHistory(windowEndingIn([1 / 0.93, 1 / 0.92, 1 / 0.94, 1 / 0.91]), opts);
+  assert.ok(down.A.conditionalVol > up.A.conditionalVol,
+    `drawdown (${down.A.conditionalVol}) > mirror rally (${up.A.conditionalVol})`);
+});
+
+test('conditionalVolFromPriceHistory: GJR read is deterministic and MLE-routed', () => {
+  const src = new GBMPriceFeed({ initialPrices: { A: 100 }, volatilities: { A: 0.03 }, seed: 5 });
+  const frames = [src.current()];
+  for (let i = 0; i < 60; i += 1) frames.push(src.tick());
+  const a = conditionalVolFromPriceHistory(frames, { kind: 'gjr-garch', estimate: 'mle' });
+  const b = conditionalVolFromPriceHistory(frames, { kind: 'gjr-garch', estimate: 'mle' });
+  assert.deepEqual(a, b, 'byte-identical for identical input (no RNG)');
+  assert.ok(a.A.conditionalVol > 0 && a.A.gamma != null && a.A.gamma >= 0, 'gamma is estimated and non-negative');
+});

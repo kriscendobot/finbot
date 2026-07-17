@@ -34,6 +34,8 @@
  * of its own. Same seed + same params -> byte-identical variance path.
  */
 
+import { gjrGarchFromPriceHistory, gjrGarchMleFromPriceHistory } from './gjr-garch.js';
+
 const DEFAULT_FLOOR = 1e-8;
 const DEFAULT_ALPHA = 0.08;
 const DEFAULT_BETA = 0.9;
@@ -371,6 +373,7 @@ export function garchMleFromPriceHistory(priceFrames, opts = {}) {
  * @property {number} sigma0           the variance a fresh trajectory starts from, as a vol
  * @property {number} alpha
  * @property {number} beta
+ * @property {number} [gamma]          leverage coefficient — present only for a GJR (asymmetric) read
  */
 
 /**
@@ -390,10 +393,23 @@ export function garchMleFromPriceHistory(priceFrames, opts = {}) {
  * variance targeting / a deterministic grid search and the roll-forward is a
  * plain recursion — no RNG — so a score that folds this in stays reproducible.
  *
+ * Symmetric vs. asymmetric. By default the surface is the sign-blind
+ * GARCH(1,1); pass `kind: 'gjr-garch'` to roll the read forward under the
+ * asymmetric GJR surface instead. Because a down-move carries the heavier
+ * `alpha + gamma` ARCH weight, the terminal conditional vol after a window
+ * that ended in *losses* sits strictly higher than the symmetric read of the
+ * same window — the leverage effect the auditor's tail floor and analyzer's
+ * risk denominator want to see. The GJR surface exposes the identical
+ * `initialVariance`/`nextVariance`/`stats` interface, so only the fit differs;
+ * the roll-forward recursion below is untouched. A `gjr-garch` read also
+ * carries `gamma` in each per-asset entry (absent from a symmetric read).
+ *
  * @param {Array<Record<string, number>>} priceFrames  per-tick { asset: price }
  * @param {object} [opts]
- * @param {'mle'|'fixed'} [opts.estimate]  'mle' fits (alpha, beta) per asset; else the fixed split
+ * @param {'garch'|'gjr-garch'} [opts.kind]  'gjr-garch' rolls forward the asymmetric (leverage) surface; else symmetric GARCH
+ * @param {'mle'|'fixed'} [opts.estimate]  'mle' fits the params per asset; else the fixed split
  * @param {number} [opts.alpha]  fixed / fallback ARCH coefficient
+ * @param {number} [opts.gamma]  fixed / fallback leverage coefficient (gjr-garch only)
  * @param {number} [opts.beta]   fixed / fallback GARCH coefficient
  * @param {number} [opts.floor]  variance floor
  * @returns {Record<string, RegimeRead>}   per-asset regime read (assets the surface could not host are omitted)
@@ -402,9 +418,18 @@ export function conditionalVolFromPriceHistory(priceFrames, opts = {}) {
   if (!Array.isArray(priceFrames) || priceFrames.length < 2) {
     throw new Error('conditionalVolFromPriceHistory: need at least two price frames');
   }
-  const surface = opts.estimate === 'mle'
-    ? garchMleFromPriceHistory(priceFrames, opts)
-    : garchFromPriceHistory(priceFrames, opts);
+  const gjr = opts.kind === 'gjr-garch';
+  const mle = opts.estimate === 'mle';
+  let surface;
+  if (gjr) {
+    surface = mle
+      ? gjrGarchMleFromPriceHistory(priceFrames, opts)
+      : gjrGarchFromPriceHistory(priceFrames, opts);
+  } else {
+    surface = mle
+      ? garchMleFromPriceHistory(priceFrames, opts)
+      : garchFromPriceHistory(priceFrames, opts);
+  }
   const assets = Object.keys(priceFrames[0]);
   /** @type {Record<string, RegimeRead>} */
   const out = {};
@@ -436,6 +461,9 @@ export function conditionalVolFromPriceHistory(priceFrames, opts = {}) {
       alpha: st.alpha,
       beta: st.beta,
     };
+    // A GJR (asymmetric) surface also reports the leverage coefficient; carry
+    // it through so a scorer can tell an asymmetric read from a symmetric one.
+    if (st.gamma != null) out[a].gamma = st.gamma;
   }
   return out;
 }

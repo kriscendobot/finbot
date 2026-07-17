@@ -524,3 +524,41 @@ tail floor and the analyzer's sizing see the *down-move-conditional* vol, not ju
 the magnitude-conditional one). Deferred as before: EGARCH, implied-vol surfaces,
 PNG rasterization, far-reference vending. Live execution remains separately blocked
 on an explicit paper-wallet/test-net authorization and a selected CapTP transport.
+
+## Notes from the field (2026-07-17 — the regime read goes asymmetric)
+
+The step named "next on this axis" above is now closed: the live regime read the
+pipeline cites can roll the *asymmetric* surface.
+
+- **The read routes on `kind`.** `conditionalVolFromPriceHistory(frames, opts)`
+  previously always fit a symmetric GARCH surface and rolled its conditional
+  variance forward, even when the caller's world was GJR. It now accepts
+  `kind: 'gjr-garch'` and (with `estimate: 'mle'` or the fixed split) builds the
+  GJR surface instead. Because `GjrGarch11Surface` exposes the identical
+  `initialVariance`/`nextVariance`/`stats` interface, **only the fit changed** — the
+  roll-forward recursion is byte-for-byte the same loop. A `gjr-garch` read carries
+  `gamma` in each per-asset entry (absent from a symmetric read), so a scorer can
+  tell the two apart.
+- **Why it matters at the decision boundary.** After a window that ended in
+  *losses*, the GJR read's terminal conditional vol sits strictly above the
+  symmetric read of the same window — the down-moves carried the heavier
+  `alpha + gamma` ARCH weight. The analyzer already blends `regime.conditionalVol`
+  into its risk denominator and the auditor already floors the tail on it; because
+  the analyzer passes `config.regimeVol` straight through as these opts, a caller
+  gets the down-move-conditional read by setting
+  `config.regimeVol = { estimate: 'mle', kind: 'gjr-garch' }` — **no pipeline code
+  change**, the leverage read reaches the sizing and tail floor through the existing
+  config seam.
+- **Proven.** Three new cases in `packages/simulator/test/garch.test.js`: a
+  drawdown-ending window reads hotter under GJR than under symmetric with identical
+  `(alpha, beta)`; a drawdown reads hotter than its sign-mirror rally under the same
+  GJR params (the effect is sign-driven, not magnitude-only); and the `gjr-garch`
+  MLE read is deterministic with a non-negative estimated gamma. Full suite
+  **541 pass / 0 fail**; `finbot-ooda --seed=7` green with **WALLET TOUCHED: false**.
+
+Deferred as before: EGARCH, implied-vol surfaces, PNG rasterization, far-reference
+vending. A natural follow-on is to make the pipeline *choose* `gjr-garch` for the
+regime read automatically when the fitted gamma is materially positive (an
+asymmetry-gated switch), rather than leaving it to config. Live execution remains
+separately blocked on an explicit paper-wallet/test-net authorization and a selected
+CapTP transport.
