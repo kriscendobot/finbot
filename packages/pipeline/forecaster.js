@@ -48,7 +48,8 @@ export function priceFramesFromReadings(readings) {
  * @param {import('@finbot/simulator/world').World} world
  * @param {Array<{ t?: number, prices?: Record<string, number> }>} readings
  * @param {object|undefined} adaptiveVol   a volSurface descriptor WITHOUT data
- *   (e.g. `{ kind: 'garch' }` or `{ kind: 'gjr-garch', alpha, beta }`); its
+ *   (e.g. `{ kind: 'garch' }`, `{ kind: 'gjr-garch', alpha, beta }`, or
+ *   `{ kind: 'auto-gjr-garch' }`); its
  *   `history` is filled from the observed window here.
  * @returns {{ world: import('@finbot/simulator/world').World, fit: object|null }}
  */
@@ -83,6 +84,8 @@ export function fitForecastWorld(world, readings, adaptiveVol) {
         sigma0: round12(st.sigma0),
         persistence: round12(st.persistence),
       };
+      if (st.gamma != null) assets[asset].gamma = round12(st.gamma);
+      if (st.model != null) assets[asset].model = st.model;
     }
     fit.assets = assets;
   }

@@ -237,6 +237,13 @@ const MLE_GRID = 8;      // points per axis per refinement level
 const MLE_LEVELS = 5;    // refinement levels
 const MLE_MIN_RETURNS = 12; // below this a per-window MLE is too noisy → fixed split
 
+// The automatic asymmetric-model gate deliberately has the same evidence
+// floor as the MLE itself. A short-window MLE falls back to configured GJR
+// defaults, which is useful for an explicitly requested GJR model but is not
+// evidence that this asset has a leverage effect.
+const AUTO_GJR_MIN_RETURNS = MLE_MIN_RETURNS;
+const AUTO_GJR_GAMMA_THRESHOLD = 0.05;
+
 /**
  * Gaussian negative log-likelihood of a variance-targeting GARCH(1,1) with the
  * given (alpha, beta), evaluated on a demeaned return series. omega is pinned so
@@ -366,6 +373,101 @@ export function garchMleFromPriceHistory(priceFrames, opts = {}) {
 }
 
 /**
+ * A per-asset selector between symmetric GARCH and asymmetric GJR-GARCH.
+ * Both candidate surfaces are fitted from the same history. An asset takes the
+ * GJR branch only when its data-supported GJR MLE estimates a materially
+ * positive gamma; otherwise it keeps the simpler symmetric model. This lets a
+ * mixed portfolio model leverage where it is observed without imposing it on
+ * every instrument.
+ */
+export class AutoGjrGarchSurface {
+  /**
+   * @param {Garch11Surface} garch
+   * @param {import('./gjr-garch.js').GjrGarch11Surface} gjr
+   * @param {Record<string, number>} returnCounts
+   * @param {object} [opts]
+   * @param {number} [opts.gammaThreshold]
+   */
+  constructor(garch, gjr, returnCounts, opts = {}) {
+    this.garch = garch;
+    this.gjr = gjr;
+    this.gammaThreshold = opts.gammaThreshold != null
+      ? opts.gammaThreshold
+      : AUTO_GJR_GAMMA_THRESHOLD;
+    if (!(this.gammaThreshold >= 0)) {
+      throw new Error('AutoGjrGarchSurface: gammaThreshold must be >= 0');
+    }
+    this.selected = {};
+    for (const asset of Object.keys(returnCounts)) {
+      if (!garch.has(asset) || !gjr.has(asset)) continue;
+      const gamma = gjr.stats(asset).gamma;
+      this.selected[asset] = returnCounts[asset] >= AUTO_GJR_MIN_RETURNS
+        && gamma >= this.gammaThreshold
+        ? gjr
+        : garch;
+    }
+  }
+
+  get isGarch() { return true; }
+
+  /** @param {string} asset @returns {boolean} */
+  has(asset) { return Object.prototype.hasOwnProperty.call(this.selected, asset); }
+
+  /** @param {string} asset @returns {number} */
+  initialVariance(asset) { return this.surfaceFor(asset).initialVariance(asset); }
+
+  /** @param {string} asset @param {number} varNow @param {number} shock @returns {number} */
+  nextVariance(asset, varNow, shock) { return this.surfaceFor(asset).nextVariance(asset, varNow, shock); }
+
+  /** @param {string} asset @returns {object} */
+  stats(asset) {
+    const surface = this.surfaceFor(asset);
+    return {
+      ...surface.stats(asset),
+      model: surface === this.gjr ? 'gjr-garch' : 'garch',
+    };
+  }
+
+  /** @param {string} asset */
+  surfaceFor(asset) {
+    const surface = this.selected[asset];
+    if (!surface) throw new Error(`AutoGjrGarchSurface: no params for asset ${asset}`);
+    return surface;
+  }
+}
+
+/**
+ * Fit both symmetric and asymmetric variance-targeting MLEs, then choose the
+ * asymmetric surface per asset only when measured leverage clears the material
+ * gamma threshold. The return-count guard prevents a GJR fallback default from
+ * being mistaken for fitted evidence on a short or invalid history.
+ *
+ * @param {Array<Record<string, number>>} priceFrames
+ * @param {object} [opts]
+ * @param {number} [opts.gammaThreshold] minimum fitted gamma for the GJR branch (default 0.05)
+ * @returns {AutoGjrGarchSurface}
+ */
+export function autoGjrGarchMleFromPriceHistory(priceFrames, opts = {}) {
+  if (!Array.isArray(priceFrames) || priceFrames.length < 2) {
+    throw new Error('autoGjrGarchMleFromPriceHistory: need at least two price frames');
+  }
+  const returnCounts = {};
+  for (const asset of Object.keys(priceFrames[0])) {
+    let count = 0;
+    for (let t = 1; t < priceFrames.length; t += 1) {
+      if (priceFrames[t - 1][asset] > 0 && priceFrames[t][asset] > 0) count += 1;
+    }
+    returnCounts[asset] = count;
+  }
+  return new AutoGjrGarchSurface(
+    garchMleFromPriceHistory(priceFrames, opts),
+    gjrGarchMleFromPriceHistory(priceFrames, opts),
+    returnCounts,
+    opts,
+  );
+}
+
+/**
  * @typedef {object} RegimeRead
  * @property {number} conditionalVol   sqrt of the variance the model carries into the NEXT tick
  * @property {number} unconditionalVol the long-run level sqrt(omega / (1 - persistence))
@@ -406,7 +508,7 @@ export function garchMleFromPriceHistory(priceFrames, opts = {}) {
  *
  * @param {Array<Record<string, number>>} priceFrames  per-tick { asset: price }
  * @param {object} [opts]
- * @param {'garch'|'gjr-garch'} [opts.kind]  'gjr-garch' rolls forward the asymmetric (leverage) surface; else symmetric GARCH
+ * @param {'garch'|'gjr-garch'|'auto-gjr-garch'} [opts.kind]  'auto-gjr-garch' selects GJR per asset only when fitted gamma is material
  * @param {'mle'|'fixed'} [opts.estimate]  'mle' fits the params per asset; else the fixed split
  * @param {number} [opts.alpha]  fixed / fallback ARCH coefficient
  * @param {number} [opts.gamma]  fixed / fallback leverage coefficient (gjr-garch only)
@@ -418,10 +520,13 @@ export function conditionalVolFromPriceHistory(priceFrames, opts = {}) {
   if (!Array.isArray(priceFrames) || priceFrames.length < 2) {
     throw new Error('conditionalVolFromPriceHistory: need at least two price frames');
   }
+  const autoGjr = opts.kind === 'auto-gjr-garch';
   const gjr = opts.kind === 'gjr-garch';
   const mle = opts.estimate === 'mle';
   let surface;
-  if (gjr) {
+  if (autoGjr) {
+    surface = autoGjrGarchMleFromPriceHistory(priceFrames, opts);
+  } else if (gjr) {
     surface = mle
       ? gjrGarchMleFromPriceHistory(priceFrames, opts)
       : gjrGarchFromPriceHistory(priceFrames, opts);
@@ -464,6 +569,7 @@ export function conditionalVolFromPriceHistory(priceFrames, opts = {}) {
     // A GJR (asymmetric) surface also reports the leverage coefficient; carry
     // it through so a scorer can tell an asymmetric read from a symmetric one.
     if (st.gamma != null) out[a].gamma = st.gamma;
+    if (st.model != null) out[a].model = st.model;
   }
   return out;
 }

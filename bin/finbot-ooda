@@ -34,7 +34,7 @@
  *   --regime-position-shrink=F  max fractional target reduction a fully persistent vol regime applies
  *                    (default: 0.5 when --adaptive-vol is on, else 0); a persistent asset sizes smaller
  *   --multi          run the multi-instrument world (correlated growth legs + a yield leg)
- *   --adaptive-vol[=mle]  fit a conditional-vol GARCH surface from the window; the
+ *   --adaptive-vol[=mle|auto]  fit a conditional-vol GARCH surface from the window; the
  *                    forecaster projects the ensemble under it and the analyzer
  *                    scores under its current-regime read (=mle also fits alpha/beta per asset)
  *   --journal=PATH   journal worktree to record entries into (local commit only)
@@ -81,9 +81,10 @@ function parseArgs(argv) {
     else if (key === '--adaptive-vol') {
       // Fit a conditional-vol GARCH surface from the observed window: the
       // forecaster projects the ensemble under it AND the analyzer scores under
-      // its current-regime read (threaded in ooda-cycle). `--adaptive-vol=mle`
-      // additionally estimates (alpha, beta) per asset; plain fits the fixed split.
-      const kind = 'garch';
+      // its current-regime read (threaded in ooda-cycle). `=mle` estimates the
+      // symmetric split; `=auto` fits both models and selects GJR only where
+      // its measured leverage gamma is material.
+      const kind = val === 'auto' ? 'auto-gjr-garch' : 'garch';
       args.adaptiveVol = val === 'mle' ? { kind, estimate: 'mle' } : { kind };
     }
     else if (key === '--help' || key === '-h') { printHelp(); process.exit(0); }
@@ -101,7 +102,7 @@ function printHelp() {
     '  finbot-ooda [--seed=N] [--drift=F] [--vol=F] [--warmup=N] [--fit-window=N]',
     '              [--threshold=BPS] [--ensemble=N] [--horizon=N]',
     '              [--tail-floor=F] [--regime-tail-bump=F] [--regime-horizon-stretch=F] [--regime-position-shrink=F]',
-    '              [--multi] [--adaptive-vol[=mle]] [--journal=PATH] [--json]',
+    '              [--multi] [--adaptive-vol[=mle|auto]] [--journal=PATH] [--json]',
     '',
     'DRY-RUN ONLY. Never reads a keystore; never constructs a wallet.',
     '',

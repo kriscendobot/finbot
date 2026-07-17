@@ -327,6 +327,10 @@ export function analyze(input, config = {}) {
       scored.positionScale = positionScale;
       scored.positionStress = positionStress;
     }
+    // The automatic asymmetric-model gate adds these fields only when used,
+    // preserving the existing score record for fixed GARCH and GJR callers.
+    if (reg && reg.model != null) scored.regimeModel = reg.model;
+    if (reg && reg.gamma != null) scored.gamma = reg.gamma;
     scores.push(scored);
   }
   scores.sort((a, b) => b.score - a.score);

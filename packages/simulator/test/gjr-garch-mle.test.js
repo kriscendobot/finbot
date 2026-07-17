@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { GjrGarch11Surface, gjrGarchFromPriceHistory, gjrGarchMleFromPriceHistory } from '../gjr-garch.js';
-import { Garch11Surface } from '../garch.js';
+import { Garch11Surface, autoGjrGarchMleFromPriceHistory, conditionalVolFromPriceHistory } from '../garch.js';
 import { GBMPriceFeed } from '../price-feed.js';
 import { makeVolSurface } from '../world.js';
 
@@ -69,6 +69,36 @@ test('gjrGarchMleFromPriceHistory: recovers the leverage effect — asymmetric g
   // The down-move ARCH weight strictly exceeds the up-move weight on the
   // leverage series — the asymmetry the auditor/forecaster read out.
   assert.ok(levStats.downWeight > levStats.upWeight, 'down-move reacts harder than up-move');
+});
+
+test('auto-gjr-garch: selects the asymmetric surface only for a material fitted gamma', () => {
+  const leverage = historyFrom(new GBMPriceFeed({
+    initialPrices: { A: 100 },
+    volSurface: new GjrGarch11Surface({ A: { omega: 0.00015, alpha: 0.02, gamma: 0.14, beta: 0.85 } }),
+    seed: 5,
+  }), 200);
+  const symmetric = historyFrom(new GBMPriceFeed({
+    initialPrices: { A: 100 },
+    volSurface: new Garch11Surface({ A: { omega: 0.00015, alpha: 0.09, beta: 0.85 } }),
+    seed: 5,
+  }), 200);
+
+  const lev = autoGjrGarchMleFromPriceHistory(leverage).stats('A');
+  const sym = autoGjrGarchMleFromPriceHistory(symmetric).stats('A');
+  assert.equal(lev.model, 'gjr-garch', `material gamma ${lev.gamma} selects GJR`);
+  assert.equal(sym.model, 'garch', `near-zero gamma ${sym.gamma} keeps GARCH`);
+
+  // The same per-asset choice reaches the current-regime reader used by the
+  // analyzer, so its conditional-vol denominator agrees with the forecaster.
+  const read = conditionalVolFromPriceHistory(leverage, { kind: 'auto-gjr-garch' });
+  assert.equal(read.A.model, 'gjr-garch');
+  assert.ok(read.A.gamma >= 0.05);
+});
+
+test('auto-gjr-garch: a short window does not mistake the GJR fallback gamma for evidence', () => {
+  const frames = historyFrom(new GBMPriceFeed({ initialPrices: { A: 100 }, volatilities: { A: 0.02 }, seed: 9 }), 6);
+  const st = autoGjrGarchMleFromPriceHistory(frames).stats('A');
+  assert.equal(st.model, 'garch', 'the selector requires enough returns for a measured gamma');
 });
 
 test('gjrGarchMleFromPriceHistory: short window falls back to the fixed default split', () => {

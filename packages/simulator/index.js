@@ -44,6 +44,8 @@ export {
   Garch11Surface,
   garchFromPriceHistory,
   garchMleFromPriceHistory,
+  AutoGjrGarchSurface,
+  autoGjrGarchMleFromPriceHistory,
   conditionalVolFromPriceHistory,
 } from './garch.js';
 export {

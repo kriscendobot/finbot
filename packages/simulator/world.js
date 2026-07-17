@@ -24,7 +24,12 @@
 import { Portfolio } from './portfolio.js';
 import { GBMPriceFeed, HarmonicPriceFeed, ReplayPriceFeed, parseCsvFrames } from './price-feed.js';
 import { surfaceFromPriceHistory } from './vol-surface.js';
-import { Garch11Surface, garchFromPriceHistory, garchMleFromPriceHistory } from './garch.js';
+import {
+  Garch11Surface,
+  garchFromPriceHistory,
+  garchMleFromPriceHistory,
+  autoGjrGarchMleFromPriceHistory,
+} from './garch.js';
 import {
   GjrGarch11Surface,
   gjrGarchFromPriceHistory,
@@ -98,6 +103,8 @@ const GJR_DEFAULTS = { alpha: 0.03, gamma: 0.09, beta: 0.9 };
  *   - `{ kind: 'garch', volatilities }`   variance-target from a per-asset base sigma
  *   - `{ kind: 'gjr-garch', ... }`        same four forms, with a leverage `gamma`;
  *                                          `estimate: 'mle'` fits (alpha, gamma, beta)
+ *   - `{ kind: 'auto-gjr-garch', history }` fit both MLEs and choose GJR per asset
+ *                                          only when its fitted `gamma` clears `gammaThreshold`
  *   - `{ kind: 'empirical', history }`    empirical bootstrap of realized vol
  * `alpha` / `beta` / `gamma` / `floor` on the descriptor override the defaults.
  *
@@ -112,6 +119,13 @@ export function makeVolSurface(descriptor) {
   }
   const kind = descriptor.kind || 'empirical';
   const floor = descriptor.floor;
+
+  if (kind === 'auto-gjr-garch') {
+    if (!descriptor.history) {
+      throw new Error("makeVolSurface: an 'auto-gjr-garch' descriptor needs a { history } of price frames");
+    }
+    return autoGjrGarchMleFromPriceHistory(descriptor.history, descriptor);
+  }
 
   if (kind === 'garch' || kind === 'gjr-garch') {
     const gjr = kind === 'gjr-garch';

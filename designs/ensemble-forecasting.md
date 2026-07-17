@@ -562,3 +562,28 @@ regime read automatically when the fitted gamma is materially positive (an
 asymmetry-gated switch), rather than leaving it to config. Live execution remains
 separately blocked on an explicit paper-wallet/test-net authorization and a selected
 CapTP transport.
+
+## Notes from the field (2026-07-17 - evidence-gated asymmetric selection)
+
+The pipeline now makes that asymmetry-gated choice per instrument through the
+`auto-gjr-garch` adaptive-vol descriptor. It fits both deterministic
+variance-targeting MLEs from the same window, then selects GJR only when the
+asset has at least 12 valid returns and its fitted gamma is at least 0.05. Other
+assets keep symmetric GARCH, so a mixed portfolio does not inherit a leverage
+effect from a different instrument.
+
+- `AutoGjrGarchSurface` delegates the common conditional-vol interface per
+  asset and reports the selected `model`. The analyzer's current-regime read and
+  the forecaster use the same selector, preserving one decision boundary rather
+  than allowing their volatility models to drift apart.
+- Forecast artifacts expose the selected per-asset model and gamma. Analyzer
+  scores expose the same evidence when the automatic descriptor is used. The
+  dry-run CLI accepts `--adaptive-vol=auto` for a reproducible demonstration.
+- The short-window MLE fallback is explicitly not treated as evidence: its
+  configured GJR gamma cannot trigger automatic GJR selection. Tests cover a
+  leverage process that selects GJR, a symmetric process that stays GARCH, and
+  the short-window guard.
+
+Next on this axis: EGARCH, which can model a log-variance response without the
+GJR non-negativity constraints. Live execution remains separately blocked on an
+explicit paper-wallet/test-net authorization and a selected CapTP transport.
