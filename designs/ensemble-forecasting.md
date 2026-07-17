@@ -587,3 +587,54 @@ effect from a different instrument.
 Next on this axis: EGARCH, which can model a log-variance response without the
 GJR non-negativity constraints. Live execution remains separately blocked on an
 explicit paper-wallet/test-net authorization and a selected CapTP transport.
+
+## Notes from the field (2026-07-17 — EGARCH, the log-variance asymmetry)
+
+The step named "next on this axis" for the last four cycles is now open: the
+forecasting stack has an **exponential GARCH** surface. Where GJR captures the
+leverage effect with a sign-gated ARCH term that must stay non-negative
+(`alpha >= 0`, `alpha + gamma >= 0`, and a persistence bounded below 1), Nelson's
+EGARCH evolves the **logarithm** of the variance, so the variance is `exp(...)`
+and therefore positive by construction — no coefficient carries a non-negativity
+constraint at all. Only the persistence `beta` is bounded (`|beta| < 1`).
+
+- **`Egarch11Surface`** (`packages/simulator/egarch.js`). The recursion is
+  `ln(sigma^2_{t+1}) = omega + beta·ln(sigma^2_t) + alpha·(|z_t| − E|z|) + gamma·z_t`,
+  with `E|z| = sqrt(2/pi)`. The two shock coefficients are decoupled: **alpha** is
+  the magnitude (ARCH) response, **gamma** is the sign (leverage) response, and
+  because gamma multiplies the *signed* shock the leverage sign is **gamma < 0**
+  (opposite to GJR's `gamma > 0`) — a down-move then carries the larger
+  per-unit-magnitude impact `alpha − gamma`. gamma = 0 collapses onto a
+  symmetric log-GARCH. Same drop-in `volSurface` contract as the other surfaces
+  (`isGarch`, `has`/`initialVariance`/`nextVariance`/`stats`), zero RNG of its
+  own, immutable params, per-feed variance state — so the price feed drives it
+  with no code change. `nextVariance` clamps the evolved log-variance to a finite
+  band so a freak shock can never overflow `exp`.
+- **`egarchFromPriceHistory`** fits by the EGARCH analogue of variance targeting:
+  it pins the unconditional *log*-variance to the sample log-variance
+  (`omega = ln(s^2)·(1 − beta)`) and takes `(alpha, gamma, beta)` from config
+  (defaults 0.15 / −0.08 / 0.95). Deterministic, no optimizer; a full per-asset
+  MLE of `(omega, alpha, gamma, beta)` is deferred, exactly as it was staged for
+  the first symmetric and GJR cuts.
+- **Routed and exported.** `makeVolSurface({ kind: 'egarch', params })` and
+  `{ kind: 'egarch', history }` build it; `Egarch11Surface` /
+  `egarchFromPriceHistory` are exported from the simulator index.
+- **Proven.** New `packages/simulator/test/egarch.test.js` (15 cases): the
+  recursion and stats, the leverage asymmetry (a down-move lifts variance more
+  than an equal up-move), gamma = 0 sign-symmetry, the no-non-negativity /
+  `|beta| < 1` construction guards, the exp-overflow clamp, seed determinism and
+  clone semantics under the price feed, the end-to-end negative return/future-vol
+  correlation the symmetric surface lacks (6000-tick run), and the
+  log-variance-targeting fitter (level, determinism, constant-price fallback,
+  non-stationary rejection). Two factory-routing cases added. Full suite
+  **563 pass / 0 fail** (was 541); `finbot-ooda --seed=7` green with
+  **WALLET TOUCHED: false**.
+
+Next on this axis: a light variance-targeting **EGARCH MLE**
+(`egarchMleFromPriceHistory`) that reads `(alpha, gamma, beta)` from the data —
+the same refinement that closed the symmetric and GJR axes — and, after it,
+routing EGARCH into the live regime read / adaptive-vol selector so the auditor
+and sizer can key off a log-variance asymmetry. Deferred as before: implied-vol
+surfaces, PNG rasterization, far-reference vending. Live execution remains
+separately blocked on an explicit paper-wallet/test-net authorization and a
+selected CapTP transport.

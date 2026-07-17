@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { makeVolSurface, makeWorld, makePriceFeed } from '../world.js';
 import { Garch11Surface } from '../garch.js';
 import { GjrGarch11Surface } from '../gjr-garch.js';
+import { Egarch11Surface } from '../egarch.js';
 import { GBMPriceFeed } from '../price-feed.js';
 
 test('makeVolSurface: null / undefined -> null (plain GBM, no surface)', () => {
@@ -55,10 +56,27 @@ test('makeVolSurface: gjr-garch descriptor carries the leverage gamma', () => {
   assert.ok(Math.abs(surf.params.A.gamma - 0.12) < 1e-15);
 });
 
+test('makeVolSurface: egarch descriptor from explicit params', () => {
+  const surf = makeVolSurface({ kind: 'egarch', params: { A: { omega: -0.2, alpha: 0.15, gamma: -0.08, beta: 0.95 } } });
+  assert.ok(surf instanceof Egarch11Surface);
+  assert.equal(surf.isGarch, true);
+  assert.ok(Math.abs(surf.params.A.gamma - -0.08) < 1e-15);
+});
+
+test('makeVolSurface: egarch descriptor fit from a price history', () => {
+  const src = makePriceFeed({ kind: 'gbm', initialPrices: { A: 100 }, volatilities: { A: 0.03 }, seed: 5 });
+  const history = [src.current()];
+  for (let i = 0; i < 200; i += 1) history.push(src.tick());
+  const surf = makeVolSurface({ kind: 'egarch', history });
+  assert.ok(surf instanceof Egarch11Surface);
+  assert.ok(surf.stats('A').downWeight > surf.stats('A').upWeight, 'default fit keeps a leverage asymmetry');
+});
+
 test('makeVolSurface: unknown kind and under-specified descriptors throw', () => {
   assert.throws(() => makeVolSurface({ kind: 'nope' }), /unknown volSurface kind/);
   assert.throws(() => makeVolSurface({ kind: 'garch' }), /needs one of/);
   assert.throws(() => makeVolSurface({ kind: 'empirical' }), /needs a { history }/);
+  assert.throws(() => makeVolSurface({ kind: 'egarch' }), /needs one of { params, history }/);
 });
 
 test('makePriceFeed: a garch volSurface descriptor builds a GARCH-driven feed', () => {

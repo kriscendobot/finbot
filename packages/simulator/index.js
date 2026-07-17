@@ -53,6 +53,10 @@ export {
   gjrGarchFromPriceHistory,
   gjrGarchMleFromPriceHistory,
 } from './gjr-garch.js';
+export {
+  Egarch11Surface,
+  egarchFromPriceHistory,
+} from './egarch.js';
 export { slippageFill, gasCost } from './costs.js';
 export { bootstrapQuantileBands, quantileSorted } from './bootstrap.js';
 export { pathStatsOf } from './path-stats.js';

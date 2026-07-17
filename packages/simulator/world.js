@@ -35,6 +35,10 @@ import {
   gjrGarchFromPriceHistory,
   gjrGarchMleFromPriceHistory,
 } from './gjr-garch.js';
+import {
+  Egarch11Surface,
+  egarchFromPriceHistory,
+} from './egarch.js';
 
 /**
  * @typedef {object} World
@@ -103,6 +107,8 @@ const GJR_DEFAULTS = { alpha: 0.03, gamma: 0.09, beta: 0.9 };
  *   - `{ kind: 'garch', volatilities }`   variance-target from a per-asset base sigma
  *   - `{ kind: 'gjr-garch', ... }`        same four forms, with a leverage `gamma`;
  *                                          `estimate: 'mle'` fits (alpha, gamma, beta)
+ *   - `{ kind: 'egarch', params }`        explicit per-asset { omega, alpha, gamma, beta }
+ *   - `{ kind: 'egarch', history }`       fit by log-variance targeting from price frames
  *   - `{ kind: 'auto-gjr-garch', history }` fit both MLEs and choose GJR per asset
  *                                          only when its fitted `gamma` clears `gammaThreshold`
  *   - `{ kind: 'empirical', history }`    empirical bootstrap of realized vol
@@ -150,6 +156,15 @@ export function makeVolSurface(descriptor) {
     throw new Error(
       `makeVolSurface: a '${kind}' descriptor needs one of { params, history, volatilities }`,
     );
+  }
+  if (kind === 'egarch') {
+    if (descriptor.params) {
+      return new Egarch11Surface(descriptor.params, { floor });
+    }
+    if (descriptor.history) {
+      return egarchFromPriceHistory(descriptor.history, descriptor);
+    }
+    throw new Error("makeVolSurface: an 'egarch' descriptor needs one of { params, history }");
   }
   if (kind === 'empirical') {
     if (!descriptor.history) {
