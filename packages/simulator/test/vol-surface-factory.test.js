@@ -127,3 +127,60 @@ test('makeWorld: GARCH clustering widens the terminal spread vs constant-vol GBM
   }
   assert.ok(maxGarch > maxGbm, `GARCH tail (${maxGarch}) should exceed constant-vol tail (${maxGbm})`);
 });
+
+// ---------------------------------------------------------------------------
+// auto-gjr-garch: the asymmetric-model selector as a volSurface descriptor
+// ---------------------------------------------------------------------------
+
+import { AutoGjrGarchSurface } from '../garch.js';
+
+/** Roll a price feed into per-tick frames { asset: price }. */
+function frames(feed, n) {
+  const out = [{ ...feed.current() }];
+  for (let i = 0; i < n; i += 1) out.push({ ...feed.tick() });
+  return out;
+}
+
+test('makeVolSurface: auto-gjr-garch with material gamma selects the asymmetric surface', () => {
+  const gjsrSurf = new GjrGarch11Surface({ A: { omega: 0.00015, alpha: 0.02, gamma: 0.14, beta: 0.85 } });
+  const feed = new GBMPriceFeed({
+    initialPrices: { A: 100 },
+    volSurface: gjsrSurf,
+    seed: 7,
+  });
+  const hist = frames(feed, 800);
+
+  const surf = makeVolSurface({ kind: 'auto-gjr-garch', history: hist });
+  assert.ok(surf instanceof AutoGjrGarchSurface);
+  assert.equal(surf.has('A'), true);
+  assert.equal(surf.stats('A').model, 'gjr-garch');
+  assert.ok(Math.abs(surf.stats('A').gamma - 0.14) < 0.04, 'fitted gamma close to ground truth');
+});
+
+test('makeVolSurface: auto-gjr-garch with near-zero gamma keeps the symmetric surface', () => {
+  const garchSurf = new Garch11Surface({ A: { omega: 0.00015, alpha: 0.09, beta: 0.85 } });
+  const feed = new GBMPriceFeed({
+    initialPrices: { A: 100 },
+    volSurface: garchSurf,
+    seed: 7,
+  });
+  const hist = frames(feed, 800);
+
+  const surf = makeVolSurface({ kind: 'auto-gjr-garch', history: hist });
+  assert.ok(surf instanceof AutoGjrGarchSurface);
+  assert.equal(surf.stats('A').model, 'garch');
+});
+
+test('makeVolSurface: auto-gjr-garch requires a history of price frames', () => {
+  assert.throws(() => makeVolSurface({ kind: 'auto-gjr-garch' }), /needs a.*history/);
+});
+
+test('makeVolSurface: auto-gjr-garch is reproducible across two calls with the same input', () => {
+  const surf1 = new GjrGarch11Surface({ A: { omega: 0.00015, alpha: 0.02, gamma: 0.14, beta: 0.85 } });
+  const feed = new GBMPriceFeed({ initialPrices: { A: 100 }, volSurface: surf1, seed: 7 });
+  const hist = frames(feed, 800);
+
+  const a = makeVolSurface({ kind: 'auto-gjr-garch', history: hist });
+  const b = makeVolSurface({ kind: 'auto-gjr-garch', history: hist });
+  assert.ok(Math.abs(a.stats('A').gamma - b.stats('A').gamma) < 1e-12);
+});
