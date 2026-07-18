@@ -35,6 +35,7 @@
  */
 
 import { gjrGarchFromPriceHistory, gjrGarchMleFromPriceHistory } from './gjr-garch.js';
+import { egarchFromPriceHistory, egarchMleFromPriceHistory } from './egarch.js';
 
 const DEFAULT_FLOOR = 1e-8;
 const DEFAULT_ALPHA = 0.08;
@@ -243,6 +244,8 @@ const MLE_MIN_RETURNS = 12; // below this a per-window MLE is too noisy → fixe
 // evidence that this asset has a leverage effect.
 const AUTO_GJR_MIN_RETURNS = MLE_MIN_RETURNS;
 const AUTO_GJR_GAMMA_THRESHOLD = 0.05;
+const AUTO_EGARCH_MIN_RETURNS = MLE_MIN_RETURNS;
+const AUTO_EGARCH_GAMMA_THRESHOLD = 0.05;
 
 /**
  * Gaussian negative log-likelihood of a variance-targeting GARCH(1,1) with the
@@ -468,6 +471,101 @@ export function autoGjrGarchMleFromPriceHistory(priceFrames, opts = {}) {
 }
 
 /**
+ * A per-asset selector between symmetric GARCH and log-variance EGARCH.
+ * EGARCH is selected only when its fitted signed leverage coefficient has a
+ * material magnitude. The absolute-value gate deliberately accepts both the
+ * usual leverage sign (gamma < 0) and reverse leverage (gamma > 0), which the
+ * EGARCH surface can represent. As with the GJR selector, a short-window
+ * fallback must never count as evidence.
+ */
+export class AutoEgarchSurface {
+  /**
+   * @param {Garch11Surface} garch
+   * @param {import('./egarch.js').Egarch11Surface} egarch
+   * @param {Record<string, number>} returnCounts
+   * @param {object} [opts]
+   * @param {number} [opts.gammaThreshold]
+   */
+  constructor(garch, egarch, returnCounts, opts = {}) {
+    this.garch = garch;
+    this.egarch = egarch;
+    this.gammaThreshold = opts.gammaThreshold != null
+      ? opts.gammaThreshold
+      : AUTO_EGARCH_GAMMA_THRESHOLD;
+    if (!(this.gammaThreshold >= 0)) {
+      throw new Error('AutoEgarchSurface: gammaThreshold must be >= 0');
+    }
+    this.selected = {};
+    for (const asset of Object.keys(returnCounts)) {
+      if (!garch.has(asset) || !egarch.has(asset)) continue;
+      const gamma = egarch.stats(asset).gamma;
+      this.selected[asset] = returnCounts[asset] >= AUTO_EGARCH_MIN_RETURNS
+        && Math.abs(gamma) >= this.gammaThreshold
+        ? egarch
+        : garch;
+    }
+  }
+
+  get isGarch() { return true; }
+
+  /** @param {string} asset @returns {boolean} */
+  has(asset) { return Object.prototype.hasOwnProperty.call(this.selected, asset); }
+
+  /** @param {string} asset @returns {number} */
+  initialVariance(asset) { return this.surfaceFor(asset).initialVariance(asset); }
+
+  /** @param {string} asset @param {number} varNow @param {number} shock @returns {number} */
+  nextVariance(asset, varNow, shock) { return this.surfaceFor(asset).nextVariance(asset, varNow, shock); }
+
+  /** @param {string} asset @returns {object} */
+  stats(asset) {
+    const surface = this.surfaceFor(asset);
+    return {
+      ...surface.stats(asset),
+      model: surface === this.egarch ? 'egarch' : 'garch',
+    };
+  }
+
+  /** @param {string} asset */
+  surfaceFor(asset) {
+    const surface = this.selected[asset];
+    if (!surface) throw new Error(`AutoEgarchSurface: no params for asset ${asset}`);
+    return surface;
+  }
+}
+
+/**
+ * Fit symmetric GARCH and EGARCH MLEs from the same window, then choose the
+ * EGARCH branch per asset when its fitted signed gamma is material. This keeps
+ * the simpler GARCH recursion for assets without measured asymmetry while
+ * letting either leverage sign reach the live regime read and forecast.
+ *
+ * @param {Array<Record<string, number>>} priceFrames
+ * @param {object} [opts]
+ * @param {number} [opts.gammaThreshold] minimum absolute fitted gamma for EGARCH (default 0.05)
+ * @returns {AutoEgarchSurface}
+ */
+export function autoEgarchMleFromPriceHistory(priceFrames, opts = {}) {
+  if (!Array.isArray(priceFrames) || priceFrames.length < 2) {
+    throw new Error('autoEgarchMleFromPriceHistory: need at least two price frames');
+  }
+  const returnCounts = {};
+  for (const asset of Object.keys(priceFrames[0])) {
+    let count = 0;
+    for (let t = 1; t < priceFrames.length; t += 1) {
+      if (priceFrames[t - 1][asset] > 0 && priceFrames[t][asset] > 0) count += 1;
+    }
+    returnCounts[asset] = count;
+  }
+  return new AutoEgarchSurface(
+    garchMleFromPriceHistory(priceFrames, opts),
+    egarchMleFromPriceHistory(priceFrames, opts),
+    returnCounts,
+    opts,
+  );
+}
+
+/**
  * @typedef {object} RegimeRead
  * @property {number} conditionalVol   sqrt of the variance the model carries into the NEXT tick
  * @property {number} unconditionalVol the long-run level sqrt(omega / (1 - persistence))
@@ -496,19 +594,17 @@ export function autoGjrGarchMleFromPriceHistory(priceFrames, opts = {}) {
  * plain recursion — no RNG — so a score that folds this in stays reproducible.
  *
  * Symmetric vs. asymmetric. By default the surface is the sign-blind
- * GARCH(1,1); pass `kind: 'gjr-garch'` to roll the read forward under the
- * asymmetric GJR surface instead. Because a down-move carries the heavier
- * `alpha + gamma` ARCH weight, the terminal conditional vol after a window
- * that ended in *losses* sits strictly higher than the symmetric read of the
- * same window — the leverage effect the auditor's tail floor and analyzer's
- * risk denominator want to see. The GJR surface exposes the identical
+ * GARCH(1,1); `kind: 'gjr-garch'` and `kind: 'egarch'` roll the read forward
+ * under the two asymmetric forms. `kind: 'auto-gjr-garch'` and
+ * `kind: 'auto-egarch'` choose their asymmetric candidate per asset only when
+ * the fitted gamma is material. Every surface exposes the identical
  * `initialVariance`/`nextVariance`/`stats` interface, so only the fit differs;
- * the roll-forward recursion below is untouched. A `gjr-garch` read also
- * carries `gamma` in each per-asset entry (absent from a symmetric read).
+ * the roll-forward recursion below is untouched. An asymmetric read carries
+ * `gamma` in each per-asset entry (absent from a symmetric read).
  *
  * @param {Array<Record<string, number>>} priceFrames  per-tick { asset: price }
  * @param {object} [opts]
- * @param {'garch'|'gjr-garch'|'auto-gjr-garch'} [opts.kind]  'auto-gjr-garch' selects GJR per asset only when fitted gamma is material
+ * @param {'garch'|'gjr-garch'|'egarch'|'auto-gjr-garch'|'auto-egarch'} [opts.kind]  auto kinds select their asymmetric candidate per asset only when fitted gamma is material
  * @param {'mle'|'fixed'} [opts.estimate]  'mle' fits the params per asset; else the fixed split
  * @param {number} [opts.alpha]  fixed / fallback ARCH coefficient
  * @param {number} [opts.gamma]  fixed / fallback leverage coefficient (gjr-garch only)
@@ -521,15 +617,23 @@ export function conditionalVolFromPriceHistory(priceFrames, opts = {}) {
     throw new Error('conditionalVolFromPriceHistory: need at least two price frames');
   }
   const autoGjr = opts.kind === 'auto-gjr-garch';
+  const autoEgarch = opts.kind === 'auto-egarch';
   const gjr = opts.kind === 'gjr-garch';
+  const egarch = opts.kind === 'egarch';
   const mle = opts.estimate === 'mle';
   let surface;
   if (autoGjr) {
     surface = autoGjrGarchMleFromPriceHistory(priceFrames, opts);
+  } else if (autoEgarch) {
+    surface = autoEgarchMleFromPriceHistory(priceFrames, opts);
   } else if (gjr) {
     surface = mle
       ? gjrGarchMleFromPriceHistory(priceFrames, opts)
       : gjrGarchFromPriceHistory(priceFrames, opts);
+  } else if (egarch) {
+    surface = mle
+      ? egarchMleFromPriceHistory(priceFrames, opts)
+      : egarchFromPriceHistory(priceFrames, opts);
   } else {
     surface = mle
       ? garchMleFromPriceHistory(priceFrames, opts)

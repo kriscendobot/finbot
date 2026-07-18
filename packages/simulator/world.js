@@ -29,6 +29,7 @@ import {
   garchFromPriceHistory,
   garchMleFromPriceHistory,
   autoGjrGarchMleFromPriceHistory,
+  autoEgarchMleFromPriceHistory,
 } from './garch.js';
 import {
   GjrGarch11Surface,
@@ -114,6 +115,8 @@ const GJR_DEFAULTS = { alpha: 0.03, gamma: 0.09, beta: 0.9 };
  *                                          gamma, beta) per asset from the data (light MLE)
  *   - `{ kind: 'auto-gjr-garch', history }` fit both MLEs and choose GJR per asset
  *                                          only when its fitted `gamma` clears `gammaThreshold`
+ *   - `{ kind: 'auto-egarch', history }` fit GARCH and EGARCH MLEs and choose EGARCH per asset
+ *                                      only when absolute fitted `gamma` clears `gammaThreshold`
  *   - `{ kind: 'empirical', history }`    empirical bootstrap of realized vol
  * `alpha` / `beta` / `gamma` / `floor` on the descriptor override the defaults.
  *
@@ -134,6 +137,12 @@ export function makeVolSurface(descriptor) {
       throw new Error("makeVolSurface: an 'auto-gjr-garch' descriptor needs a { history } of price frames");
     }
     return autoGjrGarchMleFromPriceHistory(descriptor.history, descriptor);
+  }
+  if (kind === 'auto-egarch') {
+    if (!descriptor.history) {
+      throw new Error("makeVolSurface: an 'auto-egarch' descriptor needs a { history } of price frames");
+    }
+    return autoEgarchMleFromPriceHistory(descriptor.history, descriptor);
   }
 
   if (kind === 'garch' || kind === 'gjr-garch') {

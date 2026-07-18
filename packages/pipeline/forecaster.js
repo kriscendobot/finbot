@@ -49,7 +49,7 @@ export function priceFramesFromReadings(readings) {
  * @param {Array<{ t?: number, prices?: Record<string, number> }>} readings
  * @param {object|undefined} adaptiveVol   a volSurface descriptor WITHOUT data
  *   (e.g. `{ kind: 'garch' }`, `{ kind: 'gjr-garch', alpha, beta }`, or
- *   `{ kind: 'auto-gjr-garch' }`); its
+ *   `{ kind: 'auto-gjr-garch' }`, or `{ kind: 'auto-egarch' }`); its
  *   `history` is filled from the observed window here.
  * @returns {{ world: import('@finbot/simulator/world').World, fit: object|null }}
  */

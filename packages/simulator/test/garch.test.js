@@ -4,9 +4,11 @@ import assert from 'node:assert/strict';
 import {
   Garch11Surface,
   garchFromPriceHistory,
+  autoEgarchMleFromPriceHistory,
   conditionalVolFromPriceHistory,
 } from '../garch.js';
 import { GBMPriceFeed } from '../price-feed.js';
+import { Egarch11Surface } from '../egarch.js';
 
 test('Garch11Surface: stats reports persistence and unconditional vol', () => {
   const surf = new Garch11Surface({ A: { omega: 0.0002, alpha: 0.1, beta: 0.85 } });
@@ -236,4 +238,51 @@ test('conditionalVolFromPriceHistory: GJR read is deterministic and MLE-routed',
   const b = conditionalVolFromPriceHistory(frames, { kind: 'gjr-garch', estimate: 'mle' });
   assert.deepEqual(a, b, 'byte-identical for identical input (no RNG)');
   assert.ok(a.A.conditionalVol > 0 && a.A.gamma != null && a.A.gamma >= 0, 'gamma is estimated and non-negative');
+});
+
+test('conditionalVolFromPriceHistory: an EGARCH read carries the signed leverage fit', () => {
+  const source = new GBMPriceFeed({
+    initialPrices: { A: 100 },
+    volSurface: new Egarch11Surface({ A: { omega: -0.45, alpha: 0.16, gamma: -0.2, beta: 0.9 } }),
+    seed: 17,
+  });
+  const frames = [source.current()];
+  for (let i = 0; i < 800; i += 1) frames.push(source.tick());
+  const read = conditionalVolFromPriceHistory(frames, { kind: 'egarch', estimate: 'mle' });
+  assert.ok(read.A.gamma < -0.05, `the signed leverage fit is carried into the live read (got ${read.A.gamma})`);
+  assert.ok(read.A.conditionalVol > 0, 'the live read rolls EGARCH forward');
+});
+
+test('auto-egarch: selects EGARCH only on measured signed asymmetry', () => {
+  const leverage = new GBMPriceFeed({
+    initialPrices: { A: 100 },
+    volSurface: new Egarch11Surface({ A: { omega: -0.45, alpha: 0.16, gamma: -0.2, beta: 0.9 } }),
+    seed: 17,
+  });
+  const symmetric = new GBMPriceFeed({
+    initialPrices: { A: 100 },
+    volSurface: new Garch11Surface({ A: { omega: 0.00015, alpha: 0.09, beta: 0.85 } }),
+    seed: 17,
+  });
+  const history = (feed) => {
+    const frames = [feed.current()];
+    for (let i = 0; i < 800; i += 1) frames.push(feed.tick());
+    return frames;
+  };
+  const leverageFrames = history(leverage);
+  const leverageSelection = autoEgarchMleFromPriceHistory(leverageFrames).stats('A');
+  const symmetricSelection = autoEgarchMleFromPriceHistory(history(symmetric)).stats('A');
+  assert.equal(leverageSelection.model, 'egarch');
+  assert.ok(leverageSelection.gamma < -0.05, `material signed gamma selects EGARCH (got ${leverageSelection.gamma})`);
+  assert.equal(symmetricSelection.model, 'garch');
+
+  const read = conditionalVolFromPriceHistory(leverageFrames, { kind: 'auto-egarch' });
+  assert.equal(read.A.model, 'egarch', 'the analyzer-regime read takes the same selected model');
+});
+
+test('auto-egarch: a short window does not mistake fallback gamma for evidence', () => {
+  const source = new GBMPriceFeed({ initialPrices: { A: 100 }, volatilities: { A: 0.02 }, seed: 9 });
+  const frames = [source.current()];
+  for (let i = 0; i < 6; i += 1) frames.push(source.tick());
+  assert.equal(autoEgarchMleFromPriceHistory(frames).stats('A').model, 'garch');
 });

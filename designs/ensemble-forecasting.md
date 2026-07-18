@@ -674,3 +674,35 @@ three-way GARCH/GJR/EGARCH selector on fitted-gamma evidence). Deferred as befor
 implied-vol surfaces, PNG rasterization, far-reference vending. Live execution
 remains separately blocked on an explicit paper-wallet/test-net authorization and
 a selected CapTP transport.
+
+## Notes from the field (2026-07-18 — evidence-gated EGARCH reaches the live path)
+
+The next selector increment is closed with `auto-egarch`. It fits symmetric
+GARCH and EGARCH MLEs on the same observed window, then keeps the simpler GARCH
+surface unless the EGARCH signed gamma has material magnitude (`abs(gamma) >=
+0.05`) and the asset has at least twelve valid returns. The absolute-value gate
+is intentional: EGARCH can represent the usual down-move leverage (`gamma < 0`)
+and reverse leverage (`gamma > 0`), while a short-window fallback gamma is never
+evidence.
+
+- `AutoEgarchSurface` exposes the common conditional-volatility interface and
+  records the selected `model` per asset. `makeVolSurface`, the forecaster's
+  adaptive descriptor, and `conditionalVolFromPriceHistory` all accept
+  `kind: 'auto-egarch'`, so the forecast and the analyzer/auditor regime read
+  use the same per-instrument model decision.
+- A directly requested `kind: 'egarch'` regime read also now routes through the
+  fixed or MLE EGARCH fit as selected by `estimate`, then carries its signed
+  gamma into the analyzer's existing regime payload.
+- The dry-run CLI exposes the path as `--adaptive-vol=auto-egarch`; it remains
+  dry-run only and never constructs a wallet capability.
+
+Tests prove the EGARCH regime read carries a recovered negative gamma, a material
+EGARCH series selects EGARCH while a symmetric series keeps GARCH, a short window
+cannot select based on fallback defaults, and the forecast artifact records a
+deterministic per-asset model selection.
+
+Next on this axis: build the walk-forward, out-of-sample evaluation harness from
+the literature review, with QLIKE and naive baselines, before choosing among the
+now-reachable GARCH-family variants for production policy. Live execution remains
+separately blocked on explicit paper-wallet/test-net authorization and a selected
+CapTP transport.

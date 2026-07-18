@@ -117,6 +117,21 @@ test('auto-gjr-garch adaptive fit records the per-asset model selection', () => 
   assert.deepEqual(a.volFit, b.volFit, 'selection and its fit summary are reproducible');
 });
 
+test('auto-egarch adaptive fit records the per-asset signed-asymmetry selection', () => {
+  const readings = turbulentReadings(200);
+  const a = project(
+    { world: calmWorld(7), targetWeights: TARGET, bounds: BOUNDS, readings },
+    { ensembleSize: 20, horizon: 8, baseSeed: 100, adaptiveVol: { kind: 'auto-egarch' } },
+  );
+  const b = project(
+    { world: calmWorld(7), targetWeights: TARGET, bounds: BOUNDS, readings },
+    { ensembleSize: 20, horizon: 8, baseSeed: 100, adaptiveVol: { kind: 'auto-egarch' } },
+  );
+  assert.equal(a.volFit.kind, 'auto-egarch');
+  assert.ok(['garch', 'egarch'].includes(a.volFit.assets.ATOM.model));
+  assert.deepEqual(a.volFit, b.volFit, 'selection and its fit summary are reproducible');
+});
+
 test('default path is inert: no adaptiveVol -> no volFit, artifact hash unchanged', () => {
   const readings = turbulentReadings();
   // Same inputs, one WITH readings-but-no-adaptiveVol, one with NEITHER: both
