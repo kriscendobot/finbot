@@ -38,6 +38,7 @@ import {
 import {
   Egarch11Surface,
   egarchFromPriceHistory,
+  egarchMleFromPriceHistory,
 } from './egarch.js';
 
 /**
@@ -109,6 +110,8 @@ const GJR_DEFAULTS = { alpha: 0.03, gamma: 0.09, beta: 0.9 };
  *                                          `estimate: 'mle'` fits (alpha, gamma, beta)
  *   - `{ kind: 'egarch', params }`        explicit per-asset { omega, alpha, gamma, beta }
  *   - `{ kind: 'egarch', history }`       fit by log-variance targeting from price frames
+ *   - `{ kind: 'egarch', history, estimate: 'mle' }`  as above, but estimate (alpha,
+ *                                          gamma, beta) per asset from the data (light MLE)
  *   - `{ kind: 'auto-gjr-garch', history }` fit both MLEs and choose GJR per asset
  *                                          only when its fitted `gamma` clears `gammaThreshold`
  *   - `{ kind: 'empirical', history }`    empirical bootstrap of realized vol
@@ -162,7 +165,9 @@ export function makeVolSurface(descriptor) {
       return new Egarch11Surface(descriptor.params, { floor });
     }
     if (descriptor.history) {
-      return egarchFromPriceHistory(descriptor.history, descriptor);
+      return descriptor.estimate === 'mle'
+        ? egarchMleFromPriceHistory(descriptor.history, descriptor)
+        : egarchFromPriceHistory(descriptor.history, descriptor);
     }
     throw new Error("makeVolSurface: an 'egarch' descriptor needs one of { params, history }");
   }

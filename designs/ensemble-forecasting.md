@@ -630,11 +630,47 @@ constraint at all. Only the persistence `beta` is bounded (`|beta| < 1`).
   **563 pass / 0 fail** (was 541); `finbot-ooda --seed=7` green with
   **WALLET TOUCHED: false**.
 
-Next on this axis: a light variance-targeting **EGARCH MLE**
-(`egarchMleFromPriceHistory`) that reads `(alpha, gamma, beta)` from the data —
-the same refinement that closed the symmetric and GJR axes — and, after it,
-routing EGARCH into the live regime read / adaptive-vol selector so the auditor
-and sizer can key off a log-variance asymmetry. Deferred as before: implied-vol
-surfaces, PNG rasterization, far-reference vending. Live execution remains
-separately blocked on an explicit paper-wallet/test-net authorization and a
-selected CapTP transport.
+## Notes from the field (2026-07-18 — the EGARCH MLE reads the leverage sign)
+
+Closed the refinement the prior cut named "the natural next": a **light
+variance-targeting EGARCH MLE** that reads `(alpha, gamma, beta)` per instrument
+from the realized returns, so the log-variance asymmetry is *estimated* rather
+than imposed as one fixed config gamma on every asset.
+
+- **`egarchMleFromPriceHistory`** (`packages/simulator/egarch.js`). Same
+  deterministic **nested grid refinement** the symmetric (`estimateGarchParams`)
+  and GJR (`estimateGjrGarchParams`) fitters use — a coarse grid over the
+  `(alpha, gamma, beta)` box, then finer grids around the incumbent; no optimizer,
+  no RNG, byte-identical params for identical input. Variance targeting removes
+  omega from the search — in the log-variance form `omega = ln(s^2)*(1 - beta)`
+  depends on **beta alone** (not on all three, as GJR's does), because
+  `E[alpha*(|z|-E|z|) + gamma*z] = 0` for a symmetric innovation — so only the
+  three persistence coefficients are fit.
+- **The one structural difference from the GJR search:** gamma is **not** bounded
+  non-negative. In EGARCH gamma multiplies the *signed* standardized shock, so the
+  leverage sign is `gamma < 0`; the search box `[-0.4, 0.4]` straddles zero and can
+  recover either the leverage or a reverse-leverage series. Short windows
+  (`< 12` returns) and degenerate constant-price assets fall back to the fixed
+  defaults exactly as `egarchFromPriceHistory` does.
+- **Routed and exported.** `makeVolSurface({ kind: 'egarch', history,
+  estimate: 'mle' })` selects it (mirroring the garch/gjr `estimate: 'mle'` flag);
+  `egarchMleFromPriceHistory` is exported from the simulator index.
+- **Proven.** New `packages/simulator/test/egarch-mle.test.js` (9 cases):
+  determinism, variance-targeting preservation, **leverage-sign recovery**
+  (a genuine EGARCH `gamma = -0.2` DGP recovers a clearly negative gamma while a
+  symmetric GARCH series fits near zero), **reverse-leverage recovery** (a
+  `gamma = +0.2` DGP the fixed path cannot represent), short-window and custom
+  fallbacks, constant-price degeneracy, and factory routing that differs from the
+  fixed fit. Full suite **572 pass / 0 fail** (was 563); `finbot-ooda --seed=7`
+  green with **WALLET TOUCHED: false**, auditor APPROVED. (A fresh worktree needs a
+  one-time `npm install` to relink the `@finbot/harness` workspace symlink — a
+  pre-existing gap, unrelated to this change.)
+
+Next on this axis: **route EGARCH into the live regime read / adaptive-vol
+selector** — extend `conditionalVolFromPriceHistory` / the `auto-gjr-garch`
+per-asset chooser so the forecaster and auditor can key off a log-variance
+asymmetry the same way they now key off the GJR one (an `auto-egarch` or a
+three-way GARCH/GJR/EGARCH selector on fitted-gamma evidence). Deferred as before:
+implied-vol surfaces, PNG rasterization, far-reference vending. Live execution
+remains separately blocked on an explicit paper-wallet/test-net authorization and
+a selected CapTP transport.

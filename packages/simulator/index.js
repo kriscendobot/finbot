@@ -56,6 +56,7 @@ export {
 export {
   Egarch11Surface,
   egarchFromPriceHistory,
+  egarchMleFromPriceHistory,
 } from './egarch.js';
 export { slippageFill, gasCost } from './costs.js';
 export { bootstrapQuantileBands, quantileSorted } from './bootstrap.js';
