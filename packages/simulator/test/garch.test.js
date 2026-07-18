@@ -270,19 +270,55 @@ test('auto-egarch: selects EGARCH only on measured signed asymmetry', () => {
     return frames;
   };
   const leverageFrames = history(leverage);
-  const leverageSelection = autoEgarchMleFromPriceHistory(leverageFrames).stats('A');
-  const symmetricSelection = autoEgarchMleFromPriceHistory(history(symmetric)).stats('A');
+  const leverageSelection = autoEgarchMleFromPriceHistory(leverageFrames, { selection: 'gamma' }).stats('A');
+  const symmetricSelection = autoEgarchMleFromPriceHistory(history(symmetric), { selection: 'gamma' }).stats('A');
   assert.equal(leverageSelection.model, 'egarch');
   assert.ok(leverageSelection.gamma < -0.05, `material signed gamma selects EGARCH (got ${leverageSelection.gamma})`);
   assert.equal(symmetricSelection.model, 'garch');
 
-  const read = conditionalVolFromPriceHistory(leverageFrames, { kind: 'auto-egarch' });
+  const read = conditionalVolFromPriceHistory(leverageFrames, { kind: 'auto-egarch', selection: 'gamma' });
   assert.equal(read.A.model, 'egarch', 'the analyzer-regime read takes the same selected model');
+});
+
+test('auto-egarch: held-out QLIKE chooses the production surface and reaches the regime read', () => {
+  const symmetric = new GBMPriceFeed({
+    initialPrices: { A: 100 },
+    volSurface: new Garch11Surface({ A: { omega: 0.00015, alpha: 0.09, beta: 0.85 } }),
+    seed: 1,
+  });
+  const leverage = new GBMPriceFeed({
+    initialPrices: { A: 100 },
+    volSurface: new Egarch11Surface({ A: { omega: -0.45, alpha: 0.16, gamma: -0.2, beta: 0.9 } }),
+    seed: 17,
+  });
+  const history = (feed) => {
+    const frames = [feed.current()];
+    for (let index = 0; index < 800; index += 1) frames.push(feed.tick());
+    return frames;
+  };
+  const symmetricFrames = history(symmetric);
+  const leverageFrames = history(leverage);
+  const symmetricSelection = autoEgarchMleFromPriceHistory(symmetricFrames).stats('A');
+  const leverageSelection = autoEgarchMleFromPriceHistory(leverageFrames).stats('A');
+
+  assert.equal(symmetricSelection.selection, 'oos-qlike');
+  assert.equal(symmetricSelection.model, 'garch');
+  assert.ok(symmetricSelection.oosQlike.garch < symmetricSelection.oosQlike.egarch);
+  assert.equal(leverageSelection.selection, 'oos-qlike');
+  assert.equal(leverageSelection.model, 'egarch');
+  assert.ok(leverageSelection.oosQlike.egarch < leverageSelection.oosQlike.garch);
+
+  const read = conditionalVolFromPriceHistory(leverageFrames, { kind: 'auto-egarch' });
+  assert.equal(read.A.selection, 'oos-qlike');
+  assert.deepEqual(read.A.oosQlike, leverageSelection.oosQlike);
 });
 
 test('auto-egarch: a short window does not mistake fallback gamma for evidence', () => {
   const source = new GBMPriceFeed({ initialPrices: { A: 100 }, volatilities: { A: 0.02 }, seed: 9 });
   const frames = [source.current()];
   for (let i = 0; i < 6; i += 1) frames.push(source.tick());
-  assert.equal(autoEgarchMleFromPriceHistory(frames).stats('A').model, 'garch');
+  const selection = autoEgarchMleFromPriceHistory(frames).stats('A');
+  assert.equal(selection.model, 'garch');
+  assert.equal(selection.selection, 'gamma-fallback');
+  assert.equal(selection.oosQlike, undefined);
 });

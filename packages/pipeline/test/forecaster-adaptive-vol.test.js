@@ -129,6 +129,9 @@ test('auto-egarch adaptive fit records the per-asset signed-asymmetry selection'
   );
   assert.equal(a.volFit.kind, 'auto-egarch');
   assert.ok(['garch', 'egarch'].includes(a.volFit.assets.ATOM.model));
+  assert.equal(a.volFit.assets.ATOM.selection, 'oos-qlike');
+  assert.ok(Number.isFinite(a.volFit.assets.ATOM.oosQlike.garch));
+  assert.ok(Number.isFinite(a.volFit.assets.ATOM.oosQlike.egarch));
   assert.deepEqual(a.volFit, b.volFit, 'selection and its fit summary are reproducible');
 });
 

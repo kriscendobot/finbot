@@ -86,6 +86,12 @@ export function fitForecastWorld(world, readings, adaptiveVol) {
       };
       if (st.gamma != null) assets[asset].gamma = round12(st.gamma);
       if (st.model != null) assets[asset].model = st.model;
+      if (st.selection != null) assets[asset].selection = st.selection;
+      if (st.oosQlike != null) {
+        assets[asset].oosQlike = Object.fromEntries(
+          Object.entries(st.oosQlike).map(([model, value]) => [model, round12(value)]),
+        );
+      }
     }
     fit.assets = assets;
   }

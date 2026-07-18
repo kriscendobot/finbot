@@ -706,3 +706,28 @@ the literature review, with QLIKE and naive baselines, before choosing among the
 now-reachable GARCH-family variants for production policy. Live execution remains
 separately blocked on explicit paper-wallet/test-net authorization and a selected
 CapTP transport.
+
+## Notes from the field (2026-07-18 - OOS QLIKE selects the live volatility surface)
+
+The evaluation harness is now a production selection signal, not merely an
+offline report. `auto-egarch` fits its symmetric GARCH and EGARCH candidates on
+the leading 60 percent of an observed window, rolls both through the held-out
+suffix one return at a time, and chooses the lower one-step-ahead QLIKE score.
+The selected family is then refit over the complete window before it supplies
+the forecast ensemble and the analyzer/auditor regime read. This preserves a
+strictly OOS choice without leaving the final live fit needlessly data-poor.
+
+- The selection is per instrument. The fit artifact and regime read record the
+  chosen model plus both held-out QLIKE values, so the audit trail can show why
+  a surface was selected.
+- A window with fewer than twelve training returns or four held-out returns has
+  no credible OOS comparison. It uses the prior signed-gamma gate as an explicit
+  `gamma-fallback`, rather than mistaking defaults for evidence. Callers that
+  need the legacy policy can set `selection: 'gamma'`.
+- The selector is deterministic and dry-run only. It does not alter the wallet
+  boundary or enable live execution.
+
+Next on this axis: compare the GJR and EGARCH branches under the same OOS policy,
+or introduce an OOS improvement margin to avoid switching for immaterial score
+noise. Live execution remains separately blocked on explicit paper-wallet/test-net
+authorization and a selected CapTP transport.

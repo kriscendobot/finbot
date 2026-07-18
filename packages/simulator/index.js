@@ -94,6 +94,7 @@ export {
   renderVolEvalText,
   GARCH_MODELS,
 } from './vol-eval.js';
+export { qlikeLoss, walkForwardQlike } from './vol-selection.js';
 export {
   riskAversionFromTolerance,
   toleranceFromRiskAversion,

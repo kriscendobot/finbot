@@ -36,6 +36,7 @@
 
 import { gjrGarchFromPriceHistory, gjrGarchMleFromPriceHistory } from './gjr-garch.js';
 import { egarchFromPriceHistory, egarchMleFromPriceHistory } from './egarch.js';
+import { walkForwardQlike } from './vol-selection.js';
 
 const DEFAULT_FLOOR = 1e-8;
 const DEFAULT_ALPHA = 0.08;
@@ -484,7 +485,9 @@ export class AutoEgarchSurface {
    * @param {import('./egarch.js').Egarch11Surface} egarch
    * @param {Record<string, number>} returnCounts
    * @param {object} [opts]
+   * @param {'gamma'|'oos-qlike'} [opts.selection]
    * @param {number} [opts.gammaThreshold]
+   * @param {Record<string, { trainN: number, testN: number, qlike: Record<string, number> }>} [opts.oosEvidence]
    */
   constructor(garch, egarch, returnCounts, opts = {}) {
     this.garch = garch;
@@ -492,17 +495,37 @@ export class AutoEgarchSurface {
     this.gammaThreshold = opts.gammaThreshold != null
       ? opts.gammaThreshold
       : AUTO_EGARCH_GAMMA_THRESHOLD;
+    this.selection = opts.selection || 'oos-qlike';
+    this.oosEvidence = opts.oosEvidence || {};
     if (!(this.gammaThreshold >= 0)) {
       throw new Error('AutoEgarchSurface: gammaThreshold must be >= 0');
     }
+    if (!['gamma', 'oos-qlike'].includes(this.selection)) {
+      throw new Error("AutoEgarchSurface: selection must be 'gamma' or 'oos-qlike'");
+    }
     this.selected = {};
+    this.selectionByAsset = {};
     for (const asset of Object.keys(returnCounts)) {
       if (!garch.has(asset) || !egarch.has(asset)) continue;
-      const gamma = egarch.stats(asset).gamma;
-      this.selected[asset] = returnCounts[asset] >= AUTO_EGARCH_MIN_RETURNS
-        && Math.abs(gamma) >= this.gammaThreshold
-        ? egarch
-        : garch;
+      const evidence = this.oosEvidence[asset];
+      const canSelectOos = this.selection === 'oos-qlike'
+        && Number.isFinite(evidence?.qlike?.garch)
+        && Number.isFinite(evidence?.qlike?.egarch);
+      if (canSelectOos) {
+        this.selected[asset] = evidence.qlike.egarch < evidence.qlike.garch
+          ? egarch
+          : garch;
+        this.selectionByAsset[asset] = 'oos-qlike';
+      } else {
+        const gamma = egarch.stats(asset).gamma;
+        this.selected[asset] = returnCounts[asset] >= AUTO_EGARCH_MIN_RETURNS
+          && Math.abs(gamma) >= this.gammaThreshold
+          ? egarch
+          : garch;
+        this.selectionByAsset[asset] = this.selection === 'oos-qlike'
+          ? 'gamma-fallback'
+          : 'gamma';
+      }
     }
   }
 
@@ -523,6 +546,8 @@ export class AutoEgarchSurface {
     return {
       ...surface.stats(asset),
       model: surface === this.egarch ? 'egarch' : 'garch',
+      selection: this.selectionByAsset[asset],
+      oosQlike: this.oosEvidence[asset]?.qlike,
     };
   }
 
@@ -536,13 +561,16 @@ export class AutoEgarchSurface {
 
 /**
  * Fit symmetric GARCH and EGARCH MLEs from the same window, then choose the
- * EGARCH branch per asset when its fitted signed gamma is material. This keeps
- * the simpler GARCH recursion for assets without measured asymmetry while
- * letting either leverage sign reach the live regime read and forecast.
+ * branch per asset by held-out QLIKE. Both candidates fit the training prefix,
+ * the lower one-step-ahead QLIKE wins on the suffix, and the winner is refit on
+ * the full observed window for the live forecast and regime read. A too-short
+ * or unfit split falls back to the established gamma-evidence rule.
  *
  * @param {Array<Record<string, number>>} priceFrames
  * @param {object} [opts]
- * @param {number} [opts.gammaThreshold] minimum absolute fitted gamma for EGARCH (default 0.05)
+ * @param {'gamma'|'oos-qlike'} [opts.selection] selection signal (default 'oos-qlike')
+ * @param {number} [opts.trainFraction] held-out train share for OOS QLIKE (default 0.6)
+ * @param {number} [opts.gammaThreshold] minimum absolute fitted gamma for fallback / gamma selection (default 0.05)
  * @returns {AutoEgarchSurface}
  */
 export function autoEgarchMleFromPriceHistory(priceFrames, opts = {}) {
@@ -557,11 +585,22 @@ export function autoEgarchMleFromPriceHistory(priceFrames, opts = {}) {
     }
     returnCounts[asset] = count;
   }
+  const selection = opts.selection || 'oos-qlike';
+  const oosEvidence = {};
+  if (selection === 'oos-qlike') {
+    for (const asset of Object.keys(returnCounts)) {
+      const evidence = walkForwardQlike(priceFrames, asset, [
+        { name: 'garch', fit: (frames) => garchMleFromPriceHistory(frames, opts) },
+        { name: 'egarch', fit: (frames) => egarchMleFromPriceHistory(frames, opts) },
+      ], { trainFraction: opts.trainFraction, minTrainReturns: AUTO_EGARCH_MIN_RETURNS });
+      if (evidence) oosEvidence[asset] = evidence;
+    }
+  }
   return new AutoEgarchSurface(
     garchMleFromPriceHistory(priceFrames, opts),
     egarchMleFromPriceHistory(priceFrames, opts),
     returnCounts,
-    opts,
+    { ...opts, selection, oosEvidence },
   );
 }
 
@@ -606,6 +645,7 @@ export function autoEgarchMleFromPriceHistory(priceFrames, opts = {}) {
  * @param {object} [opts]
  * @param {'garch'|'gjr-garch'|'egarch'|'auto-gjr-garch'|'auto-egarch'} [opts.kind]  auto kinds select their asymmetric candidate per asset only when fitted gamma is material
  * @param {'mle'|'fixed'} [opts.estimate]  'mle' fits the params per asset; else the fixed split
+ * @param {'gamma'|'oos-qlike'} [opts.selection] auto-egarch selector signal (default OOS QLIKE)
  * @param {number} [opts.alpha]  fixed / fallback ARCH coefficient
  * @param {number} [opts.gamma]  fixed / fallback leverage coefficient (gjr-garch only)
  * @param {number} [opts.beta]   fixed / fallback GARCH coefficient
@@ -674,6 +714,8 @@ export function conditionalVolFromPriceHistory(priceFrames, opts = {}) {
     // it through so a scorer can tell an asymmetric read from a symmetric one.
     if (st.gamma != null) out[a].gamma = st.gamma;
     if (st.model != null) out[a].model = st.model;
+    if (st.selection != null) out[a].selection = st.selection;
+    if (st.oosQlike != null) out[a].oosQlike = st.oosQlike;
   }
   return out;
 }
