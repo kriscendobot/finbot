@@ -23,6 +23,7 @@
     "./self-improvement": "./self-improvement.js",
     "./fixtures": "./fixtures.js",
     "./forecast-eval": "./forecast-eval.js",
+    "./vol-eval": "./vol-eval.js",
     "./risk-reward": "./risk-reward.js",
     "./instruments": "./instruments.js",
     "./instrument-mix": "./instrument-mix.js",

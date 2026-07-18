@@ -128,6 +128,34 @@ instrument dynamics (stochastic/utilization yield, dividend growth/cuts,
 ex-dividend marking, fees/taxes/reinvestment, and a mix rebalancer) landed
 in `instruments.js` / `instrument-mix.js` / `history.js`; see *Pieces* above.
 
+### Walk-forward volatility evaluation
+
+`finbot-eval` also prints a **walk-forward, out-of-sample** volatility table
+(`vol-eval.js`). Where the forecast-evaluation table scores the terminal
+*distribution*, this scores the thing the GARCH family claims to do better
+than a flat number: the **one-step-ahead conditional variance**. Each fixture
+series is split at `--vol-train-fraction` (default 0.6); every GARCH model is
+fit on the training prefix only, then rolled forward through the test suffix
+one step at a time, forecasting `h_t` before seeing return `r_t`. Forecasts
+are scored against the realized-variance proxy `r_t^2` with two losses:
+
+- **QLIKE** (`x/h + ln(h)`) — the proxy-robust quasi-likelihood whose
+  minimizer is the true conditional variance; penalizes *under*-forecasting
+  variance harder than over-forecasting (the asymmetry a risk auditor wants).
+- **MSE** (`(x - h)^2`) — symmetric, outlier-dominated.
+
+Three naive baselines are the honesty check: a **constant** train-window
+variance, a **RiskMetrics EWMA** (λ=0.94), and a **rolling-window** realized
+variance. A GARCH model that cannot beat these on a given preset is not
+earning its complexity there. The table bears this out: on the structured
+cyclic/synthesis presets a GARCH model wins on QLIKE, while on the i.i.d.
+constant-vol `gbm-flat-lowvol` preset a naive baseline wins — exactly as it
+should when there is no clustering to exploit.
+
+```
+node bin/finbot-eval --vol-length=256 --vol-train-fraction=0.6
+```
+
 ## Volatility-tolerance elicitation
 
 The risk/reward sweep is parameterized by a single volatility tolerance

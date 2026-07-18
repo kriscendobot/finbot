@@ -86,6 +86,15 @@ export {
   compareForecastersOverPresets,
 } from './forecast-eval.js';
 export {
+  qlike,
+  varMse,
+  walkForwardVolEval,
+  fitAndForward,
+  rankByLoss,
+  renderVolEvalText,
+  GARCH_MODELS,
+} from './vol-eval.js';
+export {
   riskAversionFromTolerance,
   toleranceFromRiskAversion,
   riskRewardScore,

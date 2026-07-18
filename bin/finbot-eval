@@ -14,6 +14,8 @@
  *   --realizations=N           held-out realizations per preset, default 500
  *   --instrument-horizon=N     instrument-sweep horizon, default 64
  *   --instrument-realizations=N  instrument-sweep realizations, default 400
+ *   --vol-length=N             walk-forward vol-eval series length, default 256
+ *   --vol-train-fraction=F     walk-forward train/test split, default 0.6
  *   --help / -h                print this and exit
  *
  * Everything is seeded; two runs with the same flags print identical
@@ -24,6 +26,7 @@
 import process from 'node:process';
 
 import { runEvaluation, renderEvaluationText } from '../packages/simulator/evaluation.js';
+import { walkForwardVolEval, renderVolEvalText } from '../packages/simulator/vol-eval.js';
 import { PRESETS, generate } from '../packages/simulator/test/fixtures/presets.js';
 
 function parseArgs(argv) {
@@ -33,6 +36,8 @@ function parseArgs(argv) {
     realizations: 500,
     instrumentHorizon: 64,
     instrumentRealizations: 400,
+    volLength: 256,
+    volTrainFraction: 0.6,
   };
   for (const arg of argv) {
     const eq = arg.indexOf('=');
@@ -43,6 +48,8 @@ function parseArgs(argv) {
     else if (key === '--realizations') args.realizations = Number(val);
     else if (key === '--instrument-horizon') args.instrumentHorizon = Number(val);
     else if (key === '--instrument-realizations') args.instrumentRealizations = Number(val);
+    else if (key === '--vol-length') args.volLength = Number(val);
+    else if (key === '--vol-train-fraction') args.volTrainFraction = Number(val);
     else if (key === '--help' || key === '-h') {
       // eslint-disable-next-line no-console
       console.log([
@@ -75,3 +82,17 @@ const result = runEvaluation({
 });
 
 process.stdout.write(renderEvaluationText(result));
+
+// --- Walk-forward OOS volatility-forecast evaluation. ---
+// Scores the one-step-ahead conditional variance of every GARCH-family model
+// against three naive baselines (constant, EWMA, rolling window), strictly out
+// of sample, on each fixture preset. QLIKE and MSE; lower is better. The naive
+// column is the honesty check — a GARCH model that cannot beat the flat number
+// on a given preset is not earning its complexity there.
+const volLines = ['', '', '=== walk-forward volatility evaluation (one-step-ahead, OOS) ==='];
+for (const preset of PRESETS) {
+  const { series } = generate(preset, { length: args.volLength });
+  const table = walkForwardVolEval(series, { trainFraction: args.volTrainFraction });
+  volLines.push('', renderVolEvalText(table, { title: preset.name }));
+}
+process.stdout.write(`${volLines.join('\n')}\n`);
