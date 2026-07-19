@@ -30,6 +30,7 @@ import {
   garchMleFromPriceHistory,
   autoGjrGarchMleFromPriceHistory,
   autoEgarchMleFromPriceHistory,
+  autoGarchFamilyMleFromPriceHistory,
 } from './garch.js';
 import {
   GjrGarch11Surface,
@@ -117,6 +118,8 @@ const GJR_DEFAULTS = { alpha: 0.03, gamma: 0.09, beta: 0.9 };
  *                                          only when its fitted `gamma` clears `gammaThreshold`
  *   - `{ kind: 'auto-egarch', history }` fit GARCH and EGARCH MLEs and choose per asset by
  *                                      held-out QLIKE (with a gamma fallback for short histories)
+ *   - `{ kind: 'auto-garch-family', history }` compare GARCH, GJR-GARCH, and EGARCH MLEs
+ *                                      on a common held-out QLIKE suffix, retaining GARCH when incomplete
  *   - `{ kind: 'empirical', history }`    empirical bootstrap of realized vol
  * `alpha` / `beta` / `gamma` / `floor` on the descriptor override the defaults.
  *
@@ -143,6 +146,12 @@ export function makeVolSurface(descriptor) {
       throw new Error("makeVolSurface: an 'auto-egarch' descriptor needs a { history } of price frames");
     }
     return autoEgarchMleFromPriceHistory(descriptor.history, descriptor);
+  }
+  if (kind === 'auto-garch-family') {
+    if (!descriptor.history) {
+      throw new Error("makeVolSurface: an 'auto-garch-family' descriptor needs a { history } of price frames");
+    }
+    return autoGarchFamilyMleFromPriceHistory(descriptor.history, descriptor);
   }
 
   if (kind === 'garch' || kind === 'gjr-garch') {

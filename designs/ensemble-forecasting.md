@@ -731,3 +731,26 @@ Next on this axis: compare the GJR and EGARCH branches under the same OOS policy
 or introduce an OOS improvement margin to avoid switching for immaterial score
 noise. Live execution remains separately blocked on explicit paper-wallet/test-net
 authorization and a selected CapTP transport.
+
+## Notes from the field (2026-07-19 - a common OOS referee for all GARCH branches)
+
+`auto-garch-family` now compares GARCH, GJR-GARCH, and EGARCH under the same
+strict held-out QLIKE suffix before any one family reaches the dry-run forecast,
+analyzer, or auditor. All three candidates fit only the leading 60 percent of the
+observed window. Their one-step-ahead forecasts score the remaining suffix before
+the selected candidate is refit on the complete window for the live dry-run path.
+
+- The comparison is per instrument and records all three losses in the fit and
+  regime-read artifacts. An exact tie keeps the simpler GARCH baseline. If any
+  candidate cannot produce credible held-out evidence, the selector also keeps
+  GARCH and records `insufficient-oos` rather than comparing a partial set.
+- `finbot-ooda --adaptive-vol=auto-family` exposes the selector without changing
+  the dry-run-only wallet boundary.
+- The tests exercise each selectable branch with deterministic score evidence,
+  prove tie and incomplete-comparison safety, and trace the selected model and
+  all scores through the adaptive forecaster and analyzer regime read.
+
+Next on this axis: add a pre-specified QLIKE improvement margin or a
+forecast-comparison test before treating a narrow three-way winner as evidence of
+material superiority. Live execution remains separately blocked on explicit
+paper-wallet/test-net authorization and a selected CapTP transport.

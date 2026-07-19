@@ -5,10 +5,13 @@ import {
   Garch11Surface,
   garchFromPriceHistory,
   autoEgarchMleFromPriceHistory,
+  AutoGarchFamilySurface,
+  autoGarchFamilyMleFromPriceHistory,
   conditionalVolFromPriceHistory,
 } from '../garch.js';
 import { GBMPriceFeed } from '../price-feed.js';
 import { Egarch11Surface } from '../egarch.js';
+import { GjrGarch11Surface } from '../gjr-garch.js';
 
 test('Garch11Surface: stats reports persistence and unconditional vol', () => {
   const surf = new Garch11Surface({ A: { omega: 0.0002, alpha: 0.1, beta: 0.85 } });
@@ -321,4 +324,44 @@ test('auto-egarch: a short window does not mistake fallback gamma for evidence',
   assert.equal(selection.model, 'garch');
   assert.equal(selection.selection, 'gamma-fallback');
   assert.equal(selection.oosQlike, undefined);
+});
+
+test('auto-garch-family: selects the lowest common OOS QLIKE and preserves GARCH on a tie or incomplete comparison', () => {
+  const garch = new Garch11Surface({ A: { omega: 0.00015, alpha: 0.09, beta: 0.85 } });
+  const gjr = new GjrGarch11Surface({ A: { omega: 0.00015, alpha: 0.03, gamma: 0.12, beta: 0.85 } });
+  const egarch = new Egarch11Surface({ A: { omega: -0.45, alpha: 0.16, gamma: -0.2, beta: 0.9 } });
+  const select = (qlike) => new AutoGarchFamilySurface(garch, gjr, egarch, ['A'], {
+    A: { trainN: 20, testN: 14, qlike },
+  }).stats('A');
+
+  assert.equal(select({ garch: 1, 'gjr-garch': 0.9, egarch: 0.8 }).model, 'egarch');
+  assert.equal(select({ garch: 1, 'gjr-garch': 0.8, egarch: 0.9 }).model, 'gjr-garch');
+  const tie = select({ garch: 0.8, 'gjr-garch': 0.8, egarch: 0.8 });
+  assert.equal(tie.model, 'garch');
+  assert.equal(tie.selection, 'oos-qlike');
+  const incomplete = select({ garch: 0.8, egarch: 0.7 });
+  assert.equal(incomplete.model, 'garch');
+  assert.equal(incomplete.selection, 'insufficient-oos');
+});
+
+test('auto-garch-family: common held-out comparison reaches the regime read', () => {
+  const source = new GBMPriceFeed({
+    initialPrices: { A: 100 },
+    volSurface: new Egarch11Surface({ A: { omega: -0.45, alpha: 0.16, gamma: -0.2, beta: 0.9 } }),
+    seed: 17,
+  });
+  const frames = [source.current()];
+  for (let index = 0; index < 800; index += 1) frames.push(source.tick());
+  const selection = autoGarchFamilyMleFromPriceHistory(frames).stats('A');
+  const candidates = ['garch', 'gjr-garch', 'egarch'];
+  const expected = candidates.reduce((winner, model) => (
+    selection.oosQlike[model] < selection.oosQlike[winner] ? model : winner
+  ));
+
+  assert.equal(selection.selection, 'oos-qlike');
+  assert.deepEqual(Object.keys(selection.oosQlike).sort(), candidates.sort());
+  assert.equal(selection.model, expected);
+  const read = conditionalVolFromPriceHistory(frames, { kind: 'auto-garch-family' });
+  assert.equal(read.A.model, selection.model);
+  assert.deepEqual(read.A.oosQlike, selection.oosQlike);
 });

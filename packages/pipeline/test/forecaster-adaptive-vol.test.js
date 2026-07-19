@@ -135,6 +135,23 @@ test('auto-egarch adaptive fit records the per-asset signed-asymmetry selection'
   assert.deepEqual(a.volFit, b.volFit, 'selection and its fit summary are reproducible');
 });
 
+test('auto-garch-family adaptive fit records the three-way OOS comparison', () => {
+  const readings = turbulentReadings(200);
+  const a = project(
+    { world: calmWorld(7), targetWeights: TARGET, bounds: BOUNDS, readings },
+    { ensembleSize: 20, horizon: 8, baseSeed: 100, adaptiveVol: { kind: 'auto-garch-family' } },
+  );
+  const b = project(
+    { world: calmWorld(7), targetWeights: TARGET, bounds: BOUNDS, readings },
+    { ensembleSize: 20, horizon: 8, baseSeed: 100, adaptiveVol: { kind: 'auto-garch-family' } },
+  );
+  assert.equal(a.volFit.kind, 'auto-garch-family');
+  assert.ok(['garch', 'gjr-garch', 'egarch'].includes(a.volFit.assets.ATOM.model));
+  assert.equal(a.volFit.assets.ATOM.selection, 'oos-qlike');
+  assert.deepEqual(Object.keys(a.volFit.assets.ATOM.oosQlike).sort(), ['egarch', 'garch', 'gjr-garch']);
+  assert.deepEqual(a.volFit, b.volFit, 'selection and its fit summary are reproducible');
+});
+
 test('default path is inert: no adaptiveVol -> no volFit, artifact hash unchanged', () => {
   const readings = turbulentReadings();
   // Same inputs, one WITH readings-but-no-adaptiveVol, one with NEITHER: both

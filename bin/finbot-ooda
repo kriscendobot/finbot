@@ -34,7 +34,7 @@
  *   --regime-position-shrink=F  max fractional target reduction a fully persistent vol regime applies
  *                    (default: 0.5 when --adaptive-vol is on, else 0); a persistent asset sizes smaller
  *   --multi          run the multi-instrument world (correlated growth legs + a yield leg)
- *   --adaptive-vol[=mle|auto|auto-egarch]  fit a conditional-vol surface from the window; the
+ *   --adaptive-vol[=mle|auto|auto-egarch|auto-family]  fit a conditional-vol surface from the window; the
  *                    forecaster projects the ensemble under it and the analyzer
  *                    scores under its current-regime read (=mle also fits alpha/beta per asset)
  *   --journal=PATH   journal worktree to record entries into (local commit only)
@@ -84,11 +84,14 @@ function parseArgs(argv) {
       // its current-regime read (threaded in ooda-cycle). `=mle` estimates the
       // symmetric split; `=auto` fits both models and selects GJR only where
       // its measured leverage gamma is material. `=auto-egarch` selects the
-      // log-variance EGARCH branch when the absolute fitted gamma is material.
+      // log-variance EGARCH branch by held-out QLIKE. `=auto-family` compares
+      // GARCH, GJR-GARCH, and EGARCH under one common held-out score.
       const kind = val === 'auto'
         ? 'auto-gjr-garch'
         : val === 'auto-egarch'
           ? 'auto-egarch'
+          : val === 'auto-family'
+            ? 'auto-garch-family'
           : 'garch';
       args.adaptiveVol = val === 'mle' ? { kind, estimate: 'mle' } : { kind };
     }
@@ -107,7 +110,7 @@ function printHelp() {
     '  finbot-ooda [--seed=N] [--drift=F] [--vol=F] [--warmup=N] [--fit-window=N]',
     '              [--threshold=BPS] [--ensemble=N] [--horizon=N]',
     '              [--tail-floor=F] [--regime-tail-bump=F] [--regime-horizon-stretch=F] [--regime-position-shrink=F]',
-    '              [--multi] [--adaptive-vol[=mle|auto|auto-egarch]] [--journal=PATH] [--json]',
+    '              [--multi] [--adaptive-vol[=mle|auto|auto-egarch|auto-family]] [--journal=PATH] [--json]',
     '',
     'DRY-RUN ONLY. Never reads a keystore; never constructs a wallet.',
     '',

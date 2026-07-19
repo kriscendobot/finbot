@@ -156,6 +156,12 @@ should when there is no clustering to exploit.
 node bin/finbot-eval --vol-length=256 --vol-train-fraction=0.6
 ```
 
+For the live dry-run OODA path, `finbot-ooda --adaptive-vol=auto-family`
+fits GARCH, GJR-GARCH, and EGARCH on the observed window, compares all three
+on one shared held-out QLIKE suffix, and refits the selected family on the
+full window. An incomplete three-way comparison deliberately retains GARCH;
+the fit artifact records all three scores and the selection reason.
+
 ## Volatility-tolerance elicitation
 
 The risk/reward sweep is parameterized by a single volatility tolerance

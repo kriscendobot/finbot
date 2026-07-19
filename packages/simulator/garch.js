@@ -605,6 +605,119 @@ export function autoEgarchMleFromPriceHistory(priceFrames, opts = {}) {
 }
 
 /**
+ * A conservative per-asset chooser across the symmetric GARCH, GJR-GARCH,
+ * and EGARCH families. It accepts an asymmetric branch only when all three
+ * candidates completed the same held-out QLIKE comparison. Exact score ties
+ * retain the first (and simplest) GARCH branch.
+ */
+export class AutoGarchFamilySurface {
+  /**
+   * @param {Garch11Surface} garch
+   * @param {import('./gjr-garch.js').GjrGarch11Surface} gjr
+   * @param {import('./egarch.js').Egarch11Surface} egarch
+   * @param {string[]} assets
+   * @param {Record<string, { trainN: number, testN: number, qlike: Record<string, number> }>} oosEvidence
+   */
+  constructor(garch, gjr, egarch, assets, oosEvidence) {
+    this.garch = garch;
+    this.gjr = gjr;
+    this.egarch = egarch;
+    this.oosEvidence = oosEvidence;
+    this.selected = {};
+    this.selectionByAsset = {};
+    for (const asset of assets) {
+      if (!garch.has(asset) || !gjr.has(asset) || !egarch.has(asset)) continue;
+      const qlike = oosEvidence[asset]?.qlike;
+      const hasCompleteComparison = ['garch', 'gjr-garch', 'egarch']
+        .every((model) => Number.isFinite(qlike?.[model]));
+      if (!hasCompleteComparison) {
+        this.selected[asset] = garch;
+        this.selectionByAsset[asset] = 'insufficient-oos';
+        continue;
+      }
+      const candidates = [
+        { model: 'garch', surface: garch },
+        { model: 'gjr-garch', surface: gjr },
+        { model: 'egarch', surface: egarch },
+      ];
+      let winner = candidates[0];
+      for (const candidate of candidates.slice(1)) {
+        if (qlike[candidate.model] < qlike[winner.model]) winner = candidate;
+      }
+      this.selected[asset] = winner.surface;
+      this.selectionByAsset[asset] = 'oos-qlike';
+    }
+  }
+
+  get isGarch() { return true; }
+
+  /** @param {string} asset @returns {boolean} */
+  has(asset) { return Object.prototype.hasOwnProperty.call(this.selected, asset); }
+
+  /** @param {string} asset @returns {number} */
+  initialVariance(asset) { return this.surfaceFor(asset).initialVariance(asset); }
+
+  /** @param {string} asset @param {number} varNow @param {number} shock @returns {number} */
+  nextVariance(asset, varNow, shock) { return this.surfaceFor(asset).nextVariance(asset, varNow, shock); }
+
+  /** @param {string} asset @returns {object} */
+  stats(asset) {
+    const surface = this.surfaceFor(asset);
+    const model = surface === this.gjr
+      ? 'gjr-garch'
+      : surface === this.egarch
+        ? 'egarch'
+        : 'garch';
+    return {
+      ...surface.stats(asset),
+      model,
+      selection: this.selectionByAsset[asset],
+      oosQlike: this.oosEvidence[asset]?.qlike,
+    };
+  }
+
+  /** @param {string} asset */
+  surfaceFor(asset) {
+    const surface = this.selected[asset];
+    if (!surface) throw new Error(`AutoGarchFamilySurface: no params for asset ${asset}`);
+    return surface;
+  }
+}
+
+/**
+ * Fit all three GARCH-family candidates from the same complete window and
+ * select per asset only from a common strictly held-out QLIKE comparison.
+ * If any candidate lacks credible OOS evidence, retain the symmetric baseline.
+ *
+ * @param {Array<Record<string, number>>} priceFrames
+ * @param {object} [opts]
+ * @param {number} [opts.trainFraction] held-out train share for OOS QLIKE (default 0.6)
+ * @returns {AutoGarchFamilySurface}
+ */
+export function autoGarchFamilyMleFromPriceHistory(priceFrames, opts = {}) {
+  if (!Array.isArray(priceFrames) || priceFrames.length < 2) {
+    throw new Error('autoGarchFamilyMleFromPriceHistory: need at least two price frames');
+  }
+  const assets = Object.keys(priceFrames[0]);
+  const oosEvidence = {};
+  for (const asset of assets) {
+    const evidence = walkForwardQlike(priceFrames, asset, [
+      { name: 'garch', fit: (frames) => garchMleFromPriceHistory(frames, opts) },
+      { name: 'gjr-garch', fit: (frames) => gjrGarchMleFromPriceHistory(frames, opts) },
+      { name: 'egarch', fit: (frames) => egarchMleFromPriceHistory(frames, opts) },
+    ], { trainFraction: opts.trainFraction, minTrainReturns: AUTO_EGARCH_MIN_RETURNS });
+    if (evidence) oosEvidence[asset] = evidence;
+  }
+  return new AutoGarchFamilySurface(
+    garchMleFromPriceHistory(priceFrames, opts),
+    gjrGarchMleFromPriceHistory(priceFrames, opts),
+    egarchMleFromPriceHistory(priceFrames, opts),
+    assets,
+    oosEvidence,
+  );
+}
+
+/**
  * @typedef {object} RegimeRead
  * @property {number} conditionalVol   sqrt of the variance the model carries into the NEXT tick
  * @property {number} unconditionalVol the long-run level sqrt(omega / (1 - persistence))
@@ -635,15 +748,16 @@ export function autoEgarchMleFromPriceHistory(priceFrames, opts = {}) {
  * Symmetric vs. asymmetric. By default the surface is the sign-blind
  * GARCH(1,1); `kind: 'gjr-garch'` and `kind: 'egarch'` roll the read forward
  * under the two asymmetric forms. `kind: 'auto-gjr-garch'` and
- * `kind: 'auto-egarch'` choose their asymmetric candidate per asset only when
- * the fitted gamma is material. Every surface exposes the identical
+ * `kind: 'auto-egarch'` choose their asymmetric candidate per asset, while
+ * `kind: 'auto-garch-family'` compares all three candidates under a common
+ * held-out QLIKE score. Every surface exposes the identical
  * `initialVariance`/`nextVariance`/`stats` interface, so only the fit differs;
  * the roll-forward recursion below is untouched. An asymmetric read carries
  * `gamma` in each per-asset entry (absent from a symmetric read).
  *
  * @param {Array<Record<string, number>>} priceFrames  per-tick { asset: price }
  * @param {object} [opts]
- * @param {'garch'|'gjr-garch'|'egarch'|'auto-gjr-garch'|'auto-egarch'} [opts.kind]  auto kinds select their asymmetric candidate per asset only when fitted gamma is material
+ * @param {'garch'|'gjr-garch'|'egarch'|'auto-gjr-garch'|'auto-egarch'|'auto-garch-family'} [opts.kind]  auto kinds select per asset from fitted candidates
  * @param {'mle'|'fixed'} [opts.estimate]  'mle' fits the params per asset; else the fixed split
  * @param {'gamma'|'oos-qlike'} [opts.selection] auto-egarch selector signal (default OOS QLIKE)
  * @param {number} [opts.alpha]  fixed / fallback ARCH coefficient
@@ -658,6 +772,7 @@ export function conditionalVolFromPriceHistory(priceFrames, opts = {}) {
   }
   const autoGjr = opts.kind === 'auto-gjr-garch';
   const autoEgarch = opts.kind === 'auto-egarch';
+  const autoGarchFamily = opts.kind === 'auto-garch-family';
   const gjr = opts.kind === 'gjr-garch';
   const egarch = opts.kind === 'egarch';
   const mle = opts.estimate === 'mle';
@@ -666,6 +781,8 @@ export function conditionalVolFromPriceHistory(priceFrames, opts = {}) {
     surface = autoGjrGarchMleFromPriceHistory(priceFrames, opts);
   } else if (autoEgarch) {
     surface = autoEgarchMleFromPriceHistory(priceFrames, opts);
+  } else if (autoGarchFamily) {
+    surface = autoGarchFamilyMleFromPriceHistory(priceFrames, opts);
   } else if (gjr) {
     surface = mle
       ? gjrGarchMleFromPriceHistory(priceFrames, opts)

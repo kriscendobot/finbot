@@ -48,6 +48,8 @@ export {
   autoGjrGarchMleFromPriceHistory,
   AutoEgarchSurface,
   autoEgarchMleFromPriceHistory,
+  AutoGarchFamilySurface,
+  autoGarchFamilyMleFromPriceHistory,
   conditionalVolFromPriceHistory,
 } from './garch.js';
 export {
