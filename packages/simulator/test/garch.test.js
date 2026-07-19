@@ -344,6 +344,54 @@ test('auto-garch-family: selects the lowest common OOS QLIKE and preserves GARCH
   assert.equal(incomplete.selection, 'insufficient-oos');
 });
 
+test('auto-garch-family: a parsimony margin keeps GARCH on a noise-level asymmetric edge', () => {
+  const garch = new Garch11Surface({ A: { omega: 0.00015, alpha: 0.09, beta: 0.85 } });
+  const gjr = new GjrGarch11Surface({ A: { omega: 0.00015, alpha: 0.03, gamma: 0.12, beta: 0.85 } });
+  const egarch = new Egarch11Surface({ A: { omega: -0.45, alpha: 0.16, gamma: -0.2, beta: 0.9 } });
+  const select = (qlike, opts) => new AutoGarchFamilySurface(garch, gjr, egarch, ['A'], {
+    A: { trainN: 20, testN: 14, qlike },
+  }, opts).stats('A');
+
+  // egarch is best but only 0.012 better than GARCH — below the 0.02 default
+  // margin, so the simpler symmetric branch is retained and the near-miss is
+  // recorded rather than silently rounded to a full oos-qlike win.
+  const withinMargin = select({ garch: 1.0, 'gjr-garch': 1.005, egarch: 0.988 });
+  assert.equal(withinMargin.model, 'garch');
+  assert.equal(withinMargin.selection, 'oos-qlike-within-margin');
+  assert.equal(withinMargin.selectionMargin, 0.02);
+
+  // A genuine leverage signal (0.072 improvement) clears the margin.
+  const clears = select({ garch: 1.0, 'gjr-garch': 0.95, egarch: 0.928 });
+  assert.equal(clears.model, 'egarch');
+  assert.equal(clears.selection, 'oos-qlike');
+
+  // The margin is a pre-specified knob: a zero margin restores the raw argmin,
+  // a wide margin refuses every asymmetric branch.
+  assert.equal(select({ garch: 1.0, 'gjr-garch': 1.005, egarch: 0.988 }, { selectionMargin: 0 }).model, 'egarch');
+  assert.equal(select({ garch: 1.0, 'gjr-garch': 0.95, egarch: 0.928 }, { selectionMargin: 0.5 }).model, 'garch');
+  assert.throws(() => select({ garch: 1, 'gjr-garch': 1, egarch: 1 }, { selectionMargin: -0.1 }), /selectionMargin must be >= 0/);
+});
+
+test('auto-garch-family: the parsimony margin retains GARCH on a symmetric DGP', () => {
+  // A purely symmetric GARCH DGP has no leverage to fit; the walk-forward
+  // chooser must not take an asymmetric branch on the noise-level QLIKE edge it
+  // finds out of sample. (Without the margin, seed 5 selects egarch spuriously.)
+  const source = new GBMPriceFeed({
+    initialPrices: { A: 100 },
+    volSurface: new Garch11Surface({ A: { omega: 0.00015, alpha: 0.08, beta: 0.9 } }),
+    seed: 5,
+  });
+  const frames = [source.current()];
+  for (let index = 0; index < 800; index += 1) frames.push(source.tick());
+  const selection = autoGarchFamilyMleFromPriceHistory(frames).stats('A');
+  assert.equal(selection.model, 'garch');
+  // The asymmetric edge existed but did not earn its parameter.
+  assert.equal(selection.selection, 'oos-qlike-within-margin');
+  // With the margin disabled, the raw argmin would have flipped away from GARCH.
+  const raw = autoGarchFamilyMleFromPriceHistory(frames, { selectionMargin: 0 }).stats('A');
+  assert.notEqual(raw.model, 'garch');
+});
+
 test('auto-garch-family: common held-out comparison reaches the regime read', () => {
   const source = new GBMPriceFeed({
     initialPrices: { A: 100 },

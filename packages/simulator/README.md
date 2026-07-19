@@ -162,6 +162,17 @@ on one shared held-out QLIKE suffix, and refits the selected family on the
 full window. An incomplete three-way comparison deliberately retains GARCH;
 the fit artifact records all three scores and the selection reason.
 
+A **parsimony margin** guards the extra leverage parameter: an asymmetric
+branch (GJR-GARCH or EGARCH) is accepted only when its held-out QLIKE beats the
+symmetric GARCH baseline by at least `selectionMargin` (default `0.02` nats).
+The two asymmetric branches are equally complex, so the lower QLIKE wins
+between them without a margin; only the step up from symmetric GARCH must clear
+it. The threshold sits between the noise-level edge an asymmetric fit finds on
+a symmetric DGP (~0.01) and a genuine leverage signal (~0.07), so symmetric
+series keep GARCH instead of spuriously flipping. A best-but-within-margin
+outcome retains GARCH and records `selection: 'oos-qlike-within-margin'`, so
+the near-miss is visible in the artifact rather than silently rounded to a win.
+
 ## Volatility-tolerance elicitation
 
 The risk/reward sweep is parameterized by a single volatility tolerance

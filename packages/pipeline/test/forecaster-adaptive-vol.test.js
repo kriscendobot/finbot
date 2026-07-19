@@ -146,9 +146,15 @@ test('auto-garch-family adaptive fit records the three-way OOS comparison', () =
     { ensembleSize: 20, horizon: 8, baseSeed: 100, adaptiveVol: { kind: 'auto-garch-family' } },
   );
   assert.equal(a.volFit.kind, 'auto-garch-family');
-  assert.ok(['garch', 'gjr-garch', 'egarch'].includes(a.volFit.assets.ATOM.model));
-  assert.equal(a.volFit.assets.ATOM.selection, 'oos-qlike');
-  assert.deepEqual(Object.keys(a.volFit.assets.ATOM.oosQlike).sort(), ['egarch', 'garch', 'gjr-garch']);
+  const fit = a.volFit.assets.ATOM;
+  assert.ok(['garch', 'gjr-garch', 'egarch'].includes(fit.model));
+  // The parsimony margin makes the reason honest: an asymmetric branch that
+  // clears it wins ('oos-qlike'); one that is best but within the margin keeps
+  // GARCH ('oos-qlike-within-margin'). Either way the three-way comparison is
+  // recorded, and a within-margin outcome must have retained the symmetric fit.
+  assert.ok(['oos-qlike', 'oos-qlike-within-margin'].includes(fit.selection));
+  if (fit.selection === 'oos-qlike-within-margin') assert.equal(fit.model, 'garch');
+  assert.deepEqual(Object.keys(fit.oosQlike).sort(), ['egarch', 'garch', 'gjr-garch']);
   assert.deepEqual(a.volFit, b.volFit, 'selection and its fit summary are reproducible');
 });
 

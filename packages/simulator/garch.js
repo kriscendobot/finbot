@@ -247,6 +247,13 @@ const AUTO_GJR_MIN_RETURNS = MLE_MIN_RETURNS;
 const AUTO_GJR_GAMMA_THRESHOLD = 0.05;
 const AUTO_EGARCH_MIN_RETURNS = MLE_MIN_RETURNS;
 const AUTO_EGARCH_GAMMA_THRESHOLD = 0.05;
+// Parsimony guard for the auto-garch-family chooser: how much lower (in nats of
+// mean held-out QLIKE) an asymmetric branch must score than the symmetric
+// GARCH baseline before we accept the extra leverage parameter. Chosen from
+// observed spreads — on a symmetric DGP the spurious asymmetric "improvement"
+// runs ~0.01, while a genuine leverage signal clears ~0.07, so a 0.02 threshold
+// separates the two — and overridable per call via opts.selectionMargin.
+const AUTO_FAMILY_SELECTION_MARGIN = 0.02;
 
 /**
  * Gaussian negative log-likelihood of a variance-targeting GARCH(1,1) with the
@@ -607,8 +614,13 @@ export function autoEgarchMleFromPriceHistory(priceFrames, opts = {}) {
 /**
  * A conservative per-asset chooser across the symmetric GARCH, GJR-GARCH,
  * and EGARCH families. It accepts an asymmetric branch only when all three
- * candidates completed the same held-out QLIKE comparison. Exact score ties
- * retain the first (and simplest) GARCH branch.
+ * candidates completed the same held-out QLIKE comparison AND the best
+ * asymmetric candidate beats the symmetric GARCH baseline by a pre-specified
+ * improvement margin (a parsimony guard: without it, an asymmetric branch is
+ * taken on a noise-level QLIKE edge, spuriously fitting leverage into symmetric
+ * data). Between the two equally-complex asymmetric branches the lower QLIKE
+ * wins outright. An asymmetric branch that is best but within the margin (or an
+ * exact tie) retains the simpler GARCH.
  */
 export class AutoGarchFamilySurface {
   /**
@@ -617,12 +629,20 @@ export class AutoGarchFamilySurface {
    * @param {import('./egarch.js').Egarch11Surface} egarch
    * @param {string[]} assets
    * @param {Record<string, { trainN: number, testN: number, qlike: Record<string, number> }>} oosEvidence
+   * @param {object} [opts]
+   * @param {number} [opts.selectionMargin] minimum QLIKE improvement over GARCH to accept an asymmetric branch (default 0.02)
    */
-  constructor(garch, gjr, egarch, assets, oosEvidence) {
+  constructor(garch, gjr, egarch, assets, oosEvidence, opts = {}) {
     this.garch = garch;
     this.gjr = gjr;
     this.egarch = egarch;
     this.oosEvidence = oosEvidence;
+    this.selectionMargin = opts.selectionMargin != null
+      ? opts.selectionMargin
+      : AUTO_FAMILY_SELECTION_MARGIN;
+    if (!(this.selectionMargin >= 0)) {
+      throw new Error('AutoGarchFamilySurface: selectionMargin must be >= 0');
+    }
     this.selected = {};
     this.selectionByAsset = {};
     for (const asset of assets) {
@@ -635,17 +655,27 @@ export class AutoGarchFamilySurface {
         this.selectionByAsset[asset] = 'insufficient-oos';
         continue;
       }
-      const candidates = [
-        { model: 'garch', surface: garch },
+      // The two asymmetric branches are equally complex, so the lower QLIKE
+      // wins between them without a margin; only the step up from the simpler
+      // symmetric GARCH must clear the parsimony margin.
+      const asymmetric = [
         { model: 'gjr-garch', surface: gjr },
         { model: 'egarch', surface: egarch },
       ];
-      let winner = candidates[0];
-      for (const candidate of candidates.slice(1)) {
-        if (qlike[candidate.model] < qlike[winner.model]) winner = candidate;
+      let bestAsymmetric = asymmetric[0];
+      for (const candidate of asymmetric.slice(1)) {
+        if (qlike[candidate.model] < qlike[bestAsymmetric.model]) bestAsymmetric = candidate;
       }
-      this.selected[asset] = winner.surface;
-      this.selectionByAsset[asset] = 'oos-qlike';
+      const improvement = qlike.garch - qlike[bestAsymmetric.model];
+      if (improvement > this.selectionMargin) {
+        this.selected[asset] = bestAsymmetric.surface;
+        this.selectionByAsset[asset] = 'oos-qlike';
+      } else {
+        this.selected[asset] = garch;
+        // Record when an asymmetric branch was best but did not earn its extra
+        // parameter, so the parsimony guard is visible in the regime artifact.
+        this.selectionByAsset[asset] = improvement > 0 ? 'oos-qlike-within-margin' : 'oos-qlike';
+      }
     }
   }
 
@@ -673,6 +703,7 @@ export class AutoGarchFamilySurface {
       model,
       selection: this.selectionByAsset[asset],
       oosQlike: this.oosEvidence[asset]?.qlike,
+      selectionMargin: this.selectionMargin,
     };
   }
 
@@ -692,6 +723,7 @@ export class AutoGarchFamilySurface {
  * @param {Array<Record<string, number>>} priceFrames
  * @param {object} [opts]
  * @param {number} [opts.trainFraction] held-out train share for OOS QLIKE (default 0.6)
+ * @param {number} [opts.selectionMargin] minimum QLIKE improvement over GARCH to accept an asymmetric branch (default 0.02)
  * @returns {AutoGarchFamilySurface}
  */
 export function autoGarchFamilyMleFromPriceHistory(priceFrames, opts = {}) {
@@ -714,6 +746,7 @@ export function autoGarchFamilyMleFromPriceHistory(priceFrames, opts = {}) {
     egarchMleFromPriceHistory(priceFrames, opts),
     assets,
     oosEvidence,
+    { selectionMargin: opts.selectionMargin },
   );
 }
 
