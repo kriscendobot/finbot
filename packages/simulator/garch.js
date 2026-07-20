@@ -495,7 +495,8 @@ export class AutoEgarchSurface {
    * @param {'gamma'|'oos-qlike'} [opts.selection]
    * @param {number} [opts.gammaThreshold]
    * @param {number} [opts.selectionMargin] minimum QLIKE improvement over GARCH to accept EGARCH (default 0.02)
-   * @param {Record<string, { trainN: number, testN: number, qlike: Record<string, number> }>} [opts.oosEvidence]
+   * @param {number|null} [opts.significanceAlpha] when set (0<alpha<1), an EGARCH branch that clears the parsimony margin must also beat GARCH by a significant Diebold-Mariano QLIKE test at this level; null (default) leaves the gate off
+   * @param {Record<string, { trainN: number, testN: number, qlike: Record<string, number>, losses?: Record<string, number[]> }>} [opts.oosEvidence]
    */
   constructor(garch, egarch, returnCounts, opts = {}) {
     this.garch = garch;
@@ -506,33 +507,59 @@ export class AutoEgarchSurface {
     this.selectionMargin = opts.selectionMargin != null ? opts.selectionMargin : AUTO_SELECTION_MARGIN;
     this.selection = opts.selection || 'oos-qlike';
     this.oosEvidence = opts.oosEvidence || {};
+    this.significanceAlpha = opts.significanceAlpha != null ? opts.significanceAlpha : null;
     if (!(this.gammaThreshold >= 0)) {
       throw new Error('AutoEgarchSurface: gammaThreshold must be >= 0');
     }
     if (!(this.selectionMargin >= 0)) {
       throw new Error('AutoEgarchSurface: selectionMargin must be >= 0');
     }
+    if (this.significanceAlpha != null && !(this.significanceAlpha > 0 && this.significanceAlpha < 1)) {
+      throw new Error('AutoEgarchSurface: significanceAlpha must be between 0 and 1');
+    }
     if (!['gamma', 'oos-qlike'].includes(this.selection)) {
       throw new Error("AutoEgarchSurface: selection must be 'gamma' or 'oos-qlike'");
     }
     this.selected = {};
     this.selectionByAsset = {};
+    this.significanceByAsset = {};
     for (const asset of Object.keys(returnCounts)) {
       if (!garch.has(asset) || !egarch.has(asset)) continue;
+      this.significanceByAsset[asset] = null;
       const evidence = this.oosEvidence[asset];
       const canSelectOos = this.selection === 'oos-qlike'
         && Number.isFinite(evidence?.qlike?.garch)
         && Number.isFinite(evidence?.qlike?.egarch);
       if (canSelectOos) {
         const improvement = evidence.qlike.garch - evidence.qlike.egarch;
-        if (improvement > this.selectionMargin) {
-          this.selected[asset] = egarch;
-          this.selectionByAsset[asset] = 'oos-qlike';
-        } else {
+        if (improvement <= this.selectionMargin) {
           this.selected[asset] = garch;
           this.selectionByAsset[asset] = improvement > 0
             ? 'oos-qlike-within-margin'
             : 'oos-qlike';
+        } else if (this.significanceAlpha == null) {
+          this.selected[asset] = egarch;
+          this.selectionByAsset[asset] = 'oos-qlike';
+        } else {
+          const egarchLosses = evidence.losses?.egarch;
+          const garchLosses = evidence.losses?.garch;
+          if (!Array.isArray(egarchLosses) || !Array.isArray(garchLosses)
+            || egarchLosses.length !== garchLosses.length || egarchLosses.length < 2) {
+            this.selected[asset] = garch;
+            this.selectionByAsset[asset] = 'oos-qlike-unverifiable';
+            continue;
+          }
+          // dieboldMariano(EGARCH, GARCH): `better === 'a'` means the
+          // asymmetric branch's paired QLIKE loss is significantly lower.
+          const dm = dieboldMariano(egarchLosses, garchLosses, { alpha: this.significanceAlpha });
+          this.significanceByAsset[asset] = dm;
+          if (dm.better === 'a') {
+            this.selected[asset] = egarch;
+            this.selectionByAsset[asset] = 'oos-qlike-significant';
+          } else {
+            this.selected[asset] = garch;
+            this.selectionByAsset[asset] = 'oos-qlike-insignificant';
+          }
         }
       } else {
         const gamma = egarch.stats(asset).gamma;
@@ -561,13 +588,16 @@ export class AutoEgarchSurface {
   /** @param {string} asset @returns {object} */
   stats(asset) {
     const surface = this.surfaceFor(asset);
-    return {
+    const out = {
       ...surface.stats(asset),
       model: surface === this.egarch ? 'egarch' : 'garch',
       selection: this.selectionByAsset[asset],
       oosQlike: this.oosEvidence[asset]?.qlike,
       selectionMargin: this.selectionMargin,
     };
+    if (this.significanceAlpha != null) out.significanceAlpha = this.significanceAlpha;
+    if (this.significanceByAsset[asset] != null) out.qlikeSignificance = this.significanceByAsset[asset];
+    return out;
   }
 
   /** @param {string} asset */
@@ -592,6 +622,7 @@ export class AutoEgarchSurface {
  * @param {number} [opts.trainFraction] held-out train share for OOS QLIKE (default 0.6)
  * @param {number} [opts.gammaThreshold] minimum absolute fitted gamma for fallback / gamma selection (default 0.05)
  * @param {number} [opts.selectionMargin] minimum QLIKE improvement over GARCH to accept EGARCH (default 0.02)
+ * @param {number|null} [opts.significanceAlpha] require a significant Diebold-Mariano QLIKE edge over GARCH before accepting EGARCH (default null: off)
  * @returns {AutoEgarchSurface}
  */
 export function autoEgarchMleFromPriceHistory(priceFrames, opts = {}) {

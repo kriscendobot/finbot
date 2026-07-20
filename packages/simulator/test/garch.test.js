@@ -355,6 +355,74 @@ test('auto-egarch: a parsimony margin keeps GARCH on a noise-level EGARCH edge',
   );
 });
 
+test('auto-egarch: an optional significance gate requires paired QLIKE evidence', () => {
+  const garch = new Garch11Surface({ A: { omega: 0.00015, alpha: 0.09, beta: 0.85 } });
+  const egarch = new Egarch11Surface({ A: { omega: -0.45, alpha: 0.16, gamma: -0.2, beta: 0.9 } });
+  const build = (evidence, opts) => new AutoEgarchSurface(garch, egarch, { A: 40 }, {
+    selection: 'oos-qlike',
+    oosEvidence: { A: evidence },
+    ...opts,
+  }).stats('A');
+
+  const n = 20;
+  const garchLosses = Array.from({ length: n }, () => 2.0);
+  const noisy = {
+    trainN: 20,
+    testN: n,
+    qlike: { garch: 2.0, egarch: 1.95 },
+    losses: {
+      garch: garchLosses,
+      egarch: Array.from({ length: n }, (_value, index) => (index % 2 === 0 ? 0.95 : 2.95)),
+    },
+  };
+
+  const gateOff = build(noisy);
+  assert.equal(gateOff.model, 'egarch');
+  assert.equal(gateOff.selection, 'oos-qlike');
+  assert.equal(gateOff.significanceAlpha, undefined);
+
+  const gated = build(noisy, { significanceAlpha: 0.05 });
+  assert.equal(gated.model, 'garch');
+  assert.equal(gated.selection, 'oos-qlike-insignificant');
+  assert.equal(gated.significanceAlpha, 0.05);
+  assert.equal(gated.qlikeSignificance.better, null);
+
+  const consistent = {
+    trainN: 20,
+    testN: n,
+    qlike: { garch: 1.0, egarch: 0.9 },
+    losses: {
+      garch: Array.from({ length: n }, () => 1.0),
+      egarch: Array.from({ length: n }, () => 0.9),
+    },
+  };
+  const significant = build(consistent, { significanceAlpha: 0.05 });
+  assert.equal(significant.model, 'egarch');
+  assert.equal(significant.selection, 'oos-qlike-significant');
+  assert.equal(significant.qlikeSignificance.better, 'a');
+
+  const unverifiable = build({ trainN: 20, testN: n, qlike: consistent.qlike }, { significanceAlpha: 0.05 });
+  assert.equal(unverifiable.model, 'garch');
+  assert.equal(unverifiable.selection, 'oos-qlike-unverifiable');
+  assert.throws(() => build(consistent, { significanceAlpha: 0 }), /significanceAlpha must be between 0 and 1/);
+});
+
+test('auto-egarch: the significance gate reaches the fitted selector', () => {
+  const source = new GBMPriceFeed({
+    initialPrices: { A: 100 },
+    volSurface: new Egarch11Surface({ A: { omega: -0.45, alpha: 0.16, gamma: -0.2, beta: 0.9 } }),
+    seed: 5,
+  });
+  const frames = [source.current()];
+  for (let index = 0; index < 800; index += 1) frames.push(source.tick());
+
+  const gated = autoEgarchMleFromPriceHistory(frames, { significanceAlpha: 0.05 }).stats('A');
+  assert.equal(gated.model, 'egarch');
+  assert.equal(gated.selection, 'oos-qlike-significant');
+  assert.equal(gated.significanceAlpha, 0.05);
+  assert.equal(gated.qlikeSignificance.better, 'a');
+});
+
 test('auto-garch-family: selects the lowest common OOS QLIKE and preserves GARCH on a tie or incomplete comparison', () => {
   const garch = new Garch11Surface({ A: { omega: 0.00015, alpha: 0.09, beta: 0.85 } });
   const gjr = new GjrGarch11Surface({ A: { omega: 0.00015, alpha: 0.03, gamma: 0.12, beta: 0.85 } });

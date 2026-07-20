@@ -177,7 +177,11 @@ The two-way `auto-egarch` selector uses the same `selectionMargin` default and
 artifact convention. EGARCH's signed leverage coefficient is its extra degree
 of freedom, so a lower held-out QLIKE alone does not earn it; the candidate
 must improve on GARCH by more than the margin. Set `selectionMargin: 0` only
-when an application deliberately wants the raw held-out QLIKE argmin.
+when an application deliberately wants the raw held-out QLIKE argmin. It also
+accepts the optional `significanceAlpha` gate used by `auto-garch-family`: when
+set, an EGARCH candidate that clears the fixed margin must also have a
+significant paired Diebold-Mariano QLIKE advantage over GARCH. The default is
+`null`, so existing two-way selections and artifacts remain unchanged.
 
 The report also applies a paired, two-sided **Diebold-Mariano QLIKE test** to
 the better asymmetric branch (GJR-GARCH or EGARCH) against symmetric GARCH,

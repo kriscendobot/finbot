@@ -813,3 +813,20 @@ for the live `auto-family` path (it would change proposal hashes, so it needs a
 maintainer call and a re-baselined fixture). Live execution remains separately
 blocked on explicit paper-wallet/test-net authorization and a selected CapTP
 transport.
+
+## Notes from the field (2026-07-20 - optional significance gate reaches auto-egarch)
+
+The narrow `auto-egarch` selector now accepts the same optional
+`significanceAlpha` gate as the three-way `auto-garch-family` selector. An
+EGARCH branch must first clear the existing fixed QLIKE parsimony margin, then,
+when the option is set, show a significant paired Diebold-Mariano QLIKE advantage
+over symmetric GARCH. The gate keeps GARCH for an inconsistent margin-clearing
+edge and records `oos-qlike-insignificant`; a missing paired-loss path records
+`oos-qlike-unverifiable`; and a consistent edge records
+`oos-qlike-significant`. The default remains `null`, preserving all existing
+two-way selections and proposal artifacts byte-for-byte.
+
+This leaves the policy decision unchanged: whether to make `significanceAlpha`
+the default for the live `auto-family` path still needs maintainer approval and
+a re-baselined fixture. Live execution remains separately blocked on explicit
+paper-wallet/test-net authorization and a selected CapTP transport.
