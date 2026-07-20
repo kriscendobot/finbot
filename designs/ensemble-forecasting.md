@@ -803,10 +803,13 @@ unchanged.
   carried in the surface `stats()` (and the regime read) as `qlikeSignificance`
   only when the gate ran, so a default read is untouched.
 
+The walk-forward report now tests that same best-asymmetric-vs-GARCH contest,
+rather than its broad-table winner against the runner-up. The table still shows
+naive baselines as the honesty check, but a baseline winning the table no longer
+changes the selector-evidence line into a different question.
+
 Next on this axis: decide whether `significanceAlpha` should become the *default*
 for the live `auto-family` path (it would change proposal hashes, so it needs a
-maintainer call and a re-baselined fixture), and whether the walk-forward report's
-DM comparison should test the best asymmetric branch against GARCH specifically
-(the selector's actual contest) rather than winner-vs-runner-up. Live execution
-remains separately blocked on explicit paper-wallet/test-net authorization and a
-selected CapTP transport.
+maintainer call and a re-baselined fixture). Live execution remains separately
+blocked on explicit paper-wallet/test-net authorization and a selected CapTP
+transport.

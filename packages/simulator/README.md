@@ -180,12 +180,14 @@ must improve on GARCH by more than the margin. Set `selectionMargin: 0` only
 when an application deliberately wants the raw held-out QLIKE argmin.
 
 The report also applies a paired, two-sided **Diebold-Mariano QLIKE test** to
-the raw QLIKE winner and runner-up. It reports the loss differential, a
-Bartlett-HAC statistic, and p-value. This keeps a narrow table winner from
-being described as statistically better when the held-out loss path does not
-support that claim. It is evaluation evidence only: the current live selector
-continues to use the explicit parsimony margin, and no wallet capability is
-involved.
+the better asymmetric branch (GJR-GARCH or EGARCH) against symmetric GARCH,
+which is the live selector's actual contest. It reports the loss differential,
+a Bartlett-HAC statistic, and p-value. A naive baseline can still honestly win
+the broad table, but it does not change this focused evidence line. This keeps
+a narrow asymmetric edge from being described as statistically better when the
+held-out loss path does not support that claim. It is evaluation evidence only:
+the current live selector continues to use the explicit parsimony margin, and
+no wallet capability is involved.
 
 ## Volatility-tolerance elicitation
 

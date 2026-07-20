@@ -12,6 +12,7 @@ import {
   GARCH_MODELS,
 } from '../vol-eval.js';
 import { gbmSeries } from '../fixtures.js';
+import { PRESETS, generate } from './fixtures/presets.js';
 import { Garch11Surface } from '../garch.js';
 import { GBMPriceFeed } from '../price-feed.js';
 
@@ -97,7 +98,27 @@ test('walkForwardVolEval: train/test split honors trainFraction with no lookahea
   assert.ok(Math.abs(table.trainN / (table.trainN + table.testN) - 0.7) < 0.05, 'split near trainFraction');
   for (const r of table.rows) if (Number.isFinite(r.n)) assert.equal(r.n, table.testN, `${r.name} scored on the full test window`);
   assert.equal(table.qlikeComparison.n, table.testN, 'DM comparison uses the same held-out suffix');
-  assert.equal(table.qlikeComparison.candidate, rankByLoss(table.rows, 'qlike').winner, 'DM candidate is the raw QLIKE winner');
+  assert.equal(table.qlikeComparison.comparator, 'garch-mle', 'DM comparator is the symmetric production baseline');
+  assert.ok(
+    ['gjr-garch-mle', 'egarch-mle'].includes(table.qlikeComparison.candidate),
+    'DM candidate is an asymmetric production branch',
+  );
+});
+
+test('walkForwardVolEval: DM reports the live selector contest, not the broad-table winner', () => {
+  const preset = PRESETS.find(({ name }) => name === 'gbm-bull');
+  const { series } = generate(preset, { length: 120 });
+  const table = walkForwardVolEval(series, { trainFraction: 0.6 });
+  const rawWinner = rankByLoss(table.rows, 'qlike').winner;
+  const byName = Object.fromEntries(table.rows.map((row) => [row.name, row]));
+
+  assert.equal(rawWinner, 'ewma-0.94', 'the broad table may honestly favor a naive baseline');
+  assert.equal(table.qlikeComparison.comparator, 'garch-mle');
+  assert.equal(table.qlikeComparison.candidate, 'egarch-mle');
+  assert.ok(
+    byName['egarch-mle'].qlike < byName['gjr-garch-mle'].qlike,
+    'the report chooses the best asymmetric branch before testing it against GARCH',
+  );
 });
 
 test('walkForwardVolEval: on a clustered GARCH process, a GARCH model beats the flat constant on QLIKE', () => {

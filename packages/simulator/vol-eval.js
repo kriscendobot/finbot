@@ -215,6 +215,12 @@ export const GARCH_MODELS = [
   { name: 'auto-egarch', opts: { kind: 'auto-egarch', estimate: 'mle' } },
 ];
 
+// These are the three independent candidates in the production
+// auto-garch-family decision. auto-egarch is itself a two-way selector, so it
+// belongs in the table but not in this evidence comparison.
+const AUTO_GARCH_FAMILY_BASELINE = 'garch-mle';
+const AUTO_GARCH_FAMILY_ASYMMETRIC = ['gjr-garch-mle', 'egarch-mle'];
+
 /**
  * Walk-forward OOS volatility evaluation for one single-asset price series.
  *
@@ -228,7 +234,7 @@ export const GARCH_MODELS = [
  * @param {number} [opts.ewmaLambda]      EWMA decay (default 0.94)
  * @param {number} [opts.rollingWindow]   rolling-var window (default 32)
  * @param {string} [opts.asset]           asset key for the frame form (default 'ASSET')
- * @param {object} [opts.dieboldMariano]  options for the winner/runner-up QLIKE test
+ * @param {object} [opts.dieboldMariano]  options for the asymmetric-vs-GARCH QLIKE test
  * @returns {{
  *   trainN: number, testN: number,
  *   rows: Array<{ name: string, qlike: number, mse: number, n: number, family: string }>,
@@ -296,18 +302,27 @@ export function walkForwardVolEval(series, opts = {}) {
   rows.push({ ...scoreForecasts(rolling, testResiduals), name: `rolling-${rollingWindow}`, family: 'naive' });
   qlikeLossesByName.set(`rolling-${rollingWindow}`, qlikeLosses(rolling, testResiduals));
 
-  const rankedByQlike = rows
-    .filter((row) => Number.isFinite(row.qlike) && qlikeLossesByName.has(row.name))
-    .sort((a, b) => a.qlike - b.qlike);
-  const candidate = rankedByQlike[0];
-  const comparator = rankedByQlike[1];
-  const qlikeComparison = candidate && comparator
+  // The live auto-garch-family selector asks one focused question: does the
+  // better asymmetric branch earn its extra parameter against symmetric
+  // GARCH? The report answers that same question. In particular, a naive row
+  // winning the broad table must not turn the DM line into a different contest.
+  const byName = new Map(rows.map((row) => [row.name, row]));
+  const baseline = byName.get(AUTO_GARCH_FAMILY_BASELINE);
+  const asymmetric = AUTO_GARCH_FAMILY_ASYMMETRIC.map((name) => byName.get(name));
+  const hasCompleteSelectorEvidence = baseline
+    && Number.isFinite(baseline.qlike)
+    && qlikeLossesByName.has(baseline.name)
+    && asymmetric.every((row) => row && Number.isFinite(row.qlike) && qlikeLossesByName.has(row.name));
+  const candidate = hasCompleteSelectorEvidence
+    ? asymmetric.slice().sort((a, b) => a.qlike - b.qlike)[0]
+    : null;
+  const qlikeComparison = candidate
     ? {
         candidate: candidate.name,
-        comparator: comparator.name,
+        comparator: baseline.name,
         ...dieboldMariano(
           qlikeLossesByName.get(candidate.name),
-          qlikeLossesByName.get(comparator.name),
+          qlikeLossesByName.get(baseline.name),
           opts.dieboldMariano,
         ),
       }
