@@ -117,7 +117,8 @@ const GJR_DEFAULTS = { alpha: 0.03, gamma: 0.09, beta: 0.9 };
  *   - `{ kind: 'auto-gjr-garch', history }` fit both MLEs and choose GJR per asset
  *                                          only when its fitted `gamma` clears `gammaThreshold`
  *   - `{ kind: 'auto-egarch', history }` fit GARCH and EGARCH MLEs and choose per asset by
- *                                      held-out QLIKE (with a gamma fallback for short histories)
+ *                                      held-out QLIKE, retaining GARCH unless EGARCH clears the
+ *                                      `selectionMargin` (with a gamma fallback for short histories)
  *   - `{ kind: 'auto-garch-family', history }` compare GARCH, GJR-GARCH, and EGARCH MLEs
  *                                      on a common held-out QLIKE suffix, retaining GARCH when incomplete
  *   - `{ kind: 'empirical', history }`    empirical bootstrap of realized vol

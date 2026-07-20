@@ -173,6 +173,12 @@ series keep GARCH instead of spuriously flipping. A best-but-within-margin
 outcome retains GARCH and records `selection: 'oos-qlike-within-margin'`, so
 the near-miss is visible in the artifact rather than silently rounded to a win.
 
+The two-way `auto-egarch` selector uses the same `selectionMargin` default and
+artifact convention. EGARCH's signed leverage coefficient is its extra degree
+of freedom, so a lower held-out QLIKE alone does not earn it; the candidate
+must improve on GARCH by more than the margin. Set `selectionMargin: 0` only
+when an application deliberately wants the raw held-out QLIKE argmin.
+
 ## Volatility-tolerance elicitation
 
 The risk/reward sweep is parameterized by a single volatility tolerance

@@ -128,10 +128,13 @@ test('auto-egarch adaptive fit records the per-asset signed-asymmetry selection'
     { ensembleSize: 20, horizon: 8, baseSeed: 100, adaptiveVol: { kind: 'auto-egarch' } },
   );
   assert.equal(a.volFit.kind, 'auto-egarch');
-  assert.ok(['garch', 'egarch'].includes(a.volFit.assets.ATOM.model));
-  assert.equal(a.volFit.assets.ATOM.selection, 'oos-qlike');
-  assert.ok(Number.isFinite(a.volFit.assets.ATOM.oosQlike.garch));
-  assert.ok(Number.isFinite(a.volFit.assets.ATOM.oosQlike.egarch));
+  const fit = a.volFit.assets.ATOM;
+  assert.ok(['garch', 'egarch'].includes(fit.model));
+  assert.ok(['oos-qlike', 'oos-qlike-within-margin'].includes(fit.selection));
+  if (fit.selection === 'oos-qlike-within-margin') assert.equal(fit.model, 'garch');
+  assert.equal(fit.selectionMargin, 0.02);
+  assert.ok(Number.isFinite(fit.oosQlike.garch));
+  assert.ok(Number.isFinite(fit.oosQlike.egarch));
   assert.deepEqual(a.volFit, b.volFit, 'selection and its fit summary are reproducible');
 });
 

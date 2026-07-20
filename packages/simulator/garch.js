@@ -253,7 +253,7 @@ const AUTO_EGARCH_GAMMA_THRESHOLD = 0.05;
 // observed spreads — on a symmetric DGP the spurious asymmetric "improvement"
 // runs ~0.01, while a genuine leverage signal clears ~0.07, so a 0.02 threshold
 // separates the two — and overridable per call via opts.selectionMargin.
-const AUTO_FAMILY_SELECTION_MARGIN = 0.02;
+const AUTO_SELECTION_MARGIN = 0.02;
 
 /**
  * Gaussian negative log-likelihood of a variance-targeting GARCH(1,1) with the
@@ -494,6 +494,7 @@ export class AutoEgarchSurface {
    * @param {object} [opts]
    * @param {'gamma'|'oos-qlike'} [opts.selection]
    * @param {number} [opts.gammaThreshold]
+   * @param {number} [opts.selectionMargin] minimum QLIKE improvement over GARCH to accept EGARCH (default 0.02)
    * @param {Record<string, { trainN: number, testN: number, qlike: Record<string, number> }>} [opts.oosEvidence]
    */
   constructor(garch, egarch, returnCounts, opts = {}) {
@@ -502,10 +503,14 @@ export class AutoEgarchSurface {
     this.gammaThreshold = opts.gammaThreshold != null
       ? opts.gammaThreshold
       : AUTO_EGARCH_GAMMA_THRESHOLD;
+    this.selectionMargin = opts.selectionMargin != null ? opts.selectionMargin : AUTO_SELECTION_MARGIN;
     this.selection = opts.selection || 'oos-qlike';
     this.oosEvidence = opts.oosEvidence || {};
     if (!(this.gammaThreshold >= 0)) {
       throw new Error('AutoEgarchSurface: gammaThreshold must be >= 0');
+    }
+    if (!(this.selectionMargin >= 0)) {
+      throw new Error('AutoEgarchSurface: selectionMargin must be >= 0');
     }
     if (!['gamma', 'oos-qlike'].includes(this.selection)) {
       throw new Error("AutoEgarchSurface: selection must be 'gamma' or 'oos-qlike'");
@@ -519,10 +524,16 @@ export class AutoEgarchSurface {
         && Number.isFinite(evidence?.qlike?.garch)
         && Number.isFinite(evidence?.qlike?.egarch);
       if (canSelectOos) {
-        this.selected[asset] = evidence.qlike.egarch < evidence.qlike.garch
-          ? egarch
-          : garch;
-        this.selectionByAsset[asset] = 'oos-qlike';
+        const improvement = evidence.qlike.garch - evidence.qlike.egarch;
+        if (improvement > this.selectionMargin) {
+          this.selected[asset] = egarch;
+          this.selectionByAsset[asset] = 'oos-qlike';
+        } else {
+          this.selected[asset] = garch;
+          this.selectionByAsset[asset] = improvement > 0
+            ? 'oos-qlike-within-margin'
+            : 'oos-qlike';
+        }
       } else {
         const gamma = egarch.stats(asset).gamma;
         this.selected[asset] = returnCounts[asset] >= AUTO_EGARCH_MIN_RETURNS
@@ -555,6 +566,7 @@ export class AutoEgarchSurface {
       model: surface === this.egarch ? 'egarch' : 'garch',
       selection: this.selectionByAsset[asset],
       oosQlike: this.oosEvidence[asset]?.qlike,
+      selectionMargin: this.selectionMargin,
     };
   }
 
@@ -569,15 +581,17 @@ export class AutoEgarchSurface {
 /**
  * Fit symmetric GARCH and EGARCH MLEs from the same window, then choose the
  * branch per asset by held-out QLIKE. Both candidates fit the training prefix,
- * the lower one-step-ahead QLIKE wins on the suffix, and the winner is refit on
- * the full observed window for the live forecast and regime read. A too-short
- * or unfit split falls back to the established gamma-evidence rule.
+ * and EGARCH must beat the simpler GARCH baseline by a pre-specified QLIKE
+ * margin before its extra parameter is accepted. The winner is refit on the
+ * full observed window for the live forecast and regime read. A too-short or
+ * unfit split falls back to the established gamma-evidence rule.
  *
  * @param {Array<Record<string, number>>} priceFrames
  * @param {object} [opts]
  * @param {'gamma'|'oos-qlike'} [opts.selection] selection signal (default 'oos-qlike')
  * @param {number} [opts.trainFraction] held-out train share for OOS QLIKE (default 0.6)
  * @param {number} [opts.gammaThreshold] minimum absolute fitted gamma for fallback / gamma selection (default 0.05)
+ * @param {number} [opts.selectionMargin] minimum QLIKE improvement over GARCH to accept EGARCH (default 0.02)
  * @returns {AutoEgarchSurface}
  */
 export function autoEgarchMleFromPriceHistory(priceFrames, opts = {}) {
@@ -639,7 +653,7 @@ export class AutoGarchFamilySurface {
     this.oosEvidence = oosEvidence;
     this.selectionMargin = opts.selectionMargin != null
       ? opts.selectionMargin
-      : AUTO_FAMILY_SELECTION_MARGIN;
+      : AUTO_SELECTION_MARGIN;
     if (!(this.selectionMargin >= 0)) {
       throw new Error('AutoGarchFamilySurface: selectionMargin must be >= 0');
     }
@@ -793,6 +807,7 @@ export function autoGarchFamilyMleFromPriceHistory(priceFrames, opts = {}) {
  * @param {'garch'|'gjr-garch'|'egarch'|'auto-gjr-garch'|'auto-egarch'|'auto-garch-family'} [opts.kind]  auto kinds select per asset from fitted candidates
  * @param {'mle'|'fixed'} [opts.estimate]  'mle' fits the params per asset; else the fixed split
  * @param {'gamma'|'oos-qlike'} [opts.selection] auto-egarch selector signal (default OOS QLIKE)
+ * @param {number} [opts.selectionMargin] minimum QLIKE improvement over GARCH to accept EGARCH (default 0.02)
  * @param {number} [opts.alpha]  fixed / fallback ARCH coefficient
  * @param {number} [opts.gamma]  fixed / fallback leverage coefficient (gjr-garch only)
  * @param {number} [opts.beta]   fixed / fallback GARCH coefficient

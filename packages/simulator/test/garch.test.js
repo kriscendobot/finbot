@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   Garch11Surface,
   garchFromPriceHistory,
+  AutoEgarchSurface,
   autoEgarchMleFromPriceHistory,
   AutoGarchFamilySurface,
   autoGarchFamilyMleFromPriceHistory,
@@ -324,6 +325,34 @@ test('auto-egarch: a short window does not mistake fallback gamma for evidence',
   assert.equal(selection.model, 'garch');
   assert.equal(selection.selection, 'gamma-fallback');
   assert.equal(selection.oosQlike, undefined);
+});
+
+test('auto-egarch: a parsimony margin keeps GARCH on a noise-level EGARCH edge', () => {
+  const garch = new Garch11Surface({ A: { omega: 0.00015, alpha: 0.09, beta: 0.85 } });
+  const egarch = new Egarch11Surface({ A: { omega: -0.45, alpha: 0.16, gamma: -0.2, beta: 0.9 } });
+  const select = (qlike, opts) => new AutoEgarchSurface(garch, egarch, { A: 40 }, {
+    selection: 'oos-qlike',
+    oosEvidence: { A: { trainN: 20, testN: 14, qlike } },
+    ...opts,
+  }).stats('A');
+
+  // EGARCH wins by only 0.012, so it has not earned its signed-leverage
+  // parameter and the observable result records the near miss.
+  const withinMargin = select({ garch: 1, egarch: 0.988 });
+  assert.equal(withinMargin.model, 'garch');
+  assert.equal(withinMargin.selection, 'oos-qlike-within-margin');
+  assert.equal(withinMargin.selectionMargin, 0.02);
+
+  const clears = select({ garch: 1, egarch: 0.928 });
+  assert.equal(clears.model, 'egarch');
+  assert.equal(clears.selection, 'oos-qlike');
+
+  assert.equal(select({ garch: 1, egarch: 0.988 }, { selectionMargin: 0 }).model, 'egarch');
+  assert.equal(select({ garch: 1, egarch: 0.928 }, { selectionMargin: 0.5 }).model, 'garch');
+  assert.throws(
+    () => select({ garch: 1, egarch: 1 }, { selectionMargin: -0.1 }),
+    /selectionMargin must be >= 0/,
+  );
 });
 
 test('auto-garch-family: selects the lowest common OOS QLIKE and preserves GARCH on a tie or incomplete comparison', () => {
