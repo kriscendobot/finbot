@@ -89,6 +89,8 @@ export {
 } from './forecast-eval.js';
 export {
   qlike,
+  qlikeLosses,
+  dieboldMariano,
   varMse,
   walkForwardVolEval,
   fitAndForward,

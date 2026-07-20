@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 
 import {
   qlike,
+  qlikeLosses,
+  dieboldMariano,
   varMse,
   walkForwardVolEval,
   rankByLoss,
@@ -37,6 +39,38 @@ test('varMse: squared error on the variance scale', () => {
   assert.equal(varMse(0.05, 0.05), 0);
 });
 
+test('dieboldMariano: detects a material paired QLIKE-loss advantage and preserves its direction', () => {
+  const lossesA = Array.from({ length: 40 }, (_, i) => 1 + (i % 2 ? 0.02 : -0.02));
+  const lossesB = lossesA.map((loss, i) => loss + (i % 2 ? 0.15 : 0.25));
+  const aBeatsB = dieboldMariano(lossesA, lossesB, { lag: 0 });
+  const bBeatsA = dieboldMariano(lossesB, lossesA, { lag: 0 });
+
+  assert.ok(aBeatsB.meanLossDifference < 0, 'A has lower mean loss');
+  assert.ok(aBeatsB.statistic < 0, 'negative statistic favors A');
+  assert.ok(aBeatsB.pValue < 0.05, 'paired advantage is statistically significant');
+  assert.equal(aBeatsB.better, 'a');
+  assert.equal(bBeatsA.better, 'b', 'reversing the order reverses the result');
+  assert.ok(Math.abs(aBeatsB.statistic + bBeatsA.statistic) < 1e-12, 'the statistic is antisymmetric');
+});
+
+test('dieboldMariano: equal losses are not evidence of a winner', () => {
+  const result = dieboldMariano([1, 1.1, 0.9, 1.2], [1, 1.1, 0.9, 1.2]);
+  assert.equal(result.meanLossDifference, 0);
+  assert.equal(result.statistic, 0);
+  assert.equal(result.pValue, 1);
+  assert.equal(result.significant, false);
+  assert.equal(result.better, null);
+  assert.throws(() => dieboldMariano([1], [1]), /at least two observations/);
+  assert.throws(() => dieboldMariano([1, 2], [1, Infinity]), /losses must be finite/);
+});
+
+test('qlikeLosses: returns paired per-observation losses for a DM comparison', () => {
+  const losses = qlikeLosses([0.02, 0.04], [0.1, 0.2]);
+  assert.ok(Math.abs(losses[0] - qlike(0.02, 0.01)) < 1e-15);
+  assert.ok(Math.abs(losses[1] - qlike(0.04, 0.04)) < 1e-15);
+  assert.throws(() => qlikeLosses([0.02], [0.1, 0.2]), /paired arrays/);
+});
+
 test('walkForwardVolEval: deterministic — same series → identical table', () => {
   const { series } = gbmSeries({ sigma: 0.02, length: 300, seed: 7 });
   const a = walkForwardVolEval(series);
@@ -62,6 +96,8 @@ test('walkForwardVolEval: train/test split honors trainFraction with no lookahea
   assert.equal(table.trainN + table.testN, series.length - 1, 'train + test == number of returns');
   assert.ok(Math.abs(table.trainN / (table.trainN + table.testN) - 0.7) < 0.05, 'split near trainFraction');
   for (const r of table.rows) if (Number.isFinite(r.n)) assert.equal(r.n, table.testN, `${r.name} scored on the full test window`);
+  assert.equal(table.qlikeComparison.n, table.testN, 'DM comparison uses the same held-out suffix');
+  assert.equal(table.qlikeComparison.candidate, rankByLoss(table.rows, 'qlike').winner, 'DM candidate is the raw QLIKE winner');
 });
 
 test('walkForwardVolEval: on a clustered GARCH process, a GARCH model beats the flat constant on QLIKE', () => {
@@ -111,6 +147,7 @@ test('renderVolEvalText: includes header, every row, and flags the winner', () =
   assert.match(text, /QLIKE/);
   assert.match(text, /constant-var/);
   assert.match(text, /best QLIKE:/);
+  assert.match(text, /DM QLIKE:/);
   const { winner } = rankByLoss(table.rows, 'qlike');
   assert.match(text, new RegExp(`${winner}.*\\*`), 'winner row carries the * flag');
 });

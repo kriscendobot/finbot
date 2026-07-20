@@ -82,6 +82,116 @@ function mean(xs) {
 }
 
 /**
+ * Standard normal CDF, using a deterministic error-function approximation.
+ * The approximation error is well below the precision the evaluation report
+ * displays, while avoiding a statistics dependency for this small simulator.
+ *
+ * @param {number} z
+ * @returns {number}
+ */
+function normalCdf(z) {
+  if (z === 0) return 0.5;
+  const sign = z < 0 ? -1 : 1;
+  const x = Math.abs(z) / Math.sqrt(2);
+  const t = 1 / (1 + 0.3275911 * x);
+  const erf = 1 - (((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-x * x));
+  return 0.5 * (1 + sign * erf);
+}
+
+/**
+ * Diebold-Mariano test for paired forecast losses. The reported differential
+ * is `lossesA - lossesB`, so a negative value favors A. Long-run variance is
+ * estimated with a Bartlett-weighted HAC estimator: loss differentials can
+ * remain serially dependent even when the forecasts themselves are one step
+ * ahead. The small-sample correction is the Harvey-Leybourne-Newbold form.
+ *
+ * This tests forecast accuracy, not economic usefulness. A significant QLIKE
+ * improvement is evidence that one variance forecast is more accurate than
+ * another on this held-out window; it does not authorize a portfolio action.
+ *
+ * @param {number[]} lossesA paired losses for candidate A
+ * @param {number[]} lossesB paired losses for candidate B
+ * @param {object} [opts]
+ * @param {number} [opts.horizon] forecast horizon (default 1)
+ * @param {number} [opts.lag] Bartlett HAC lag (default floor(n^(1/3)))
+ * @param {number} [opts.alpha] two-sided significance threshold (default 0.05)
+ * @returns {{ n: number, horizon: number, lag: number, meanLossDifference: number, longRunVariance: number, standardError: number, statistic: number, pValue: number, alpha: number, significant: boolean, better: 'a'|'b'|null }}
+ */
+export function dieboldMariano(lossesA, lossesB, opts = {}) {
+  if (!Array.isArray(lossesA) || !Array.isArray(lossesB) || lossesA.length !== lossesB.length || lossesA.length < 2) {
+    throw new Error('dieboldMariano: need paired loss arrays with at least two observations');
+  }
+  if (!lossesA.every(Number.isFinite) || !lossesB.every(Number.isFinite)) {
+    throw new Error('dieboldMariano: losses must be finite');
+  }
+
+  const n = lossesA.length;
+  const horizon = opts.horizon != null ? opts.horizon : 1;
+  const alpha = opts.alpha != null ? opts.alpha : 0.05;
+  if (!Number.isInteger(horizon) || horizon < 1 || horizon > n) {
+    throw new Error('dieboldMariano: horizon must be an integer from 1 through n');
+  }
+  if (!(alpha > 0 && alpha < 1)) throw new Error('dieboldMariano: alpha must be between 0 and 1');
+
+  const defaultLag = Math.floor(n ** (1 / 3));
+  const lag = opts.lag != null ? opts.lag : defaultLag;
+  if (!Number.isInteger(lag) || lag < 0 || lag >= n) {
+    throw new Error('dieboldMariano: lag must be an integer from 0 through n - 1');
+  }
+
+  const differential = lossesA.map((loss, index) => loss - lossesB[index]);
+  const meanLossDifference = mean(differential);
+  const autocovariance = (atLag) => {
+    let total = 0;
+    for (let i = atLag; i < n; i += 1) {
+      total += (differential[i] - meanLossDifference) * (differential[i - atLag] - meanLossDifference);
+    }
+    return total / n;
+  };
+  let longRunVariance = autocovariance(0);
+  for (let atLag = 1; atLag <= lag; atLag += 1) {
+    longRunVariance += 2 * (1 - atLag / (lag + 1)) * autocovariance(atLag);
+  }
+  // Numerical roundoff can make an exactly-zero HAC estimate slightly negative.
+  longRunVariance = Math.max(0, longRunVariance);
+  const standardError = Math.sqrt(longRunVariance / n);
+  const hlnFactor = Math.sqrt((n + 1 - 2 * horizon + (horizon * (horizon - 1)) / n) / n);
+  let statistic;
+  if (standardError === 0) statistic = meanLossDifference === 0 ? 0 : Math.sign(meanLossDifference) * Infinity;
+  else statistic = (meanLossDifference / standardError) * hlnFactor;
+  const pValue = Number.isFinite(statistic) ? Math.max(0, Math.min(1, 2 * (1 - normalCdf(Math.abs(statistic))))) : 0;
+  const significant = pValue < alpha;
+  const better = significant ? (meanLossDifference < 0 ? 'a' : meanLossDifference > 0 ? 'b' : null) : null;
+  return {
+    n,
+    horizon,
+    lag,
+    meanLossDifference,
+    longRunVariance,
+    standardError,
+    statistic,
+    pValue,
+    alpha,
+    significant,
+    better,
+  };
+}
+
+/**
+ * Per-observation QLIKE losses for a paired forecast comparison.
+ *
+ * @param {number[]} forecasts
+ * @param {number[]} residuals
+ * @returns {number[]}
+ */
+export function qlikeLosses(forecasts, residuals) {
+  if (!Array.isArray(forecasts) || !Array.isArray(residuals) || forecasts.length !== residuals.length) {
+    throw new Error('qlikeLosses: forecasts and residuals must be paired arrays');
+  }
+  return forecasts.map((forecast, index) => qlike(forecast, residuals[index] * residuals[index]));
+}
+
+/**
  * Score a stream of one-step-ahead variance forecasts against the realized
  * squared-return proxy. `forecasts[i]` is the forecast made for `rets[i]`
  * (i.e. formed before r_i was observed); `residuals[i] = r_i - trainMean`
@@ -92,12 +202,10 @@ function mean(xs) {
  * @returns {{ qlike: number, mse: number, n: number }}
  */
 function scoreForecasts(forecasts, residuals) {
-  const ql = [];
+  const ql = qlikeLosses(forecasts, residuals);
   const se = [];
   for (let i = 0; i < forecasts.length; i += 1) {
-    const proxy = residuals[i] * residuals[i];
-    ql.push(qlike(forecasts[i], proxy));
-    se.push(varMse(forecasts[i], proxy));
+    se.push(varMse(forecasts[i], residuals[i] * residuals[i]));
   }
   return { qlike: mean(ql), mse: mean(se), n: forecasts.length };
 }
@@ -210,9 +318,11 @@ export const GARCH_MODELS = [
  * @param {number} [opts.ewmaLambda]      EWMA decay (default 0.94)
  * @param {number} [opts.rollingWindow]   rolling-var window (default 32)
  * @param {string} [opts.asset]           asset key for the frame form (default 'ASSET')
+ * @param {object} [opts.dieboldMariano]  options for the winner/runner-up QLIKE test
  * @returns {{
  *   trainN: number, testN: number,
- *   rows: Array<{ name: string, qlike: number, mse: number, n: number, family: string }>
+ *   rows: Array<{ name: string, qlike: number, mse: number, n: number, family: string }>,
+ *   qlikeComparison: ({ candidate: string, comparator: string } & ReturnType<typeof dieboldMariano>)|null
  * }}
  */
 export function walkForwardVolEval(series, opts = {}) {
@@ -247,6 +357,7 @@ export function walkForwardVolEval(series, opts = {}) {
   }
 
   const rows = [];
+  const qlikeLossesByName = new Map();
 
   for (const model of GARCH_MODELS) {
     let forecasts;
@@ -259,19 +370,40 @@ export function walkForwardVolEval(series, opts = {}) {
       continue;
     }
     rows.push({ ...scoreForecasts(forecasts, testResiduals), name: model.name, family: 'garch' });
+    qlikeLossesByName.set(model.name, qlikeLosses(forecasts, testResiduals));
   }
 
   // --- Naive baselines. ---
   const constForecasts = testResiduals.map(() => trainVar);
   rows.push({ ...scoreForecasts(constForecasts, testResiduals), name: 'constant-var', family: 'naive' });
+  qlikeLossesByName.set('constant-var', qlikeLosses(constForecasts, testResiduals));
 
   const ewma = ewmaForecasts(trainVar, testResiduals, ewmaLambda);
   rows.push({ ...scoreForecasts(ewma, testResiduals), name: `ewma-${ewmaLambda}`, family: 'naive' });
+  qlikeLossesByName.set(`ewma-${ewmaLambda}`, qlikeLosses(ewma, testResiduals));
 
   const rolling = rollingWindowForecasts(trainResiduals, testResiduals, rollingWindow, trainVar);
   rows.push({ ...scoreForecasts(rolling, testResiduals), name: `rolling-${rollingWindow}`, family: 'naive' });
+  qlikeLossesByName.set(`rolling-${rollingWindow}`, qlikeLosses(rolling, testResiduals));
 
-  return { trainN: trainRets.length, testN: testRets.length, rows };
+  const rankedByQlike = rows
+    .filter((row) => Number.isFinite(row.qlike) && qlikeLossesByName.has(row.name))
+    .sort((a, b) => a.qlike - b.qlike);
+  const candidate = rankedByQlike[0];
+  const comparator = rankedByQlike[1];
+  const qlikeComparison = candidate && comparator
+    ? {
+        candidate: candidate.name,
+        comparator: comparator.name,
+        ...dieboldMariano(
+          qlikeLossesByName.get(candidate.name),
+          qlikeLossesByName.get(comparator.name),
+          opts.dieboldMariano,
+        ),
+      }
+    : null;
+
+  return { trainN: trainRets.length, testN: testRets.length, rows, qlikeComparison };
 }
 
 /**
@@ -353,5 +485,14 @@ export function renderVolEvalText(table, opts = {}) {
     );
   }
   lines.push(`  best QLIKE: ${winner}`);
+  if (table.qlikeComparison) {
+    const comparison = table.qlikeComparison;
+    const result = comparison.better === 'a'
+      ? `${comparison.candidate} significantly better`
+      : 'no significant difference';
+    lines.push(
+      `  DM QLIKE: ${comparison.candidate} vs ${comparison.comparator}; Δ=${comparison.meanLossDifference.toFixed(4)}; DM=${comparison.statistic.toFixed(3)}; p=${comparison.pValue.toFixed(4)}; ${result} (α=${comparison.alpha})`,
+    );
+  }
   return lines.join('\n');
 }

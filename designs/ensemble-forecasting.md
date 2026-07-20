@@ -1,6 +1,6 @@
 ---
 created: 2026-06-17
-updated: 2026-06-17
+updated: 2026-07-20
 author: architect
 status: stub
 ---
@@ -754,3 +754,20 @@ Next on this axis: add a pre-specified QLIKE improvement margin or a
 forecast-comparison test before treating a narrow three-way winner as evidence of
 material superiority. Live execution remains separately blocked on explicit
 paper-wallet/test-net authorization and a selected CapTP transport.
+
+## Notes from the field (2026-07-20 - paired QLIKE evidence)
+
+The walk-forward report now runs a two-sided Diebold-Mariano comparison between
+its lowest-mean-QLIKE row and the runner-up on the same held-out suffix. It
+reports the mean loss differential, a Bartlett-HAC long-run variance estimate,
+the small-sample-corrected statistic, and its p-value. The HAC default is a
+cube-root lag, rather than assuming the one-step loss differential is
+independent, because conditional-volatility forecast errors can still be serially
+dependent.
+
+This is deliberately evidence reporting, not a new trading policy. The selector
+continues to require its pre-specified parsimony margin before accepting an
+asymmetric family. A raw QLIKE winner is called significantly better only when
+the paired test clears its configured two-sided alpha (default 0.05). This adds a
+second guard against over-reading a narrow held-out advantage while preserving
+the dry-run wallet boundary.
