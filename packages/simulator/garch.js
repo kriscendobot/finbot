@@ -36,7 +36,7 @@
 
 import { gjrGarchFromPriceHistory, gjrGarchMleFromPriceHistory } from './gjr-garch.js';
 import { egarchFromPriceHistory, egarchMleFromPriceHistory } from './egarch.js';
-import { walkForwardQlike } from './vol-selection.js';
+import { walkForwardQlike, dieboldMariano } from './vol-selection.js';
 
 const DEFAULT_FLOOR = 1e-8;
 const DEFAULT_ALPHA = 0.08;
@@ -642,9 +642,10 @@ export class AutoGarchFamilySurface {
    * @param {import('./gjr-garch.js').GjrGarch11Surface} gjr
    * @param {import('./egarch.js').Egarch11Surface} egarch
    * @param {string[]} assets
-   * @param {Record<string, { trainN: number, testN: number, qlike: Record<string, number> }>} oosEvidence
+   * @param {Record<string, { trainN: number, testN: number, qlike: Record<string, number>, losses?: Record<string, number[]> }>} oosEvidence
    * @param {object} [opts]
    * @param {number} [opts.selectionMargin] minimum QLIKE improvement over GARCH to accept an asymmetric branch (default 0.02)
+   * @param {number|null} [opts.significanceAlpha] when set (0<alpha<1), an asymmetric branch that clears the parsimony margin must ALSO beat GARCH by a significant Diebold-Mariano QLIKE test at this level, else GARCH is retained; null (default) leaves the gate off
    */
   constructor(garch, gjr, egarch, assets, oosEvidence, opts = {}) {
     this.garch = garch;
@@ -657,10 +658,19 @@ export class AutoGarchFamilySurface {
     if (!(this.selectionMargin >= 0)) {
       throw new Error('AutoGarchFamilySurface: selectionMargin must be >= 0');
     }
+    this.significanceAlpha = opts.significanceAlpha != null ? opts.significanceAlpha : null;
+    if (this.significanceAlpha != null && !(this.significanceAlpha > 0 && this.significanceAlpha < 1)) {
+      throw new Error('AutoGarchFamilySurface: significanceAlpha must be between 0 and 1');
+    }
     this.selected = {};
     this.selectionByAsset = {};
+    // The Diebold-Mariano verdict per asset when the significance gate ran,
+    // so the regime artifact can show why an in-margin winner was or was not
+    // accepted (null when the gate was off or never reached).
+    this.significanceByAsset = {};
     for (const asset of assets) {
       if (!garch.has(asset) || !gjr.has(asset) || !egarch.has(asset)) continue;
+      this.significanceByAsset[asset] = null;
       const qlike = oosEvidence[asset]?.qlike;
       const hasCompleteComparison = ['garch', 'gjr-garch', 'egarch']
         .every((model) => Number.isFinite(qlike?.[model]));
@@ -681,14 +691,46 @@ export class AutoGarchFamilySurface {
         if (qlike[candidate.model] < qlike[bestAsymmetric.model]) bestAsymmetric = candidate;
       }
       const improvement = qlike.garch - qlike[bestAsymmetric.model];
-      if (improvement > this.selectionMargin) {
-        this.selected[asset] = bestAsymmetric.surface;
-        this.selectionByAsset[asset] = 'oos-qlike';
-      } else {
+      if (improvement <= this.selectionMargin) {
         this.selected[asset] = garch;
         // Record when an asymmetric branch was best but did not earn its extra
         // parameter, so the parsimony guard is visible in the regime artifact.
         this.selectionByAsset[asset] = improvement > 0 ? 'oos-qlike-within-margin' : 'oos-qlike';
+        continue;
+      }
+      // Cleared the parsimony margin. With the significance gate off, that is
+      // the historic behavior: accept the asymmetric branch outright.
+      if (this.significanceAlpha == null) {
+        this.selected[asset] = bestAsymmetric.surface;
+        this.selectionByAsset[asset] = 'oos-qlike';
+        continue;
+      }
+      // Gate on: the margin-clearing edge must also be statistically
+      // distinguishable from noise on the held-out window (a paired DM QLIKE
+      // test of the asymmetric branch against GARCH). Without paired per-step
+      // losses the test cannot run, so conservatively decline the parameter.
+      const losses = oosEvidence[asset]?.losses;
+      const asymLosses = losses?.[bestAsymmetric.model];
+      const garchLosses = losses?.garch;
+      if (!Array.isArray(asymLosses) || !Array.isArray(garchLosses)
+        || asymLosses.length !== garchLosses.length || asymLosses.length < 2) {
+        this.selected[asset] = garch;
+        this.selectionByAsset[asset] = 'oos-qlike-unverifiable';
+        continue;
+      }
+      // dieboldMariano(asymmetric, garch): meanLossDifference < 0 favors the
+      // asymmetric branch, so `better === 'a'` is exactly "asymmetric is
+      // significantly more accurate at alpha".
+      const dm = dieboldMariano(asymLosses, garchLosses, { alpha: this.significanceAlpha });
+      this.significanceByAsset[asset] = dm;
+      if (dm.better === 'a') {
+        this.selected[asset] = bestAsymmetric.surface;
+        this.selectionByAsset[asset] = 'oos-qlike-significant';
+      } else {
+        this.selected[asset] = garch;
+        // The edge cleared the fixed nat margin but is not significant: the
+        // extra parameter is not earned once sampling noise is accounted for.
+        this.selectionByAsset[asset] = 'oos-qlike-insignificant';
       }
     }
   }
@@ -712,13 +754,16 @@ export class AutoGarchFamilySurface {
       : surface === this.egarch
         ? 'egarch'
         : 'garch';
-    return {
+    const out = {
       ...surface.stats(asset),
       model,
       selection: this.selectionByAsset[asset],
       oosQlike: this.oosEvidence[asset]?.qlike,
       selectionMargin: this.selectionMargin,
     };
+    if (this.significanceAlpha != null) out.significanceAlpha = this.significanceAlpha;
+    if (this.significanceByAsset[asset] != null) out.qlikeSignificance = this.significanceByAsset[asset];
+    return out;
   }
 
   /** @param {string} asset */
@@ -738,6 +783,7 @@ export class AutoGarchFamilySurface {
  * @param {object} [opts]
  * @param {number} [opts.trainFraction] held-out train share for OOS QLIKE (default 0.6)
  * @param {number} [opts.selectionMargin] minimum QLIKE improvement over GARCH to accept an asymmetric branch (default 0.02)
+ * @param {number|null} [opts.significanceAlpha] require a significant Diebold-Mariano QLIKE edge over GARCH (default null: off)
  * @returns {AutoGarchFamilySurface}
  */
 export function autoGarchFamilyMleFromPriceHistory(priceFrames, opts = {}) {
@@ -760,7 +806,7 @@ export function autoGarchFamilyMleFromPriceHistory(priceFrames, opts = {}) {
     egarchMleFromPriceHistory(priceFrames, opts),
     assets,
     oosEvidence,
-    { selectionMargin: opts.selectionMargin },
+    { selectionMargin: opts.selectionMargin, significanceAlpha: opts.significanceAlpha },
   );
 }
 
@@ -808,6 +854,7 @@ export function autoGarchFamilyMleFromPriceHistory(priceFrames, opts = {}) {
  * @param {'mle'|'fixed'} [opts.estimate]  'mle' fits the params per asset; else the fixed split
  * @param {'gamma'|'oos-qlike'} [opts.selection] auto-egarch selector signal (default OOS QLIKE)
  * @param {number} [opts.selectionMargin] minimum QLIKE improvement over GARCH to accept EGARCH (default 0.02)
+ * @param {number|null} [opts.significanceAlpha] auto-garch-family only: also require a significant Diebold-Mariano QLIKE edge over GARCH before accepting an asymmetric branch (default null: off)
  * @param {number} [opts.alpha]  fixed / fallback ARCH coefficient
  * @param {number} [opts.gamma]  fixed / fallback leverage coefficient (gjr-garch only)
  * @param {number} [opts.beta]   fixed / fallback GARCH coefficient
@@ -881,6 +928,9 @@ export function conditionalVolFromPriceHistory(priceFrames, opts = {}) {
     if (st.model != null) out[a].model = st.model;
     if (st.selection != null) out[a].selection = st.selection;
     if (st.oosQlike != null) out[a].oosQlike = st.oosQlike;
+    // Only present when the significance gate ran (non-default opt), so the
+    // default regime read — and its downstream proposal hash — is untouched.
+    if (st.qlikeSignificance != null) out[a].qlikeSignificance = st.qlikeSignificance;
   }
   return out;
 }

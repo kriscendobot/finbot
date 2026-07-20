@@ -421,6 +421,96 @@ test('auto-garch-family: the parsimony margin retains GARCH on a symmetric DGP',
   assert.notEqual(raw.model, 'garch');
 });
 
+test('auto-garch-family: a significance gate declines a margin-clearing but noisy asymmetric edge', () => {
+  const garch = new Garch11Surface({ A: { omega: 0.00015, alpha: 0.09, beta: 0.85 } });
+  const gjr = new GjrGarch11Surface({ A: { omega: 0.00015, alpha: 0.03, gamma: 0.12, beta: 0.85 } });
+  const egarch = new Egarch11Surface({ A: { omega: -0.45, alpha: 0.16, gamma: -0.2, beta: 0.9 } });
+  const build = (evidence, opts) => new AutoGarchFamilySurface(garch, gjr, egarch, ['A'], { A: evidence }, opts);
+
+  // egarch beats GARCH by a mean 0.05 QLIKE — clears the 0.02 parsimony margin —
+  // but the per-step edge alternates sign with large spread, so a paired
+  // Diebold-Mariano test cannot distinguish it from noise.
+  const n = 20;
+  const garchLosses = Array.from({ length: n }, () => 2.0);
+  const egarchLosses = Array.from({ length: n }, (_v, i) => (i % 2 === 0 ? 0.95 : 2.95));
+  const noisy = {
+    trainN: 20,
+    testN: n,
+    qlike: { garch: 2.0, 'gjr-garch': 2.1, egarch: 1.95 },
+    losses: { garch: garchLosses, 'gjr-garch': garchLosses, egarch: egarchLosses },
+  };
+
+  // Gate off (default): the fixed-margin edge is accepted, as before.
+  const gateOff = build(noisy).stats('A');
+  assert.equal(gateOff.model, 'egarch');
+  assert.equal(gateOff.selection, 'oos-qlike');
+  assert.equal(gateOff.significanceAlpha, undefined);
+
+  // Gate on: the noisy edge is not significant, so GARCH is retained and the
+  // verdict is recorded in the artifact.
+  const gated = build(noisy, { significanceAlpha: 0.05 }).stats('A');
+  assert.equal(gated.model, 'garch');
+  assert.equal(gated.selection, 'oos-qlike-insignificant');
+  assert.equal(gated.significanceAlpha, 0.05);
+  assert.equal(gated.qlikeSignificance.significant, false);
+  assert.equal(gated.qlikeSignificance.better, null);
+});
+
+test('auto-garch-family: a significance gate accepts a consistent asymmetric edge', () => {
+  const garch = new Garch11Surface({ A: { omega: 0.00015, alpha: 0.09, beta: 0.85 } });
+  const gjr = new GjrGarch11Surface({ A: { omega: 0.00015, alpha: 0.03, gamma: 0.12, beta: 0.85 } });
+  const egarch = new Egarch11Surface({ A: { omega: -0.45, alpha: 0.16, gamma: -0.2, beta: 0.9 } });
+  const build = (evidence, opts) => new AutoGarchFamilySurface(garch, gjr, egarch, ['A'], { A: evidence }, opts);
+
+  const n = 20;
+  const consistent = {
+    trainN: 20,
+    testN: n,
+    qlike: { garch: 1.0, 'gjr-garch': 1.1, egarch: 0.9 },
+    losses: {
+      garch: Array.from({ length: n }, () => 1.0),
+      'gjr-garch': Array.from({ length: n }, () => 1.1),
+      egarch: Array.from({ length: n }, () => 0.9),
+    },
+  };
+  const gated = build(consistent, { significanceAlpha: 0.05 }).stats('A');
+  assert.equal(gated.model, 'egarch');
+  assert.equal(gated.selection, 'oos-qlike-significant');
+  assert.equal(gated.qlikeSignificance.better, 'a');
+  assert.equal(gated.qlikeSignificance.significant, true);
+
+  // With no paired losses to test, the gate conservatively declines the branch.
+  const noLosses = { trainN: 20, testN: 14, qlike: consistent.qlike };
+  const unverifiable = build(noLosses, { significanceAlpha: 0.05 }).stats('A');
+  assert.equal(unverifiable.model, 'garch');
+  assert.equal(unverifiable.selection, 'oos-qlike-unverifiable');
+
+  // The gate level is validated.
+  assert.throws(() => build(consistent, { significanceAlpha: 0 }), /significanceAlpha must be between 0 and 1/);
+  assert.throws(() => build(consistent, { significanceAlpha: 1 }), /significanceAlpha must be between 0 and 1/);
+});
+
+test('auto-garch-family: the significance gate reaches the fitted selector and a genuine leverage edge survives it', () => {
+  const source = new GBMPriceFeed({
+    initialPrices: { A: 100 },
+    volSurface: new Egarch11Surface({ A: { omega: -0.45, alpha: 0.16, gamma: -0.2, beta: 0.9 } }),
+    seed: 17,
+  });
+  const frames = [source.current()];
+  for (let index = 0; index < 800; index += 1) frames.push(source.tick());
+  const gated = autoGarchFamilyMleFromPriceHistory(frames, { significanceAlpha: 0.05 }).stats('A');
+  // Seed 17's EGARCH DGP has a real leverage signal; the significance gate
+  // records a verdict and the asymmetric branch clears it.
+  assert.ok(['gjr-garch', 'egarch'].includes(gated.model), `expected asymmetric, got ${gated.model}`);
+  assert.equal(gated.selection, 'oos-qlike-significant');
+  assert.equal(gated.significanceAlpha, 0.05);
+  assert.equal(gated.qlikeSignificance.better, 'a');
+  // The verdict also reaches the regime read.
+  const read = conditionalVolFromPriceHistory(frames, { kind: 'auto-garch-family', significanceAlpha: 0.05 });
+  assert.equal(read.A.selection, 'oos-qlike-significant');
+  assert.ok(read.A.qlikeSignificance.significant);
+});
+
 test('auto-garch-family: common held-out comparison reaches the regime read', () => {
   const source = new GBMPriceFeed({
     initialPrices: { A: 100 },

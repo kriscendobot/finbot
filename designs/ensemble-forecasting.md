@@ -771,3 +771,42 @@ asymmetric family. A raw QLIKE winner is called significantly better only when
 the paired test clears its configured two-sided alpha (default 0.05). This adds a
 second guard against over-reading a narrow held-out advantage while preserving
 the dry-run wallet boundary.
+
+## Notes from the field (2026-07-20 - the significance test becomes an optional selector gate)
+
+The prior note left one question open: should the Diebold-Mariano evidence stay a
+report line, or become a *gate* in the auto-garch-family selector alongside the
+parsimony margin? This cut wires it as an **opt-in second gate**, defaulted off so
+the live regime read - and every proposal hash downstream of it - is byte-for-byte
+unchanged.
+
+- `autoGarchFamilyMleFromPriceHistory(frames, { significanceAlpha })` (and the
+  `conditionalVolFromPriceHistory` / `--adaptive-vol=auto-family` path it backs)
+  now accepts an optional `significanceAlpha`. When set, an asymmetric branch that
+  has *already cleared* the fixed-nat parsimony margin must **also** beat GARCH by a
+  significant paired Diebold-Mariano QLIKE test at that level before it is accepted.
+  When it does not, the selector keeps GARCH and records
+  `oos-qlike-insignificant`; when it does, `oos-qlike-significant`. `null` (the
+  default) leaves the historic margin-only behavior intact.
+- The two gates are complementary, not redundant. The parsimony margin is an
+  *effect-size* floor (is the edge big enough in nats to bother?); the DM gate is a
+  *sampling-noise* floor (is an edge that large distinguishable from luck on this
+  held-out window?). A noisy edge can clear the first and fail the second - the new
+  `oos-qlike-insignificant` tests exercise exactly that case - so the gate is a
+  genuine tightening, not a reparameterization of the margin.
+- Plumbing: `walkForwardQlike` now returns the per-observation QLIKE loss arrays
+  next to the scalar means, so the selector can run the paired test without
+  re-walking the test suffix. `dieboldMariano` moved to the leaf `vol-selection.js`
+  (re-exported from `vol-eval.js` for its public path) so `garch.js` can reach it
+  without an import cycle. If the paired losses are unavailable the gate declines
+  the branch conservatively and records `oos-qlike-unverifiable`. The DM verdict is
+  carried in the surface `stats()` (and the regime read) as `qlikeSignificance`
+  only when the gate ran, so a default read is untouched.
+
+Next on this axis: decide whether `significanceAlpha` should become the *default*
+for the live `auto-family` path (it would change proposal hashes, so it needs a
+maintainer call and a re-baselined fixture), and whether the walk-forward report's
+DM comparison should test the best asymmetric branch against GARCH specifically
+(the selector's actual contest) rather than winner-vs-runner-up. Live execution
+remains separately blocked on explicit paper-wallet/test-net authorization and a
+selected CapTP transport.
