@@ -5,7 +5,7 @@
  *     role: string;              // matches roles/<role>/AGENT.md
  *     brief: string;             // the dispatch prompt body
  *     capabilities?: string[];   // names of tools the subagent may invoke
- *     attenuator?: Function;     // overrides the default permissive attenuator
+ *     attenuator?: Function;     // overrides the default compartment attenuator
  *     llm?: Function;            // overrides the default deterministic stub LLM
  *     timeoutMs?: number;        // default 10 minutes
  *     observationKind?: string;  // 'dispatch' by default

@@ -7,21 +7,16 @@
  * subagents are stubs) but unacceptable once the executor signs live
  * transactions.
  *
- * **v1 (compartmentAttenuator):** each role's code runs in a real SES Compartment
- * whose `globalThis` is exactly the role's ambient policy plus its vended caps —
- * nothing else. Ambient authority is the empty set: a forecaster's code cannot
- * name `process`, `fetch`, or `require` unless its policy granted them. The
- * shape matches the future `@endo/compartment-mapper` interface so the harness
- * can swap implementations later without reshaping callers.
+ * **v1 (compartmentAttenuator):** supplies a hardened SES role policy whose
+ * globals are exactly the role's ambient policy and whose tools are the vended
+ * capability slice. An archive-backed Compartment runner can consume this
+ * shape later without reshaping callers.
  *
- * Both are exported; the harness defaults to `permissiveAttenuator`.
+ * Both are exported; the harness defaults to `compartmentAttenuator`. Callers
+ * may opt into `permissiveAttenuator` only for legacy or test-double use.
  */
 
 import 'ses';
-import '@endo/eventual-send/shim.js';
-import '@endo/patterns';
-
-const { harden } = await import('@endo/patterns');
 
 // --- lockdown guard (idempotent) ---
 
@@ -51,7 +46,7 @@ const CAPABILITY_MAP = {
   journalist:     { ambient: 'console', vended: ['journal-read'] },
 };
 
-/** Build the SES Compartment a role's code runs in. */
+/** Build the SES globals policy for a role. */
 function buildRolePolicy(role, opts = {}) {
   const entry = CAPABILITY_MAP[role];
   if (!entry) throw new Error(`unknown role for attenuation: ${role}`);
@@ -91,7 +86,7 @@ function makeSeededRandom(seed = 0x9e3779b9) {
   };
 }
 
-// --- v0: permissive attenuator (current default) ---
+// --- v0: explicit opt-out for legacy and test-double use ---
 
 /**
  * Permissive v0 capability attenuator.
@@ -119,12 +114,12 @@ export function permissiveAttenuator(role, capabilities, parentContext) {
   };
 }
 
-// --- v1: real SES compartment attenuator (not-yet-default) ---
+// --- v1: SES compartment policy (harness default) ---
 
 /**
- * V1 capability attenuator — each role's code runs in a real SES Compartment
- * whose `globalThis` is exactly the role's ambient policy. Cross-compartment
- * objects are vended as plain endowments filtered by granted capabilities.
+ * V1 capability attenuator. It returns the hardened role policy that a
+ * Compartment runner consumes, plus plain endowments filtered by granted
+ * capabilities.
  *
  * The return shape matches the future `@endo/compartment-mapper` interface so
  * callers need not change when we swap implementations later.

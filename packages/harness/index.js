@@ -24,14 +24,14 @@ import * as toolsModule from './tools.js';
 import * as messageBus from './message-bus/index.js';
 import * as observation from './observation/index.js';
 import * as schemas from './schemas/index.js';
-import { permissiveAttenuator } from './sandbox/permissive.js';
+import { compartmentAttenuator, permissiveAttenuator } from './sandbox/permissive.js';
 
 export { runOnce, runPersistent };
 export { spawnModule as spawn };
 export { providers };
 export { toolsModule as tools };
 export { messageBus, observation, schemas };
-export { permissiveAttenuator };
+export { compartmentAttenuator, permissiveAttenuator };
 
 /**
  * Top-level driver. Called by `bin/finbot`.
