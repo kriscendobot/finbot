@@ -830,3 +830,39 @@ This leaves the policy decision unchanged: whether to make `significanceAlpha`
 the default for the live `auto-family` path still needs maintainer approval and
 a re-baselined fixture. Live execution remains separately blocked on explicit
 paper-wallet/test-net authorization and a selected CapTP transport.
+
+## Notes from the field (2026-07-21 - the significance gate becomes evaluable from the CLI)
+
+The two prior notes left the same policy question open: should
+`significanceAlpha` become the *default* for the live `auto-family` path? That
+decision needs evidence, and until now the gate was only reachable by
+constructing a surface in code — the `finbot-eval` walk-forward table did not
+even run the production `auto-garch-family` selector, so a maintainer could not
+see what the gate would do to real selections. This cut makes the decision
+*evaluable* without changing any default:
+
+- **The production three-way selector is now in the eval roster.** `GARCH_MODELS`
+  (`vol-eval.js`) gained an `auto-garch-family` row, so every `finbot-eval`
+  walk-forward table now shows the OOS QLIKE of the exact selector the live
+  regime read uses, next to the fixed baselines and the naive honesty check.
+  This is purely additive — the row appears; nothing else in the table moves.
+- **The gate is now a CLI knob.** `walkForwardVolEval(series, { significanceAlpha })`
+  threads the level into the auto-* rows' fit (merged *only* into `auto-*` kinds,
+  so the fixed baselines stay byte-identical gated vs. ungated) and into the DM
+  report's α. `finbot-eval --significance-alpha=A` (0<A<1) exposes it. Omitted /
+  `null` (the default) leaves the whole table and every proposal hash exactly as
+  before; an out-of-range value fails fast (CLI exit 2; the library throws).
+- **First evidence.** On the shipped fixture presets the gate is a *no-op* at
+  α=0.05 — no asymmetric branch clears the parsimony margin in the live selector
+  on these series, so there is nothing for the significance floor to reject. The
+  DM contest line does move with α (at α=0.20 several presets' best asymmetric
+  branch reads "significantly better" that read "no significant difference" at
+  0.05), which is the sampling-noise dial the maintainer can now turn to see how
+  close each preset sits to the significance boundary.
+
+This still does not change the default. It converts the open policy question
+from "decide blind" into "run `finbot-eval --significance-alpha=…` against the
+fixtures and read the selection deltas." Making `significanceAlpha` the live
+default remains a maintainer call (it would change proposal hashes and needs a
+re-baselined fixture); live execution remains separately blocked on explicit
+paper-wallet/test-net authorization and a selected CapTP transport.

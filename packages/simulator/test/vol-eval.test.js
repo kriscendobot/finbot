@@ -172,3 +172,54 @@ test('renderVolEvalText: includes header, every row, and flags the winner', () =
   const { winner } = rankByLoss(table.rows, 'qlike');
   assert.match(text, new RegExp(`${winner}.*\\*`), 'winner row carries the * flag');
 });
+
+test('GARCH_MODELS: the roster includes the production auto-garch-family selector', () => {
+  const names = GARCH_MODELS.map((m) => m.name);
+  assert.ok(names.includes('auto-garch-family'), 'the three-way family selector is evaluated');
+  assert.ok(names.includes('auto-egarch'), 'the two-way EGARCH selector is evaluated');
+});
+
+test('walkForwardVolEval: an out-of-range significanceAlpha fails fast', () => {
+  const { series } = gbmSeries({ sigma: 0.02, length: 300, seed: 8 });
+  assert.throws(() => walkForwardVolEval(series, { significanceAlpha: 0 }), /significanceAlpha must be between 0 and 1/);
+  assert.throws(() => walkForwardVolEval(series, { significanceAlpha: 1 }), /significanceAlpha must be between 0 and 1/);
+});
+
+test('walkForwardVolEval: the gate is merged ONLY into the auto-* rows — fixed baselines are byte-identical gated vs ungated', () => {
+  const { series } = gbmSeries({ sigma: 0.02, length: 300, seed: 8 });
+  const ungated = walkForwardVolEval(series, { trainFraction: 0.6 });
+  const gated = walkForwardVolEval(series, { trainFraction: 0.6, significanceAlpha: 0.05 });
+  const uByName = Object.fromEntries(ungated.rows.map((r) => [r.name, r]));
+  const gByName = Object.fromEntries(gated.rows.map((r) => [r.name, r]));
+  // The gate is an auto-selector concept: the three fixed baselines must not
+  // shift by a single bit when it is engaged.
+  for (const fixed of ['garch-mle', 'gjr-garch-mle', 'egarch-mle']) {
+    assert.deepEqual(gByName[fixed], uByName[fixed], `${fixed} is untouched by the gate`);
+  }
+  // The auto rows are still present and scored (the gate keeps GARCH or an
+  // asymmetric branch; either way the row exists with a finite loss or an
+  // honest error record).
+  for (const autoName of ['auto-garch-family', 'auto-egarch']) {
+    assert.ok(gByName[autoName], `${autoName} row present under the gate`);
+  }
+});
+
+test('walkForwardVolEval: a valid significanceAlpha stays deterministic and reports the DM contest at that level', () => {
+  const preset = PRESETS.find(({ name }) => name === 'gbm-bull');
+  const { series } = generate(preset, { length: 120 });
+  const a = walkForwardVolEval(series, { trainFraction: 0.6, significanceAlpha: 0.01 });
+  const b = walkForwardVolEval(series, { trainFraction: 0.6, significanceAlpha: 0.01 });
+  assert.deepEqual(a, b, 'same series + alpha → identical table');
+  assert.ok(a.rows.some((r) => r.name === 'auto-garch-family'), 'auto-garch-family row present');
+  assert.ok(a.qlikeComparison, 'this fixture yields a complete selector contest');
+  assert.equal(a.qlikeComparison.alpha, 0.01, 'the DM report runs at the requested level');
+});
+
+test('walkForwardVolEval: the gate is off by default (table byte-identical with significanceAlpha=null)', () => {
+  const preset = PRESETS.find(({ name }) => name === 'gbm-bull');
+  const { series } = generate(preset, { length: 120 });
+  const ungated = walkForwardVolEval(series, { trainFraction: 0.6 });
+  const explicitNull = walkForwardVolEval(series, { trainFraction: 0.6, significanceAlpha: null });
+  assert.deepEqual(explicitNull, ungated, 'null alpha is the historic ungated behavior');
+  assert.equal(ungated.qlikeComparison.alpha, 0.05, 'ungated DM report keeps its 0.05 default');
+});
