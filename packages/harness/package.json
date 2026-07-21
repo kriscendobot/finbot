@@ -19,6 +19,9 @@
   "scripts": {
     "test": "node --test test/*.test.js"
   },
+  "dependencies": {
+    "ses": "^2.2.0"
+  },
   "engines": {
     "node": ">=20"
   }
