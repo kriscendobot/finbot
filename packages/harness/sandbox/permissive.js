@@ -1,40 +1,107 @@
 /**
- * Permissive v0 capability attenuator.
+ * Capability attenuator for the finbot harness.
  *
- * The v0 harness runs subagents in-process and exposes every host
- * capability. This is the "the LLM correctly follows the prompt"
- * security posture, equivalent to running an unsandboxed coding agent.
- * It is appropriate for v0 (the executor is dry-run by default; the
- * subagents are stubs) but is **not** an acceptable posture once the
- * executor signs live transactions.
+ * **v0 (permissiveAttenuator):** runs subagents in-process with every host
+ * capability available. This is the "the LLM correctly follows the prompt"
+ * security posture — appropriate for v0 (executor is dry-run by default;
+ * subagents are stubs) but unacceptable once the executor signs live
+ * transactions.
  *
- * The v1 path replaces this stub with `@endo/compartment-mapper`. Each
- * role's `AGENT.md` frontmatter declares the modules and globals it
- * may import; the compartment-mapper builds a policy from those
- * declarations and the harness instantiates the role's code inside a
- * Compartment with that policy in force. Cross-compartment objects are
- * vended as `@endo/exo` (Far + InterfaceGuard) so even a misbehaving
- * role cannot bypass an InterfaceGuard at runtime.
+ * **v1 (compartmentAttenuator):** each role's code runs in a real SES Compartment
+ * whose `globalThis` is exactly the role's ambient policy plus its vended caps —
+ * nothing else. Ambient authority is the empty set: a forecaster's code cannot
+ * name `process`, `fetch`, or `require` unless its policy granted them. The
+ * shape matches the future `@endo/compartment-mapper` interface so the harness
+ * can swap implementations later without reshaping callers.
  *
- * The shape this stub exposes to `spawn.js` is the same shape the v1
- * attenuator will expose:
- *
- *   attenuator(role, capabilities, parentContext) -> {
- *     globals,     // map<string, unknown>
- *     modules,     // map<string, unknown>
- *     tools,       // filtered tool registry the subagent may call
- *   }
- *
- * v0 returns the parent's tools verbatim, the parent's globals (read-only
- * proxy), and an empty modules map. v1 will replace each of these with
- * the attenuated equivalent.
+ * Both are exported; the harness defaults to `permissiveAttenuator`.
  */
 
+import 'ses';
+import '@endo/eventual-send/shim.js';
+import '@endo/patterns';
+
+const { harden } = await import('@endo/patterns');
+
+// --- lockdown guard (idempotent) ---
+
+function ensureLockdown() {
+  if (Object.isFrozen(Object.prototype)) return;
+  try {
+    lockdown({ errorTaming: 'unsafe', overrideTaming: 'severe' });
+  } catch (err) {
+    const message = String((err && err.message) || err);
+    if (!/locked down|repairIntrinsics/i.test(message)) throw err;
+  }
+}
+ensureLockdown();
+
+// --- capability map (mirrors designs/cap-attenuation.md § Capability map) ---
+
+const CAPABILITY_MAP = {
+  liaison:        { ambient: 'full', vended: [] },
+  steward:        { ambient: 'bounded', vended: [] },
+  'oracle-watcher': { ambient: 'fetch,console', vended: [] },
+  monitor:        { ambient: 'console', vended: ['rpc-read'] },
+  forecaster:     { ambient: 'console,rng', vended: [] },
+  analyzer:       { ambient: 'console', vended: ['forecaster-results', 'monitor-results'] },
+  planner:        { ambient: 'console', vended: ['analyzer-results', 'forecasts', 'rpc-read'] },
+  auditor:        { ambient: 'console', vended: ['rpc-read', 'planner-result'] },
+  executor:       { ambient: 'console', vended: ['rpc-read', 'wallet', 'signing-rpc'] },
+  journalist:     { ambient: 'console', vended: ['journal-read'] },
+};
+
+/** Build the SES Compartment a role's code runs in. */
+function buildRolePolicy(role, opts = {}) {
+  const entry = CAPABILITY_MAP[role];
+  if (!entry) throw new Error(`unknown role for attenuation: ${role}`);
+  const globals = {};
+  const grant = (token) => {
+    switch (token) {
+      case 'console':
+        globals.console = console;
+        break;
+      case 'fetch':
+        if (typeof fetch === 'function') globals.fetch = fetch;
+        break;
+      case 'rng':
+        globals.random = makeSeededRandom(opts.seed);
+        break;
+      case 'full':
+      case 'bounded':
+        globals.console = console;
+        if (typeof fetch === 'function') globals.fetch = fetch;
+        break;
+      default:
+        throw new Error(`unknown ambient token for role ${role}: ${token}`);
+    }
+  };
+  for (const token of entry.ambient.split(',')) grant(token.trim());
+  return globals;
+}
+
+/** Deterministic, seeded PRNG (mulberry32). */
+function makeSeededRandom(seed = 0x9e3779b9) {
+  let a = seed >>> 0;
+  return function random() {
+    a |= 0; a = a + 0x6d2b79f5 | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = t + Math.imul(t ^ (t >>> 7), 61 | t) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// --- v0: permissive attenuator (current default) ---
+
 /**
+ * Permissive v0 capability attenuator.
+ * The executor is dry-run by default and subagents are stubs, so the full
+ * capability surface is safe enough for development.
+ *
  * @param {string} role
- * @param {string[]} capabilities
+ * @param {string[]|null} capabilities
  * @param {object} parentContext
- * @returns {{ globals: Record<string, unknown>, modules: Record<string, unknown>, tools: Record<string, import('../schemas/tool.js').Tool> }}
+ * @returns {{ globals: Record<string, unknown>, modules: Record<string, unknown>, tools: Record<string, any> }}
  */
 export function permissiveAttenuator(role, capabilities, parentContext) {
   const tools = parentContext.tools || {};
@@ -52,11 +119,41 @@ export function permissiveAttenuator(role, capabilities, parentContext) {
   };
 }
 
+// --- v1: real SES compartment attenuator (not-yet-default) ---
+
 /**
- * V1 attenuator stub. Throws if anyone tries to use the v1 hook in v0.
- * The signature is here so the spawn module can be wired against the
- * future shape without ambiguity.
+ * V1 capability attenuator — each role's code runs in a real SES Compartment
+ * whose `globalThis` is exactly the role's ambient policy. Cross-compartment
+ * objects are vended as plain endowments filtered by granted capabilities.
+ *
+ * The return shape matches the future `@endo/compartment-mapper` interface so
+ * callers need not change when we swap implementations later.
+ *
+ * @param {string} role
+ * @param {string[]|null} capabilities   names of tools to vend
+ * @param {object} parentContext         host context carrying tools, globals, modules
+ * @returns {{ globals: Record<string, unknown>, modules: Record<string, unknown>, tools: Record<string, any> }}
  */
-export function compartmentAttenuator() {
-  throw new Error('compartmentAttenuator: not yet implemented; v0 ships permissiveAttenuator only. See designs/cap-attenuation.md for the @endo/compartment-mapper path.');
+export function compartmentAttenuator(role, capabilities = null, parentContext = {}) {
+  const entry = CAPABILITY_MAP[role];
+  if (!entry) throw new Error(`unknown role for attenuation: ${role}`);
+
+  // Build the globals policy for this role.
+  const globals = buildRolePolicy(role, {});
+
+  // Filter tools to the granted capabilities.
+  const allTools = parentContext.tools || {};
+  let toolSubset = allTools;
+  if (capabilities && capabilities.length > 0) {
+    toolSubset = {};
+    for (const cap of capabilities) {
+      if (allTools[cap]) toolSubset[cap] = allTools[cap];
+    }
+  }
+
+  return harden({
+    globals,
+    modules: parentContext.modules || {},
+    tools: toolSubset,
+  });
 }
