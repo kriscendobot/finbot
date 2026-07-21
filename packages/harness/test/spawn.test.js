@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { spawn } from '../spawn.js';
-import { permissiveAttenuator } from '../sandbox/permissive.js';
+import { compartmentAttenuator, permissiveAttenuator } from '../sandbox/permissive.js';
 import { toolResult } from '../schemas/tool.js';
 import { assertSpawnParams, SpawnParamsError } from '../schemas/spawn.js';
 
@@ -40,11 +40,22 @@ test('permissiveAttenuator: empty capabilities returns all tools', () => {
   assert.deepEqual(Object.keys(r.tools).sort(), ['a', 'b']);
 });
 
+test('compartmentAttenuator: returns a hardened role policy and capability subset', () => {
+  const tools = { a: { name: 'a' }, b: { name: 'b' } };
+  const result = compartmentAttenuator('planner', ['a'], { tools });
+  assert.deepEqual(Object.keys(result.tools), ['a']);
+  assert.equal(Object.isFrozen(result), true);
+  assert.equal(Object.isFrozen(result.globals), true);
+  assert.equal(Object.isFrozen(result.tools), true);
+  assert.equal(result.globals.console, console);
+  assert.equal(result.globals.fetch, undefined);
+});
+
 test('spawn: stub LLM invokes the first tool and completes', async () => {
   const tmp = await mkdtemp(path.join(tmpdir(), 'finbot-spawn-'));
   try {
-    await mkdir(path.join(tmp, 'roles', 'tester'), { recursive: true });
-    await writeFile(path.join(tmp, 'roles', 'tester', 'AGENT.md'), '# Tester role\n');
+    await mkdir(path.join(tmp, 'roles', 'planner'), { recursive: true });
+    await writeFile(path.join(tmp, 'roles', 'planner', 'AGENT.md'), '# Planner role\n');
     let invokedTool = null;
     const tools = {
       hello: {
@@ -57,7 +68,7 @@ test('spawn: stub LLM invokes the first tool and completes', async () => {
         },
       },
     };
-    const handle = await spawn({ role: 'tester', brief: 'do the thing' }, { finbotRoot: tmp, tools });
+    const handle = await spawn({ role: 'planner', brief: 'do the thing' }, { finbotRoot: tmp, tools });
     await handle.done;
     assert.equal(handle.status, 'completed');
     assert.ok(invokedTool, 'tool should have been invoked');
@@ -84,7 +95,7 @@ test('spawn: missing role file is tolerated', async () => {
         run: async () => toolResult(true, [{ type: 'text', text: 'ok' }]),
       },
     };
-    const handle = await spawn({ role: 'missing-role', brief: 'go' }, { finbotRoot: tmp, tools });
+    const handle = await spawn({ role: 'planner', brief: 'go' }, { finbotRoot: tmp, tools });
     await handle.done;
     assert.equal(handle.status, 'completed');
   } finally {
@@ -122,7 +133,7 @@ test('spawn: custom llm controls turn behavior', async () => {
         timestamp: Date.now(),
       };
     };
-    const handle = await spawn({ role: 'tester', brief: 'go', llm: customLlm }, { finbotRoot: tmp, tools });
+    const handle = await spawn({ role: 'planner', brief: 'go', llm: customLlm }, { finbotRoot: tmp, tools });
     await handle.done;
     assert.equal(handle.status, 'completed');
     assert.equal(handle.result.finalText, 'done thinking');
@@ -150,7 +161,7 @@ test('spawn: capability subset blocks unauthorized tool', async () => {
       return { role: 'assistant', content: [{ type: 'text', text: 'done' }], stopReason: 'end_turn', timestamp: Date.now() };
     };
     const handle = await spawn(
-      { role: 'tester', brief: 'go', capabilities: ['allowed'], llm },
+      { role: 'planner', brief: 'go', capabilities: ['allowed'], llm },
       { finbotRoot: tmp, tools },
     );
     await handle.done;

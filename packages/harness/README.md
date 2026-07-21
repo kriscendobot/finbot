@@ -1,7 +1,7 @@
 ---
 created: 2026-06-18
-updated: 2026-06-18
-author: architect
+updated: 2026-07-21
+author: builder, architect
 ---
 
 # @finbot/harness
@@ -13,9 +13,9 @@ The runtime harness for finbot. Implements:
 - A **tool-call surface** (`tools.js`) that loads `skills/<name>/SKILL.md`
   stubs as named tools an LLM-shaped agent (or a deterministic driver)
   can invoke.
-- A **subagent spawn** primitive (`spawn.js`) with a capability-
-  attenuation hook for the role's compartment (v0 is permissive; v1
-  uses `@endo/compartment-mapper`).
+- A **subagent spawn** primitive (`spawn.js`) with a hardened, role-scoped
+  capability policy by default. Legacy callers can explicitly inject the
+  permissive attenuator.
 - A **message bus** (`message-bus/`) over the journal: a per-role
   inbox and a job board, both serialized through git push.
 - An **observation recorder** (`observation/`) that writes journal
@@ -53,8 +53,9 @@ This runs one OODA tick:
 4. **Act.** If a planner proposal landed, post an `auditor` job;
    on signoff, post an `executor` job with the run's safety mode.
 
-Subagents are spawned via `spawn.js` per their role. Each subagent
-gets its own attenuated `globalThis` and its own tool registry slice.
+Subagents are spawned via `spawn.js` per their role. Each spawn gets a hardened
+role policy and its own tool registry slice. An archive-backed Compartment
+loader remains future work for role code that runs locally.
 
 ## Module map
 
@@ -69,7 +70,8 @@ gets its own attenuated `globalThis` and its own tool registry slice.
   loop).
 - `observation/record.js` — `recordEntry({ kind, role, body, ... })`.
 - `observation/monitor.js` — `monitorSubagent(handle)`.
-- `sandbox/permissive.js` — v0 cap attenuation (passes the world).
+- `sandbox/permissive.js` — role-scoped compartment policy (default) and the
+  explicit permissive legacy fallback.
 - `schemas/tool.js`, `schemas/spawn.js` — JSON-schema-shaped
   validators.
 
@@ -94,9 +96,9 @@ sign.
 
 ## Roadmap to v1
 
-- `sandbox/permissive.js` is a stub. v1 replaces it with a
-  `@endo/compartment-mapper` policy per role, sourced from each
-  role's `AGENT.md` frontmatter.
+- `sandbox/permissive.js` supplies the default hardened role policy and
+  tool slice. A later archive-backed `@endo/compartment-mapper` loader can
+  consume that policy when finbot executes role code locally.
 - The LLM-call boundary is deliberately abstracted (`spawn.js`
   accepts an `llm` function). v0 uses a deterministic stub that
   returns canned tool calls; v1 wires to the dispatching parent's

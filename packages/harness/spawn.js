@@ -9,14 +9,14 @@
  * v0 implements:
  *
  *   - Role file loading from `<finbotRoot>/roles/<role>/AGENT.md`.
- *   - Capability attenuation via the permissive v0 attenuator (or any
+ *   - Capability attenuation via the SES-backed compartment policy (or any
  *     injected attenuator).
  *   - A deterministic stub LLM that produces a canned tool-call
  *     sequence; tests inject their own `llm` to drive specific shapes.
  *
  * v1 replaces the stub LLM with the Anthropic / OpenAI / Ollama
  * provider per the project's references shelf, and replaces the
- * permissive attenuator with `@endo/compartment-mapper`.
+ * compartment policy with an archive-backed `@endo/compartment-mapper` loader.
  *
  * Pi-borrowed shape: the event stream `agent_start` / `turn_start` /
  * `message_start` / `tool_execution_start` / `tool_execution_end` /
@@ -29,7 +29,7 @@ import { promises as fs } from 'node:fs';
 import crypto from 'node:crypto';
 
 import { assertSpawnParams } from './schemas/spawn.js';
-import { permissiveAttenuator } from './sandbox/permissive.js';
+import { compartmentAttenuator } from './sandbox/permissive.js';
 
 /**
  * Spawn a subagent in this process.
@@ -40,7 +40,7 @@ import { permissiveAttenuator } from './sandbox/permissive.js';
  */
 export async function spawn(params, ctx) {
   assertSpawnParams(params);
-  const attenuator = params.attenuator || permissiveAttenuator;
+  const attenuator = params.attenuator || compartmentAttenuator;
   const llm = params.llm || stubLlm;
   const timeoutMs = params.timeoutMs || 10 * 60 * 1000;
 
