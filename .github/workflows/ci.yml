@@ -26,6 +26,7 @@ jobs:
           # declares node >=20; broadening to a 20.x/22.x matrix is a follow-up
           # once the suite is verified on the 20.x floor.
           node-version: '22'
-          cache: npm
-      - run: npm ci
+      # The repo ships no committed lockfile, so `npm install` (not `npm ci`)
+      # and no `cache: npm` — both require a lockfile in the tree.
+      - run: npm install
       - run: npm test
