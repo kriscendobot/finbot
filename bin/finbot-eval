@@ -7,6 +7,7 @@
  *   finbot-eval
  *   finbot-eval --horizon=32 --ensemble=300 --realizations=500
  *   finbot-eval --instrument-horizon=64 --instrument-realizations=400
+ *   finbot-eval --significance-alpha=0.05    # engage the DM QLIKE gate on the auto-* rows
  *
  * Flags:
  *   --horizon=N                forecast horizon (ticks), default 32
@@ -16,6 +17,8 @@
  *   --instrument-realizations=N  instrument-sweep realizations, default 400
  *   --vol-length=N             walk-forward vol-eval series length, default 256
  *   --vol-train-fraction=F     walk-forward train/test split, default 0.6
+ *   --significance-alpha=A     Diebold-Mariano QLIKE significance gate level for the
+ *                              auto-egarch / auto-garch-family rows (0<A<1); off by default
  *   --help / -h                print this and exit
  *
  * Everything is seeded; two runs with the same flags print identical
@@ -38,6 +41,7 @@ function parseArgs(argv) {
     instrumentRealizations: 400,
     volLength: 256,
     volTrainFraction: 0.6,
+    significanceAlpha: null,
   };
   for (const arg of argv) {
     const eq = arg.indexOf('=');
@@ -50,6 +54,7 @@ function parseArgs(argv) {
     else if (key === '--instrument-realizations') args.instrumentRealizations = Number(val);
     else if (key === '--vol-length') args.volLength = Number(val);
     else if (key === '--vol-train-fraction') args.volTrainFraction = Number(val);
+    else if (key === '--significance-alpha') args.significanceAlpha = Number(val);
     else if (key === '--help' || key === '-h') {
       // eslint-disable-next-line no-console
       console.log([
@@ -58,9 +63,22 @@ function parseArgs(argv) {
         'Usage:',
         '  finbot-eval [--horizon=N] [--ensemble=N] [--realizations=N]',
         '              [--instrument-horizon=N] [--instrument-realizations=N]',
+        '              [--vol-length=N] [--vol-train-fraction=F] [--significance-alpha=A]',
+        '',
+        '  --significance-alpha=A   engage the Diebold-Mariano QLIKE significance gate',
+        '                           (0<A<1) on the auto-egarch / auto-garch-family rows of',
+        '                           the walk-forward volatility table, so a margin-clearing',
+        '                           asymmetric branch must ALSO beat GARCH at level A before',
+        '                           it is selected. Omit (default) to leave the gate off and',
+        '                           the table byte-identical to the ungated evaluation.',
       ].join('\n'));
       process.exit(0);
     }
+  }
+  if (args.significanceAlpha != null && !(args.significanceAlpha > 0 && args.significanceAlpha < 1)) {
+    // eslint-disable-next-line no-console
+    console.error('finbot-eval: --significance-alpha must be between 0 and 1 (exclusive)');
+    process.exit(2);
   }
   return args;
 }
@@ -92,7 +110,10 @@ process.stdout.write(renderEvaluationText(result));
 const volLines = ['', '', '=== walk-forward volatility evaluation (one-step-ahead, OOS) ==='];
 for (const preset of PRESETS) {
   const { series } = generate(preset, { length: args.volLength });
-  const table = walkForwardVolEval(series, { trainFraction: args.volTrainFraction });
+  const table = walkForwardVolEval(series, {
+    trainFraction: args.volTrainFraction,
+    significanceAlpha: args.significanceAlpha != null ? args.significanceAlpha : undefined,
+  });
   volLines.push('', renderVolEvalText(table, { title: preset.name }));
 }
 process.stdout.write(`${volLines.join('\n')}\n`);

@@ -213,6 +213,7 @@ export const GARCH_MODELS = [
   { name: 'gjr-garch-mle', opts: { kind: 'gjr-garch', estimate: 'mle' } },
   { name: 'egarch-mle', opts: { kind: 'egarch', estimate: 'mle' } },
   { name: 'auto-egarch', opts: { kind: 'auto-egarch', estimate: 'mle' } },
+  { name: 'auto-garch-family', opts: { kind: 'auto-garch-family', estimate: 'mle' } },
 ];
 
 // These are the three independent candidates in the production
@@ -234,7 +235,8 @@ const AUTO_GARCH_FAMILY_ASYMMETRIC = ['gjr-garch-mle', 'egarch-mle'];
  * @param {number} [opts.ewmaLambda]      EWMA decay (default 0.94)
  * @param {number} [opts.rollingWindow]   rolling-var window (default 32)
  * @param {string} [opts.asset]           asset key for the frame form (default 'ASSET')
- * @param {object} [opts.dieboldMariano]  options for the asymmetric-vs-GARCH QLIKE test
+ * @param {number|null} [opts.significanceAlpha]  when set (0<α<1), engage the Diebold-Mariano QLIKE significance gate on the auto-* family rows and report the DM contest at this α; null (default) leaves the whole table byte-identical to the ungated behavior
+ * @param {object} [opts.dieboldMariano]  options for the asymmetric-vs-GARCH QLIKE test (overrides the α derived from significanceAlpha)
  * @returns {{
  *   trainN: number, testN: number,
  *   rows: Array<{ name: string, qlike: number, mse: number, n: number, family: string }>,
@@ -246,6 +248,17 @@ export function walkForwardVolEval(series, opts = {}) {
   const ewmaLambda = opts.ewmaLambda != null ? opts.ewmaLambda : 0.94;
   const rollingWindow = opts.rollingWindow != null ? opts.rollingWindow : 32;
   const asset = opts.asset || 'ASSET';
+  // Optional Diebold-Mariano significance gate for the auto-* family selectors
+  // (see designs/ensemble-forecasting.md § optional significance gate). Null
+  // (default) leaves every selection — and the whole table — byte-identical to
+  // the historic ungated behavior; when set it engages the gate on the
+  // auto-egarch / auto-garch-family rows and the DM report so the maintainer
+  // can evaluate the gate against the fixtures before deciding whether it
+  // should become the live default.
+  const significanceAlpha = opts.significanceAlpha != null ? opts.significanceAlpha : null;
+  if (significanceAlpha != null && !(significanceAlpha > 0 && significanceAlpha < 1)) {
+    throw new Error('walkForwardVolEval: significanceAlpha must be between 0 and 1');
+  }
 
   if (!Array.isArray(series) || series.length < 8) {
     throw new Error('walkForwardVolEval: need at least 8 price points');
@@ -276,9 +289,15 @@ export function walkForwardVolEval(series, opts = {}) {
   const qlikeLossesByName = new Map();
 
   for (const model of GARCH_MODELS) {
+    // The significance gate is an auto-selector concept; merge it only into the
+    // auto-* kinds so the fixed baselines (garch/gjr/egarch) stay untouched.
+    const isAuto = typeof model.opts.kind === 'string' && model.opts.kind.startsWith('auto-');
+    const modelOpts = significanceAlpha != null && isAuto
+      ? { ...model.opts, significanceAlpha }
+      : model.opts;
     let forecasts;
     try {
-      forecasts = fitAndForward(trainFrames, asset, testResiduals, model.opts);
+      forecasts = fitAndForward(trainFrames, asset, testResiduals, modelOpts);
     } catch (err) {
       // A non-stationary fit on a short/degenerate train window is a real
       // outcome; record it as a skipped row rather than aborting the table.
@@ -316,6 +335,11 @@ export function walkForwardVolEval(series, opts = {}) {
   const candidate = hasCompleteSelectorEvidence
     ? asymmetric.slice().sort((a, b) => a.qlike - b.qlike)[0]
     : null;
+  // Report the DM contest at the gate's α when one is requested (and no
+  // explicit DM options override it), so the reported significance verdict
+  // matches the level the selector gate is running at.
+  const dmOpts = opts.dieboldMariano
+    || (significanceAlpha != null ? { alpha: significanceAlpha } : undefined);
   const qlikeComparison = candidate
     ? {
         candidate: candidate.name,
@@ -323,7 +347,7 @@ export function walkForwardVolEval(series, opts = {}) {
         ...dieboldMariano(
           qlikeLossesByName.get(candidate.name),
           qlikeLossesByName.get(baseline.name),
-          opts.dieboldMariano,
+          dmOpts,
         ),
       }
     : null;
