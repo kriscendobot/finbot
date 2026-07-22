@@ -29,7 +29,7 @@ import { promises as fs } from 'node:fs';
 import crypto from 'node:crypto';
 
 import { assertSpawnParams } from './schemas/spawn.js';
-import { compartmentAttenuator } from './sandbox/permissive.js';
+import { compartmentAttenuator, runCompartmentLlm } from './sandbox/permissive.js';
 
 /**
  * Spawn a subagent in this process.
@@ -41,7 +41,9 @@ import { compartmentAttenuator } from './sandbox/permissive.js';
 export async function spawn(params, ctx) {
   assertSpawnParams(params);
   const attenuator = params.attenuator || compartmentAttenuator;
-  const llm = params.llm || stubLlm;
+  const llm = params.llm || (params.llmProgram
+    ? makeCompartmentLlm(params.role, params.llmProgram)
+    : stubLlm);
   const timeoutMs = params.timeoutMs || 10 * 60 * 1000;
 
   const id = shortId();
@@ -182,6 +184,30 @@ async function runLoop({ params, ctx, attenuated, roleBrief, events, llm }) {
 
   const finalText = extractFinalText(messages);
   return { messages, finalText };
+}
+
+/**
+ * Adapt a source-string role program to the harness LLM interface. The source
+ * runs in an SES Compartment and receives only a copied turn snapshot plus the
+ * names of tools selected by the attenuator. Host tool objects stay outside the
+ * compartment; the normal runLoop host boundary validates and invokes requests.
+ *
+ * @param {string} role
+ * @param {string} source
+ * @returns {Function}
+ */
+function makeCompartmentLlm(role, source) {
+  return (args) => runCompartmentLlm({
+    role,
+    source,
+    input: {
+      systemPrompt: args.systemPrompt,
+      messages: args.messages,
+      toolNames: Object.keys(args.tools || {}),
+      role: args.role,
+      turn: args.turn,
+    },
+  });
 }
 
 function composeSystemPrompt(role, roleBrief) {

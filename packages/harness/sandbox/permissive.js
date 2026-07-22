@@ -9,8 +9,9 @@
  *
  * **v1 (compartmentAttenuator):** supplies a hardened SES role policy whose
  * globals are exactly the role's ambient policy and whose tools are the vended
- * capability slice. An archive-backed Compartment runner can consume this
- * shape later without reshaping callers.
+ * capability slice. `runCompartmentLlm` executes an optional role-program in a
+ * real SES Compartment. The program receives immutable prompt data and names
+ * of its allowed tools, then returns a tool-call message for the host to run.
  *
  * Both are exported; the harness defaults to `compartmentAttenuator`. Callers
  * may opt into `permissiveAttenuator` only for legacy or test-double use.
@@ -151,4 +152,53 @@ export function compartmentAttenuator(role, capabilities = null, parentContext =
     modules: parentContext.modules || {},
     tools: toolSubset,
   });
+}
+
+/**
+ * Run a role program inside a real SES Compartment.
+ *
+ * The program source must evaluate to a function. That function receives a
+ * JSON-only immutable snapshot of one LLM turn and returns the assistant
+ * message for that turn. It receives tool names as data, not host tool
+ * objects: only the host performs a requested tool call after the result has
+ * crossed back over the compartment boundary.
+ *
+ * Keeping the capability invocation in the host is deliberate. A role program
+ * may decide which of its granted tools to request, but it cannot retain,
+ * mutate, or inspect a host tool object. Its process, filesystem, and network
+ * access therefore remain the explicit role-policy question, not an accidental
+ * consequence of the LLM adapter being JavaScript.
+ *
+ * @param {object} args
+ * @param {string} args.role
+ * @param {string} args.source JavaScript expression evaluating to `(input) => message`
+ * @param {object} args.input JSON-only data for one LLM turn
+ * @returns {Promise<object>} assistant message produced by the role program
+ */
+export async function runCompartmentLlm({ role, source, input }) {
+  if (typeof source !== 'string' || source.trim().length === 0) {
+    throw new TypeError('runCompartmentLlm.source must be a non-empty string');
+  }
+
+  // JSON serialization makes the data crossing into the compartment a copy,
+  // never a mutable host object graph. The prompt/messages/tool names are all
+  // data by contract, so reject values that do not meet that boundary.
+  let snapshot;
+  try {
+    snapshot = JSON.parse(JSON.stringify(input));
+  } catch (err) {
+    throw new TypeError(`runCompartmentLlm.input must be JSON-serializable: ${err.message}`);
+  }
+
+  const globals = buildRolePolicy(role, {});
+  const compartment = new Compartment({
+    globals: harden({ ...globals, input: harden(snapshot) }),
+    __options__: true,
+    name: `role-program:${role}`,
+  });
+  const program = compartment.evaluate(`(${source})`);
+  if (typeof program !== 'function') {
+    throw new TypeError('runCompartmentLlm.source must evaluate to a function');
+  }
+  return await program(snapshot);
 }

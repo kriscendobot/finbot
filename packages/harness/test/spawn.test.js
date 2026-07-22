@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { spawn } from '../spawn.js';
-import { compartmentAttenuator, permissiveAttenuator } from '../sandbox/permissive.js';
+import { compartmentAttenuator, permissiveAttenuator, runCompartmentLlm } from '../sandbox/permissive.js';
 import { toolResult } from '../schemas/tool.js';
 import { assertSpawnParams, SpawnParamsError } from '../schemas/spawn.js';
 
@@ -26,6 +26,13 @@ test('assertSpawnParams: rejects missing role', () => {
 
 test('assertSpawnParams: accepts a minimal valid params object', () => {
   assert.doesNotThrow(() => assertSpawnParams({ role: 'planner', brief: 'plan something' }));
+});
+
+test('assertSpawnParams: rejects simultaneous host and compartment LLMs', () => {
+  assert.throws(
+    () => assertSpawnParams({ role: 'planner', brief: 'plan something', llm: () => {}, llmProgram: '() => ({})' }),
+    SpawnParamsError,
+  );
 });
 
 test('permissiveAttenuator: returns capability subset', () => {
@@ -168,6 +175,62 @@ test('spawn: capability subset blocks unauthorized tool', async () => {
     const toolEnd = handle.events.find((e) => e.type === 'tool_execution_end');
     assert.equal(toolEnd.result.isError, true);
     assert.match(toolEnd.result.content[0].text, /not in subagent capability set/);
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test('runCompartmentLlm: a role program cannot reach host authority', async () => {
+  const message = await runCompartmentLlm({
+    role: 'planner',
+    source: '(input) => ({ role: "assistant", content: [{ type: "text", text: [typeof process, typeof require, typeof fetch, input.toolNames.join(",")].join("|") }], stopReason: "end_turn" })',
+    input: { toolNames: ['propose_rebalance'] },
+  });
+  assert.equal(message.content[0].text, 'undefined|undefined|undefined|propose_rebalance');
+});
+
+test('spawn: llmProgram runs inside a compartment and can request only vended tools', async () => {
+  const tmp = await mkdtemp(path.join(tmpdir(), 'finbot-spawn-'));
+  try {
+    let toolRuns = 0;
+    const tools = {
+      allowed: {
+        name: 'allowed',
+        description: '',
+        inputSchema: { type: 'object' },
+        run: async () => {
+          toolRuns += 1;
+          return toolResult(true, [{ type: 'text', text: 'ok' }]);
+        },
+      },
+      blocked: {
+        name: 'blocked',
+        description: '',
+        inputSchema: { type: 'object' },
+        run: async () => {
+          throw new Error('blocked tool must not run');
+        },
+      },
+    };
+    const llmProgram = `(input) => input.turn === 0
+      ? {
+        role: 'assistant',
+        content: [{ type: 'toolCall', id: 'compartment-tool-call', name: input.toolNames[0], arguments: {} }],
+        stopReason: 'tool_use',
+      }
+      : {
+        role: 'assistant',
+        content: [{ type: 'text', text: [typeof process, input.toolNames.join(',')].join('|') }],
+        stopReason: 'end_turn',
+      }`;
+    const handle = await spawn(
+      { role: 'planner', brief: 'go', capabilities: ['allowed'], llmProgram },
+      { finbotRoot: tmp, tools },
+    );
+    await handle.done;
+    assert.equal(handle.status, 'completed');
+    assert.equal(toolRuns, 1);
+    assert.equal(handle.result.finalText, 'undefined|allowed');
   } finally {
     await rm(tmp, { recursive: true, force: true });
   }
