@@ -59,6 +59,9 @@ node bin/finbot-ooda --seed=7 --json # structured result
 npm test                             # all tests across harness, simulator, pipeline
 ```
 
+`npm test` also runs in CI (`.github/workflows/ci.yml`) on every pull request and
+on pushes to `main`, so a red suite blocks a merge.
+
 The cycle above is pure automation (every stage a function call, no LLM). The
 **inference-driven path** is also wired: a real subagent can drive an OODA stage
 and call the deterministic pipeline functions as tools. `@finbot/harness`'s
