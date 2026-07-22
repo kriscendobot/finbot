@@ -7,6 +7,7 @@
  *     capabilities?: string[];   // names of tools the subagent may invoke
  *     attenuator?: Function;     // overrides the default compartment attenuator
  *     llm?: Function;            // overrides the default deterministic stub LLM
+ *     llmProgram?: string;       // SES-compartment source for one LLM turn
  *     timeoutMs?: number;        // default 10 minutes
  *     observationKind?: string;  // 'dispatch' by default
  *   }
@@ -59,6 +60,12 @@ export function assertSpawnParams(p) {
   }
   if (params.llm !== undefined && typeof params.llm !== 'function') {
     throw new SpawnParamsError('spawn.llm must be a function when provided');
+  }
+  if (params.llmProgram !== undefined && (typeof params.llmProgram !== 'string' || params.llmProgram.length === 0)) {
+    throw new SpawnParamsError('spawn.llmProgram must be a non-empty string when provided');
+  }
+  if (params.llm !== undefined && params.llmProgram !== undefined) {
+    throw new SpawnParamsError('spawn.llm and spawn.llmProgram are mutually exclusive');
   }
   if (params.timeoutMs !== undefined) {
     if (typeof params.timeoutMs !== 'number' || params.timeoutMs <= 0) {

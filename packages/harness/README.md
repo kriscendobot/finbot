@@ -1,6 +1,6 @@
 ---
 created: 2026-06-18
-updated: 2026-07-21
+updated: 2026-07-22
 author: builder, architect
 ---
 
@@ -54,8 +54,10 @@ This runs one OODA tick:
    on signoff, post an `executor` job with the run's safety mode.
 
 Subagents are spawned via `spawn.js` per their role. Each spawn gets a hardened
-role policy and its own tool registry slice. An archive-backed Compartment
-loader remains future work for role code that runs locally.
+role policy and its own tool registry slice. A caller that supplies `llmProgram`
+gets a real SES Compartment for its role JavaScript: the program receives only
+an immutable turn snapshot and its allowed tool names, then returns a requested
+tool call for the host to execute. The program never receives host tool objects.
 
 ## Module map
 
@@ -70,8 +72,9 @@ loader remains future work for role code that runs locally.
   loop).
 - `observation/record.js` — `recordEntry({ kind, role, body, ... })`.
 - `observation/monitor.js` — `monitorSubagent(handle)`.
-- `sandbox/permissive.js` — role-scoped compartment policy (default) and the
-  explicit permissive legacy fallback.
+- `sandbox/permissive.js` — role-scoped compartment policy, the
+  `runCompartmentLlm` SES runner for `llmProgram`, and the explicit permissive
+  legacy fallback.
 - `schemas/tool.js`, `schemas/spawn.js` — JSON-schema-shaped
   validators.
 
@@ -96,9 +99,11 @@ sign.
 
 ## Roadmap to v1
 
-- `sandbox/permissive.js` supplies the default hardened role policy and
-  tool slice. A later archive-backed `@endo/compartment-mapper` loader can
-  consume that policy when finbot executes role code locally.
+- `sandbox/permissive.js` supplies the default hardened role policy and tool
+  slice. `llmProgram` now runs local role JavaScript in an SES Compartment, with
+  prompt data copied across the boundary and tool calls mediated by the host. A
+  later archive-backed `@endo/compartment-mapper` loader can carry module graphs
+  into the same boundary.
 - The LLM-call boundary is deliberately abstracted (`spawn.js`
   accepts an `llm` function). v0 uses a deterministic stub that
   returns canned tool calls; v1 wires to the dispatching parent's

@@ -1,7 +1,7 @@
 ---
 created: 2026-06-17
-updated: 2026-06-17
-author: architect
+updated: 2026-07-22
+author: builder, architect
 status: stub
 ---
 
@@ -107,3 +107,29 @@ The inference-driven OODA axis is now **complete end to end**: the **ACT stage's
 - **Chained in the bin.** `bin/finbot-dispatch` now drives OBSERVE → ORIENT → DECIDE → AUDIT → ACT entirely by inference in one command (verified `seed=7` → 1-step proposal `hash=7c90a9a577e7…`, verdict **approved**, dry-run 1 step simulated, post-equity 1085.91, **WALLET TOUCHED: false**). The bin exits non-zero if the executor dispatch ever reports `walletTouched != false` (the load-bearing safety check).
 
 What remains on the axis: the **live executor** — the first paper-wallet/test-net run — which is not an inference-wiring increment but a cap-attenuation Phase 2 decision (choose the CapTP transport, replace the `spawnSigningWorker` stub, and gate behind an explicit maintainer `live_authorized: true`). Every OODA stage that can run read-only now runs by inference; the remaining boundary is authorization, not code.
+
+## Notes from the field (2026-07-22, harness role-program compartment)
+
+The harness previously defaulted to a role-scoped policy and tool slice, but
+its `llm` adapter remained a host-realm JavaScript function. That was correctly
+described as a policy, not as a sandbox. The new optional `llmProgram` dispatch
+form makes the boundary executable for locally supplied role JavaScript.
+
+- `spawn({ llmProgram })` evaluates the source as a function in a fresh SES
+  `Compartment` for each turn. It receives only a JSON-copied, hardened turn
+  snapshot: system prompt, prior messages, role, turn count, and the names of
+  the tools selected by attenuation.
+- The program receives tool names, never tool objects. It returns an ordinary
+  requested tool-call message, which crosses back to the host loop. The host
+  then resolves the name against the attenuated registry and invokes the tool.
+  The role program cannot retain, mutate, or inspect a host capability.
+- The new harness tests prove a planner role program cannot name `process`,
+  `require`, or ungranted `fetch`, and that a program can request its one
+  granted tool while a blocked tool remains unreachable. This is an actual SES
+  execution path, not an assertion that a policy object could eventually be
+  consumed by one.
+
+The default deterministic stub and provider adapters remain host functions.
+They are trusted adapters, not a claim that remote LLM output is JavaScript in a
+Compartment. Loading archived role module graphs and the live executor's
+separate CapTP worker remain the next larger boundaries.
