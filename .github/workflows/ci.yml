@@ -1,0 +1,32 @@
+name: ci
+
+# Gate every PR and every push to main on the package test suite. Until now the
+# fork had no CI, so merges relied on a human running `npm test` locally; this
+# workflow makes that check automatic so a red suite blocks a merge.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # Pinned to the version the suite is verified green on. `engines`
+          # declares node >=20; broadening to a 20.x/22.x matrix is a follow-up
+          # once the suite is verified on the 20.x floor.
+          node-version: '22'
+      # The repo ships no committed lockfile, so `npm install` (not `npm ci`)
+      # and no `cache: npm` — both require a lockfile in the tree.
+      - run: npm install
+      - run: npm test
