@@ -133,3 +133,30 @@ The default deterministic stub and provider adapters remain host functions.
 They are trusted adapters, not a claim that remote LLM output is JavaScript in a
 Compartment. Loading archived role module graphs and the live executor's
 separate CapTP worker remain the next larger boundaries.
+
+## Notes from the field (2026-07-25, the attenuator is the sole globals source)
+
+A review of the role-program compartment surfaced a latent bypass: `spawn()`
+honored a caller-supplied `params.attenuator` for the *tool* slice, but
+`runCompartmentLlm` re-derived the compartment's ambient globals from
+`CAPABILITY_MAP` directly (`buildRolePolicy(role)`), ignoring the policy the
+attenuator returned. A custom or narrowed attenuator could therefore restrict a
+role program's tools but **not** its ambient authority — the declared narrowing
+point was not the only narrowing point.
+
+- `spawn()` now threads the attenuated `globals` policy into the compartment LLM
+  adapter, and `runCompartmentLlm({ …, globals })` builds the Compartment from
+  exactly that policy. The compartment no longer consults `CAPABILITY_MAP` behind
+  the attenuator's back. Direct callers that omit `globals` still fall back to the
+  role's default policy for convenience; the spawn path always supplies it.
+- `test/spawn.test.js` proves a custom attenuator that narrows a role's ambient
+  globals to the empty set (plus a marker) is honored by the executing
+  compartment: the role program sees the injected marker and **not** the role's
+  default `console`. The test fails against the pre-fix path (which still exposed
+  `console`), so it is a live regression guard, not a tautology.
+
+What remains on this axis (surfaced by the same review, deferred as they need a
+design decision rather than a mechanical fix): the vended `fetch` is unbounded to
+any origin where the capability map specifies a **pinned** `fetch`, and the
+`bounded` ambient token is currently identical to `full`. Both belong to a
+follow-on that decides the pin set and the concrete `bounded` surface.

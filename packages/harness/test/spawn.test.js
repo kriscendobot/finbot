@@ -293,6 +293,37 @@ test('spawn: llmProgram runs inside a compartment and can request only vended to
   }
 });
 
+test('spawn: a custom attenuator is the sole source of a compartment program\'s globals', async () => {
+  const tmp = await mkdtemp(path.join(tmpdir(), 'finbot-spawn-'));
+  try {
+    // This attenuator narrows the role's ambient globals to the empty set and
+    // injects a distinctive marker. If the compartment path honors the
+    // attenuator (the declared narrowing point being the sole one), the program
+    // sees the marker and NOT the role's default `console`. If it re-derived the
+    // policy from CAPABILITY_MAP behind the attenuator's back, it would still
+    // see `console` and never the marker.
+    const narrowingAttenuator = () => ({
+      globals: { attenuatorMarker: 'narrowed' },
+      modules: {},
+      tools: {},
+    });
+    const llmProgram = `(input) => ({
+      role: 'assistant',
+      content: [{ type: 'text', text: [typeof console, typeof globalThis.attenuatorMarker].join('|') }],
+      stopReason: 'end_turn',
+    })`;
+    const handle = await spawn(
+      { role: 'planner', brief: 'go', llmProgram, attenuator: narrowingAttenuator },
+      { finbotRoot: tmp, tools: {} },
+    );
+    await handle.done;
+    assert.equal(handle.status, 'completed');
+    assert.equal(handle.result.finalText, 'undefined|string');
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
 test('spawn: unavailable compartment-requested tool is returned as a tool error', async () => {
   const llmProgram = `() => ({
     role: 'assistant',

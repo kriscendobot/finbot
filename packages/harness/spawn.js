@@ -137,6 +137,7 @@ async function runLoop({ params, ctx, attenuated, roleBrief, events, llm }) {
       systemPrompt,
       messages,
       tools: attenuated.tools,
+      globals: attenuated.globals,
       role: params.role,
       turn,
     });
@@ -192,6 +193,10 @@ async function runLoop({ params, ctx, attenuated, roleBrief, events, llm }) {
  * names of tools selected by the attenuator. Host tool objects stay outside the
  * compartment; the normal runLoop host boundary validates and invokes requests.
  *
+ * The compartment's ambient globals come from `args.globals` — the policy the
+ * attenuator produced for this spawn — so a caller-supplied attenuator narrows
+ * the role program's ambient authority, not just its tool slice.
+ *
  * @param {string} role
  * @param {string} source
  * @returns {Function}
@@ -200,6 +205,7 @@ function makeCompartmentLlm(role, source) {
   return (args) => runCompartmentLlm({
     role,
     source,
+    globals: args.globals,
     input: {
       systemPrompt: args.systemPrompt,
       messages: args.messages,

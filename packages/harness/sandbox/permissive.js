@@ -195,18 +195,27 @@ export function compartmentAttenuator(role, capabilities = null, parentContext =
  * @param {string} args.role
  * @param {string} args.source JavaScript expression evaluating to `(input) => message`
  * @param {object} args.input JSON-only data for one LLM turn
+ * @param {object} [args.globals] the attenuated ambient-globals policy; when
+ *   omitted, the role's default policy is derived for direct-caller convenience
  * @returns {Promise<object>} assistant message produced by the role program
  */
-export async function runCompartmentLlm({ role, source, input }) {
+export async function runCompartmentLlm({ role, source, input, globals }) {
   if (typeof source !== 'string' || source.trim().length === 0) {
     throw new TypeError('runCompartmentLlm.source must be a non-empty string');
   }
 
   const snapshot = copyJsonData(input, 'runCompartmentLlm.input');
 
-  const globals = buildRolePolicy(role, {});
+  // The attenuator is the SOLE source of a role program's ambient globals. When
+  // spawn() wires this adapter it threads the already-attenuated `globals`
+  // policy through, so a caller-supplied attenuator that narrows globals is
+  // honored here — the compartment must never re-derive authority from
+  // CAPABILITY_MAP behind the attenuator's back (that would make the declared
+  // narrowing point not the only narrowing point). Direct callers that omit
+  // `globals` fall back to the role's default policy for convenience.
+  const rolePolicy = globals || buildRolePolicy(role, {});
   const compartment = new Compartment({
-    globals: harden({ ...globals }),
+    globals: harden({ ...rolePolicy }),
     __options__: true,
     name: `role-program:${role}`,
   });
