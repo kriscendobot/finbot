@@ -24,7 +24,10 @@ import 'ses';
 function ensureLockdown() {
   if (Object.isFrozen(Object.prototype)) return;
   try {
-    lockdown({ errorTaming: 'unsafe', overrideTaming: 'severe' });
+    // Role programs are untrusted. Do not expose host error details to them.
+    // Keeping SES's causal console would replace and then freeze the host
+    // console. Retain the host console here and vend frozen wrappers below.
+    lockdown({ errorTaming: 'safe', consoleTaming: 'unsafe', overrideTaming: 'severe' });
   } catch (err) {
     const message = String((err && err.message) || err);
     if (!/locked down|repairIntrinsics/i.test(message)) throw err;
@@ -55,18 +58,18 @@ function buildRolePolicy(role, opts = {}) {
   const grant = (token) => {
     switch (token) {
       case 'console':
-        globals.console = console;
+        globals.console = makeConsole();
         break;
       case 'fetch':
-        if (typeof fetch === 'function') globals.fetch = fetch;
+        if (typeof fetch === 'function') globals.fetch = makeFetch();
         break;
       case 'rng':
         globals.random = makeSeededRandom(opts.seed);
         break;
       case 'full':
       case 'bounded':
-        globals.console = console;
-        if (typeof fetch === 'function') globals.fetch = fetch;
+        globals.console = makeConsole();
+        if (typeof fetch === 'function') globals.fetch = makeFetch();
         break;
       default:
         throw new Error(`unknown ambient token for role ${role}: ${token}`);
@@ -74,6 +77,25 @@ function buildRolePolicy(role, opts = {}) {
   };
   for (const token of entry.ambient.split(',')) grant(token.trim());
   return globals;
+}
+
+/**
+ * Vend wrappers, not the live host console. Hardening an endowment must never
+ * freeze or otherwise alter host process state.
+ */
+function makeConsole() {
+  const attenuated = {};
+  for (const name of ['debug', 'error', 'info', 'log', 'warn']) {
+    if (typeof console[name] === 'function') {
+      attenuated[name] = (...args) => console[name](...args);
+    }
+  }
+  return harden(attenuated);
+}
+
+/** Vend a callable capability without hardening the live host fetch function. */
+function makeFetch() {
+  return harden((...args) => fetch(...args));
 }
 
 /** Deterministic, seeded PRNG (mulberry32). */
@@ -180,25 +202,108 @@ export async function runCompartmentLlm({ role, source, input }) {
     throw new TypeError('runCompartmentLlm.source must be a non-empty string');
   }
 
-  // JSON serialization makes the data crossing into the compartment a copy,
-  // never a mutable host object graph. The prompt/messages/tool names are all
-  // data by contract, so reject values that do not meet that boundary.
-  let snapshot;
-  try {
-    snapshot = JSON.parse(JSON.stringify(input));
-  } catch (err) {
-    throw new TypeError(`runCompartmentLlm.input must be JSON-serializable: ${err.message}`);
-  }
+  const snapshot = copyJsonData(input, 'runCompartmentLlm.input');
 
   const globals = buildRolePolicy(role, {});
   const compartment = new Compartment({
-    globals: harden({ ...globals, input: harden(snapshot) }),
+    globals: harden({ ...globals }),
     __options__: true,
     name: `role-program:${role}`,
   });
-  const program = compartment.evaluate(`(${source})`);
+  let program;
+  try {
+    program = compartment.evaluate(`(${source})`);
+  } catch (err) {
+    throw new TypeError(`runCompartmentLlm.source must be valid JavaScript: ${err.message}`);
+  }
   if (typeof program !== 'function') {
     throw new TypeError('runCompartmentLlm.source must evaluate to a function');
   }
-  return await program(snapshot);
+  // A compartment object is not safe for the host to consume directly. Copy
+  // it to host-owned JSON data, then validate the message before spawn.js sees
+  // its content, tool names, or tool arguments.
+  const result = await program(harden(snapshot));
+  return validateAssistantMessage(copyJsonData(result, 'runCompartmentLlm.result'));
+}
+
+/**
+ * Copy a JSON data graph across the host/compartment boundary. Accessors and
+ * symbols are rejected rather than invoked or silently dropped. BigInt is not
+ * part of the wire format, so amount-bearing messages fail explicitly instead
+ * of relying on engine-specific JSON.stringify wording.
+ */
+function copyJsonData(value, label) {
+  try {
+    assertJsonData(value, label);
+    const encoded = JSON.stringify(value, (_key, item) => {
+      if (typeof item === 'bigint') {
+        throw new TypeError('BigInt is not supported by the JSON boundary');
+      }
+      return item;
+    });
+    if (typeof encoded !== 'string') throw new TypeError('value does not encode as JSON');
+    return JSON.parse(encoded);
+  } catch (err) {
+    const message = String((err && err.message) || err);
+    throw new TypeError(`${label} must be JSON-serializable: ${message}`);
+  }
+}
+
+/** Reject accessor, proxy-shaped, and symbol-bearing values before copying. */
+function assertJsonData(value, label, seen = new WeakSet()) {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throw new TypeError(`${label} must contain finite numbers`);
+    return;
+  }
+  if (typeof value === 'bigint') {
+    throw new TypeError('BigInt is not supported by the JSON boundary');
+  }
+  if (typeof value !== 'object') {
+    throw new TypeError(`${label} must contain JSON values`);
+  }
+  if (seen.has(value)) return;
+  seen.add(value);
+  if (Object.getOwnPropertySymbols(value).length > 0) {
+    throw new TypeError(`${label} must not contain symbol properties`);
+  }
+  for (const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(value))) {
+    if (!Object.hasOwn(descriptor, 'value')) {
+      throw new TypeError(`${label}.${key} must not be an accessor property`);
+    }
+    assertJsonData(descriptor.value, `${label}.${key}`, seen);
+  }
+}
+
+/** Validate the data-only assistant-message protocol at the host boundary. */
+function validateAssistantMessage(message) {
+  if (message === null || typeof message !== 'object' || Array.isArray(message)) {
+    throw new TypeError('runCompartmentLlm.result must be an assistant message object');
+  }
+  if (message.role !== 'assistant') {
+    throw new TypeError('runCompartmentLlm.result.role must be "assistant"');
+  }
+  if (!Array.isArray(message.content)) {
+    throw new TypeError('runCompartmentLlm.result.content must be an array');
+  }
+  for (const [index, item] of message.content.entries()) {
+    if (item === null || typeof item !== 'object' || Array.isArray(item) || typeof item.type !== 'string') {
+      throw new TypeError(`runCompartmentLlm.result.content[${index}] must be a typed object`);
+    }
+    if (item.type === 'text' && typeof item.text !== 'string') {
+      throw new TypeError(`runCompartmentLlm.result.content[${index}].text must be a string`);
+    }
+    if (item.type === 'toolCall') {
+      if (typeof item.id !== 'string' || typeof item.name !== 'string') {
+        throw new TypeError(`runCompartmentLlm.result.content[${index}] must name a tool and id`);
+      }
+      if (item.arguments !== undefined && (item.arguments === null || typeof item.arguments !== 'object' || Array.isArray(item.arguments))) {
+        throw new TypeError(`runCompartmentLlm.result.content[${index}].arguments must be an object`);
+      }
+    }
+  }
+  if (message.stopReason !== undefined && typeof message.stopReason !== 'string') {
+    throw new TypeError('runCompartmentLlm.result.stopReason must be a string when provided');
+  }
+  return harden(message);
 }

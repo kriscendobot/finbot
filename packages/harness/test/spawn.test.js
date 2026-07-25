@@ -35,6 +35,13 @@ test('assertSpawnParams: rejects simultaneous host and compartment LLMs', () => 
   );
 });
 
+test('assertSpawnParams: rejects whitespace-only compartment programs', () => {
+  assert.throws(
+    () => assertSpawnParams({ role: 'planner', brief: 'plan something', llmProgram: ' \n\t ' }),
+    SpawnParamsError,
+  );
+});
+
 test('permissiveAttenuator: returns capability subset', () => {
   const tools = { a: { name: 'a' }, b: { name: 'b' }, c: { name: 'c' } };
   const r = permissiveAttenuator('planner', ['a', 'c'], { tools });
@@ -54,8 +61,11 @@ test('compartmentAttenuator: returns a hardened role policy and capability subse
   assert.equal(Object.isFrozen(result), true);
   assert.equal(Object.isFrozen(result.globals), true);
   assert.equal(Object.isFrozen(result.tools), true);
-  assert.equal(result.globals.console, console);
+  assert.notEqual(result.globals.console, console);
+  assert.equal(typeof result.globals.console.log, 'function');
   assert.equal(result.globals.fetch, undefined);
+  assert.equal(Object.isFrozen(console), false);
+  assert.equal(Object.isFrozen(fetch), false);
 });
 
 test('spawn: stub LLM invokes the first tool and completes', async () => {
@@ -183,10 +193,57 @@ test('spawn: capability subset blocks unauthorized tool', async () => {
 test('runCompartmentLlm: a role program cannot reach host authority', async () => {
   const message = await runCompartmentLlm({
     role: 'planner',
-    source: '(input) => ({ role: "assistant", content: [{ type: "text", text: [typeof process, typeof require, typeof fetch, input.toolNames.join(",")].join("|") }], stopReason: "end_turn" })',
+    source: '(input) => ({ role: "assistant", content: [{ type: "text", text: [typeof process, typeof require, typeof fetch, typeof globalThis.input, input.toolNames.join(",")].join("|") }], stopReason: "end_turn" })',
     input: { toolNames: ['propose_rebalance'] },
   });
-  assert.equal(message.content[0].text, 'undefined|undefined|undefined|propose_rebalance');
+  assert.equal(message.content[0].text, 'undefined|undefined|undefined|undefined|propose_rebalance');
+});
+
+test('runCompartmentLlm: rejects non-function and invalid source', async () => {
+  await assert.rejects(
+    runCompartmentLlm({ role: 'planner', source: '({})', input: {} }),
+    /must evaluate to a function/,
+  );
+  await assert.rejects(
+    runCompartmentLlm({ role: 'planner', source: '(', input: {} }),
+    /must be valid JavaScript/,
+  );
+});
+
+test('runCompartmentLlm: reports non-serializable input and BigInt precisely', async () => {
+  await assert.rejects(
+    runCompartmentLlm({ role: 'planner', source: '(input) => input', input: { amount: 1n } }),
+    /input must be JSON-serializable: BigInt is not supported by the JSON boundary/,
+  );
+  const cyclic = {};
+  cyclic.self = cyclic;
+  await assert.rejects(
+    runCompartmentLlm({ role: 'planner', source: '(input) => input', input: cyclic }),
+    /input must be JSON-serializable/,
+  );
+});
+
+test('runCompartmentLlm: rejects malformed and accessor-shaped returns at the boundary', async () => {
+  await assert.rejects(
+    runCompartmentLlm({ role: 'planner', source: '() => ({ role: "system" })', input: {} }),
+    /result.role must be "assistant"/,
+  );
+  await assert.rejects(
+    runCompartmentLlm({
+      role: 'planner',
+      source: '() => ({ role: "assistant", get content() { return []; } })',
+      input: {},
+    }),
+    /accessor property/,
+  );
+  await assert.rejects(
+    runCompartmentLlm({
+      role: 'planner',
+      source: '() => new Proxy({}, { ownKeys() { throw Error("proxy trap"); } })',
+      input: {},
+    }),
+    /result must be JSON-serializable: proxy trap/,
+  );
 });
 
 test('spawn: llmProgram runs inside a compartment and can request only vended tools', async () => {
@@ -234,4 +291,21 @@ test('spawn: llmProgram runs inside a compartment and can request only vended to
   } finally {
     await rm(tmp, { recursive: true, force: true });
   }
+});
+
+test('spawn: unavailable compartment-requested tool is returned as a tool error', async () => {
+  const llmProgram = `() => ({
+    role: 'assistant',
+    content: [{ type: 'toolCall', id: 'missing-tool', name: 'missing', arguments: {} }],
+    stopReason: 'tool_use',
+  })`;
+  const handle = await spawn(
+    { role: 'planner', brief: 'go', llmProgram },
+    { tools: {} },
+  );
+  await handle.done;
+  assert.equal(handle.status, 'completed');
+  const toolEnd = handle.events.find((event) => event.type === 'tool_execution_end');
+  assert.equal(toolEnd.result.isError, true);
+  assert.match(toolEnd.result.content[0].text, /missing not in subagent capability set/);
 });

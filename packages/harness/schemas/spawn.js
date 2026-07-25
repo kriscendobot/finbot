@@ -61,7 +61,7 @@ export function assertSpawnParams(p) {
   if (params.llm !== undefined && typeof params.llm !== 'function') {
     throw new SpawnParamsError('spawn.llm must be a function when provided');
   }
-  if (params.llmProgram !== undefined && (typeof params.llmProgram !== 'string' || params.llmProgram.length === 0)) {
+  if (params.llmProgram !== undefined && (typeof params.llmProgram !== 'string' || params.llmProgram.trim().length === 0)) {
     throw new SpawnParamsError('spawn.llmProgram must be a non-empty string when provided');
   }
   if (params.llm !== undefined && params.llmProgram !== undefined) {
