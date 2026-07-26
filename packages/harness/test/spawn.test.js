@@ -244,6 +244,20 @@ test('runCompartmentLlm: a role program cannot reach host authority', async () =
   assert.equal(message.content[0].text, 'undefined|undefined|undefined|undefined|propose_rebalance');
 });
 
+test('runCompartmentLlm: normalizes a compartment assistant message to host transcript shape', async () => {
+  const started = Date.now();
+  const message = await runCompartmentLlm({
+    role: 'planner',
+    source: '() => ({ role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "end_turn", timestamp: 0 })',
+    input: {},
+  });
+  assert.equal(message.role, 'assistant');
+  assert.equal(message.stopReason, 'end_turn');
+  assert.equal(message.timestamp >= started, true);
+  assert.notEqual(message.timestamp, 0);
+  assert.equal(Object.isFrozen(message), true);
+});
+
 test('runCompartmentLlm: rejects non-function and invalid source', async () => {
   await assert.rejects(
     runCompartmentLlm({ role: 'planner', source: '({})', input: {} }),

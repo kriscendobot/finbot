@@ -235,7 +235,9 @@ export async function runCompartmentLlm({ role, source, input, globals }) {
   // it to host-owned JSON data, then validate the message before spawn.js sees
   // its content, tool names, or tool arguments.
   const result = await program(harden(snapshot));
-  return validateAssistantMessage(copyJsonData(result, 'runCompartmentLlm.result'));
+  return harden(normalizeAssistantMessage(
+    validateAssistantMessage(copyJsonData(result, 'runCompartmentLlm.result')),
+  ));
 }
 
 /**
@@ -317,5 +319,10 @@ function validateAssistantMessage(message) {
   if (message.stopReason !== undefined && typeof message.stopReason !== 'string') {
     throw new TypeError('runCompartmentLlm.result.stopReason must be a string when provided');
   }
-  return harden(message);
+  return message;
+}
+
+/** Add host-owned transcript fields before the message is hardened. */
+function normalizeAssistantMessage(message) {
+  return { ...message, timestamp: Date.now() };
 }
