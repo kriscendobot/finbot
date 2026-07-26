@@ -24,10 +24,13 @@ import 'ses';
 function ensureLockdown() {
   if (Object.isFrozen(Object.prototype)) return;
   try {
-    // Role programs are untrusted. Do not expose host error details to them.
+    // This module also runs host orchestration, which retains diagnostic stacks
+    // on SpawnHandle failures. `safe` clears those stacks process-wide. Role
+    // programs receive only copied protocol data, and host failures are reduced
+    // to a generic tool result before they can re-enter a later role turn.
     // Keeping SES's causal console would replace and then freeze the host
     // console. Retain the host console here and vend frozen wrappers below.
-    lockdown({ errorTaming: 'safe', consoleTaming: 'unsafe', overrideTaming: 'severe' });
+    lockdown({ errorTaming: 'unsafe', consoleTaming: 'unsafe', overrideTaming: 'severe' });
   } catch (err) {
     const message = String((err && err.message) || err);
     if (!/locked down|repairIntrinsics/i.test(message)) throw err;

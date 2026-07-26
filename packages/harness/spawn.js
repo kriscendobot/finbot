@@ -166,7 +166,15 @@ async function runLoop({ params, ctx, attenuated, roleBrief, events, llm }) {
         try {
           result = await tool.run(tc.arguments || {}, { role: params.role });
         } catch (err) {
-          result = { ok: false, content: [{ type: 'text', text: String(err.message || err) }] };
+          // A tool runs with host authority. Its exception can contain paths,
+          // credentials, or implementation details, so preserve it only in host
+          // diagnostics and return an opaque protocol failure to the role.
+          events.push({
+            type: 'tool_execution_error',
+            toolCall: tc,
+            error: { message: String(err.message || err), stack: err.stack },
+          });
+          result = { ok: false, content: [{ type: 'text', text: 'tool execution failed' }] };
         }
       }
       const toolResultMessage = {

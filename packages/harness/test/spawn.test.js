@@ -190,6 +190,51 @@ test('spawn: capability subset blocks unauthorized tool', async () => {
   }
 });
 
+test('spawn: retains host error stacks without returning tool diagnostics to a role', async () => {
+  const hostDiagnostic = 'host-only diagnostic detail';
+  const llm = async ({ turn, messages }) => {
+    if (turn === 0) {
+      return {
+        role: 'assistant',
+        content: [{ type: 'toolCall', id: 'failing-tool', name: 'failing', arguments: {} }],
+        stopReason: 'tool_use',
+      };
+    }
+    return {
+      role: 'assistant',
+      content: [{ type: 'text', text: messages.at(-1).content[0].text }],
+      stopReason: 'end_turn',
+    };
+  };
+  const handle = await spawn(
+    { role: 'planner', brief: 'go', llm },
+    {
+      tools: {
+        failing: {
+          name: 'failing',
+          run: async () => {
+            throw new Error(hostDiagnostic);
+          },
+        },
+      },
+    },
+  );
+  await handle.done;
+  assert.equal(handle.status, 'completed');
+  assert.equal(handle.result.finalText, 'tool execution failed');
+  assert.doesNotMatch(handle.result.finalText, new RegExp(hostDiagnostic));
+  const toolError = handle.events.find((event) => event.type === 'tool_execution_error');
+  assert.match(toolError.error.stack, /host-only diagnostic detail/);
+
+  const failedLlm = async () => {
+    throw new Error(hostDiagnostic);
+  };
+  const failedHandle = await spawn({ role: 'planner', brief: 'go', llm: failedLlm }, { tools: {} });
+  await failedHandle.done;
+  assert.equal(failedHandle.status, 'errored');
+  assert.match(failedHandle.error.stack, /host-only diagnostic detail/);
+});
+
 test('runCompartmentLlm: a role program cannot reach host authority', async () => {
   const message = await runCompartmentLlm({
     role: 'planner',
