@@ -68,24 +68,45 @@ and call the deterministic pipeline functions as tools. `@finbot/harness`'s
 subagent `spawn` takes an injected `llm` — the deterministic stub stays the
 default so tests stay offline, and `harness.providers.makeAnthropicLlm()` is the
 real provider (Anthropic, `claude-opus-4-8`, via `fetch`, no new dependency).
-`@finbot/pipeline` exposes the orient-phase scorers as harness tools
-(`pipelineToolRegistry`) and `dispatchAnalyzer` spawns the analyzer over an
-oracle-watcher observation so it reasons over the opportunities and **calls
-`score_opportunities` (the deterministic `analyze`) as a tool**. The DECIDE
-stage is wired the same way: `plannerToolRegistry` exposes the ymax-shaped
-planner as `propose_rebalance`, and `dispatchPlanner` spawns the planner over
-the analyzer's target allocation so it reasons then **calls `propose_rebalance`
-(the deterministic `plan`) as a tool** to emit the hashed proposal. The
-inference path reproduces the headless planner's `proposal_hash` byte-for-byte:
+`@finbot/pipeline` exposes each stage's deterministic function as a harness tool
+and ships a `dispatch<Role>` that spawns that role as a subagent which **reasons
+in natural language then calls the deterministic tool** — so **every** OODA stage
+now has an inference-driven form, not only the middle two:
+
+- **OBSERVE** — `observerToolRegistry` exposes the deviation detector as
+  `observe_opportunities`, and `dispatchObserver` spawns the oracle-watcher over
+  a price window so it reasons then **calls `observe_opportunities` (the
+  deterministic `observeOpportunities`)** to emit the threshold crossings.
+- **ORIENT** — `pipelineToolRegistry` exposes the scorers, and `dispatchAnalyzer`
+  spawns the analyzer over the crossings so it **calls `score_opportunities` (the
+  deterministic `analyze`)**.
+- **DECIDE** — `plannerToolRegistry` exposes the ymax-shaped planner as
+  `propose_rebalance`, and `dispatchPlanner` spawns the planner over the target
+  allocation so it **calls `propose_rebalance` (the deterministic `plan`)** to
+  emit the hashed proposal.
+- **ACT (a) — audit** — `auditorToolRegistry` exposes the pre-execution gate as
+  `audit_proposal`, and `dispatchAuditor` spawns the auditor so it **calls
+  `audit_proposal` (the deterministic `audit`)** for the invariant verdict.
+- **ACT (b) — execute** — `executorToolRegistry` exposes the executor, pinned to
+  dry-run, as `simulate_execution`, and `dispatchExecutor` spawns the executor so
+  it **calls `simulate_execution`** to simulate the approved steps against a clone
+  of the portfolio.
+
+Each stage's structured product is extracted from the tool-execution events, so
+the inference path reproduces the headless path byte-for-byte (the planner's
+`proposal_hash`, the auditor's verdict, the observer's crossings):
 
 ```
-node bin/finbot-dispatch --seed=7              # offline: deterministic scripted analyzer + planner LLMs
+node bin/finbot-dispatch --seed=7              # offline: deterministic scripted stage LLMs
 node bin/finbot-dispatch --seed=7 --live-llm   # real inference (needs ANTHROPIC_API_KEY)
 ```
 
-This drives the ORIENT and DECIDE stages end-to-end in dry-run (the planner runs
-only when the analyzer proposes a rebalance); both roles are read-only and their
-tool subsets can reach no wallet capability.
+This drives the whole OBSERVE→ORIENT→DECIDE→ACT loop end-to-end in dry-run (each
+stage runs only when the prior one warrants it — the planner when the analyzer
+proposes a rebalance, the executor when the auditor approves); every role is
+read-only and no stage's tool subset can reach a wallet capability. The executor
+tool is pinned to `mode: 'dry-run'` and vends no wallet, so `walletTouched` is
+always false.
 
 Still scaffolding / follow-on work: the role `AGENT.md` briefs describe the
 LLM-dispatch form of each role (the pipeline is the computation those dispatches

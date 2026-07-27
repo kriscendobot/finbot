@@ -36,10 +36,172 @@ import crypto from 'node:crypto';
 
 import {
   pipelineToolRegistry, PIPELINE_TOOL_NAMES,
+  observerToolRegistry, OBSERVER_TOOL_NAMES,
   plannerToolRegistry, PLANNER_TOOL_NAMES,
   auditorToolRegistry, AUDITOR_TOOL_NAMES,
   executorToolRegistry, EXECUTOR_TOOL_NAMES,
 } from './agent-tools.js';
+
+// --- OBSERVE stage: inference-driven oracle-watcher dispatch -----------------
+
+/**
+ * Compose the observer's dispatch brief from a window of price readings and an
+ * optional deviation threshold / asset allowlist. The brief embeds the
+ * structured inputs as JSON and tells the subagent to detect the crossings via
+ * the deterministic tool rather than eyeballing the price moves by hand.
+ *
+ * @param {object} input  { readings, thresholdBps?, assets? }
+ * @returns {string}
+ */
+export function observeBrief(input) {
+  const payload = {
+    readings: input.readings || [],
+    thresholdBps: input.thresholdBps != null ? input.thresholdBps : null,
+    assets: input.assets || null,
+  };
+  return [
+    'A price-oracle window is available. Detect opportunity-deviation events over it — assets whose',
+    'price has moved from the window reference by more than the threshold. You are the OBSERVE phase:',
+    'read-only, you emit events; you never score, propose, or trade, and no wallet is reachable.',
+    '',
+    'Use the `observe_opportunities` tool for the detection — pass it the reading window, the',
+    'threshold in basis points, and the asset allowlist (if any) below. Do not compute the deviations',
+    'yourself; the tool returns the crossings (most significant first) and the latest price book.',
+    '',
+    'Then report how many crossings were found and, if any, the most significant asset and its',
+    'direction.',
+    '',
+    'Inputs (JSON):',
+    JSON.stringify(payload, null, 2),
+  ].join('\n');
+}
+
+/**
+ * Dispatch the oracle-watcher as an inference-driven subagent over a price
+ * window, with the observe-phase deterministic detector available as a tool.
+ * The stage's product — the observation `{ readings, crossings, observedAtTick }`
+ * — is extracted from the tool-execution events, so the inference-driven path
+ * and the headless `observeOpportunities` call yield the same crossings.
+ *
+ * @param {object} input  { readings, thresholdBps?, assets? }
+ * @param {object} deps
+ * @param {Function} deps.spawn        the harness `spawn` function
+ * @param {string}   deps.finbotRoot   root holding `roles/<role>/AGENT.md`
+ * @param {Function} [deps.llm]        injected LLM; omit to use the harness stub (offline)
+ * @param {Record<string, object>} [deps.tools]  tool registry (default: observer detect tools)
+ * @param {string[]} [deps.capabilities]         tool subset the observer may call (default: observer tool names)
+ * @returns {Promise<object>} { handle, status, observation, crossings, observed, toolCalls, finalText }
+ */
+export async function dispatchObserver(input, deps) {
+  if (!deps || typeof deps.spawn !== 'function') {
+    throw new Error('dispatchObserver: deps.spawn (the harness spawn function) is required');
+  }
+  const tools = deps.tools || observerToolRegistry();
+  const capabilities = deps.capabilities || OBSERVER_TOOL_NAMES;
+
+  const handle = await deps.spawn(
+    {
+      role: 'oracle-watcher',
+      brief: observeBrief(input),
+      capabilities,
+      llm: deps.llm,
+    },
+    { finbotRoot: deps.finbotRoot, tools },
+  );
+  await handle.done;
+
+  const toolCalls = extractToolCalls(handle.events);
+  const observation = lastObservationResult(handle.events);
+
+  return {
+    handle,
+    status: handle.status,
+    observation,
+    crossings: observation ? observation.crossings || [] : [],
+    observed: observation != null,
+    toolCalls,
+    finalText: handle.result ? handle.result.finalText : '',
+  };
+}
+
+/**
+ * Find the observation produced by the most recent successful
+ * `observe_opportunities` tool call (the observe stage's structured product).
+ *
+ * @param {Array<object>} events
+ * @returns {object|null}
+ */
+export function lastObservationResult(events) {
+  for (let i = (events || []).length - 1; i >= 0; i -= 1) {
+    const e = events[i];
+    if (e.type !== 'tool_execution_end' || !e.toolCall || e.toolCall.name !== 'observe_opportunities') continue;
+    const result = e.result;
+    if (!result || result.isError) continue;
+    const jsonBlock = (result.content || []).find((c) => c && c.type === 'json');
+    if (jsonBlock) return jsonBlock.value;
+  }
+  return null;
+}
+
+/**
+ * A deterministic, offline stand-in for an inference-driven observer LLM: it
+ * calls `observe_opportunities` with the real reading window on turn 0, then
+ * ends with a one-line summary on turn 1. The OBSERVE-stage counterpart to
+ * {@link makeScriptedAnalyzerLlm} — exercises the same dispatch wiring as a real
+ * provider with no network call.
+ *
+ * @param {object} input  same shape passed to {@link dispatchObserver}
+ * @returns {Function} an `llm` matching the spawn contract
+ */
+export function makeScriptedObserverLlm(input) {
+  return async function scriptedObserverLlm(args) {
+    if (args.turn === 0 && args.tools && args.tools.observe_opportunities) {
+      const toolArgs = { readings: input.readings || [] };
+      if (input.thresholdBps != null) toolArgs.thresholdBps = input.thresholdBps;
+      if (input.assets) toolArgs.assets = input.assets;
+      return {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'Detecting deviation crossings via the deterministic observer.' },
+          {
+            type: 'toolCall',
+            id: crypto.randomBytes(4).toString('hex'),
+            name: 'observe_opportunities',
+            arguments: toolArgs,
+          },
+        ],
+        stopReason: 'tool_use',
+        timestamp: Date.now(),
+      };
+    }
+    const summary = summarizeObservationFromToolResults(args.messages);
+    return {
+      role: 'assistant',
+      content: [{ type: 'text', text: summary }],
+      stopReason: 'end_turn',
+      timestamp: Date.now(),
+    };
+  };
+}
+
+/**
+ * @param {Array<object>} messages
+ * @returns {string}
+ */
+function summarizeObservationFromToolResults(messages) {
+  for (let i = (messages || []).length - 1; i >= 0; i -= 1) {
+    const m = messages[i];
+    if (m.role !== 'toolResult') continue;
+    const jsonBlock = (m.content || []).find((c) => c && c.type === 'json');
+    if (jsonBlock && jsonBlock.value && Array.isArray(jsonBlock.value.crossings)) {
+      const v = jsonBlock.value;
+      const top = v.crossings[0];
+      return `Observe complete: ${v.crossings.length} crossing(s)`
+        + (top ? `; top ${top.asset} ${top.direction} ${Math.round(top.deviationBps)}bps` : '');
+    }
+  }
+  return 'Observe complete.';
+}
 
 /**
  * Compose the analyzer's dispatch brief from an oracle-watcher observation and

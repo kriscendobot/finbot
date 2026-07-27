@@ -4,9 +4,11 @@
  *
  * Companion to `finbot-ooda` (which runs every stage as a deterministic
  * function with no LLM). This entry runs the FULL OODA loop by **inference**:
- * it builds an oracle-watcher observation over the simulator, dispatches the
- * analyzer as an LLM-shaped subagent that reasons over the opportunities and
- * CALLS the deterministic `score_opportunities` tool; then — when the analyzer
+ * it dispatches the oracle-watcher as an LLM-shaped subagent that reasons over
+ * the simulator's price window and CALLS the deterministic
+ * `observe_opportunities` tool to detect the threshold crossings; then
+ * dispatches the analyzer as an LLM-shaped subagent that reasons over the
+ * opportunities and CALLS the deterministic `score_opportunities` tool; then — when the analyzer
  * proposes a rebalance — dispatches the planner subagent, which reasons over
  * the target allocation and CALLS the deterministic `propose_rebalance` tool to
  * emit the ymax-shaped proposal; then dispatches the auditor subagent, which
@@ -51,6 +53,7 @@ import { runSimulator } from '../packages/simulator/runner.js';
 import { observeOpportunities, windowFromHistory } from '../packages/pipeline/oracle-watcher.js';
 import { project } from '../packages/pipeline/forecaster.js';
 import {
+  dispatchObserver, makeScriptedObserverLlm,
   dispatchAnalyzer, makeScriptedAnalyzerLlm,
   dispatchPlanner, makeScriptedPlannerLlm,
   dispatchAuditor, makeScriptedAuditorLlm,
@@ -119,7 +122,22 @@ async function main() {
 
   const prices = world.priceFeed.current();
   const readings = windowFromHistory(sim.history, args.warmup);
-  const observed = observeOpportunities({ readings }, { thresholdBps: args.threshold });
+
+  // OBSERVE: dispatch the oracle-watcher subagent over the price window. It
+  // reasons then CALLS the deterministic `observe_opportunities` tool to detect
+  // the threshold crossings, so the OBSERVE stage runs by inference like every
+  // other stage rather than as a bare function call. Read-only: no wallet is
+  // reachable from the observe-phase tool subset. The extracted observation is
+  // the same `{ readings, crossings, observedAtTick }` the headless
+  // `observeOpportunities` returns, so the crossings fed downstream are
+  // identical; a deterministic fallback covers a dispatch that surfaced none.
+  const observeInput = { readings, thresholdBps: args.threshold };
+  const observeLlm = args.liveLlm
+    ? makeAnthropicLlm(args.model ? { model: args.model } : {})
+    : makeScriptedObserverLlm(observeInput);
+  const observeDispatch = await dispatchObserver(observeInput, { spawn, finbotRoot: FINBOT_ROOT, llm: observeLlm });
+  const observed = observeDispatch.observation
+    || observeOpportunities({ readings }, { thresholdBps: args.threshold });
 
   const input = {
     opportunities: observed.crossings,
@@ -214,6 +232,11 @@ async function main() {
   const out = {
     mode: args.liveLlm ? 'inference (anthropic)' : 'inference (offline scripted)',
     status: dispatch.status,
+    observe: {
+      status: observeDispatch.status,
+      toolCalls: observeDispatch.toolCalls,
+      observed: observeDispatch.observed,
+    },
     opportunities: observed.crossings.length,
     toolCalls: dispatch.toolCalls,
     scored: dispatch.scored,
@@ -271,6 +294,17 @@ async function main() {
     printReport(out, args);
   }
 
+  // The OBSERVE stage must have completed through the deterministic detector
+  // for the inference path to count (the crossings it surfaced are what the
+  // downstream stages reason over).
+  if (observeDispatch.status !== 'completed') {
+    console.error(`finbot-dispatch: observer dispatch did not complete (status=${observeDispatch.status})`);
+    process.exit(1);
+  }
+  if (!observeDispatch.toolCalls.includes('observe_opportunities')) {
+    console.error('finbot-dispatch: observer never called the deterministic observe_opportunities tool');
+    process.exit(1);
+  }
   // Stage must actually have run through the deterministic scorer to count.
   if (dispatch.status !== 'completed') {
     console.error(`finbot-dispatch: analyzer dispatch did not complete (status=${dispatch.status})`);
@@ -326,7 +360,9 @@ async function main() {
 function printReport(out, args) {
   const log = (...a) => console.log(...a); // eslint-disable-line no-console
   log(`finbot-dispatch (seed=${args.seed}) — ${out.mode}`);
-  log(`  OBSERVE  oracle-watcher: ${out.opportunities} crossing(s)`);
+  log(`  OBSERVE  oracle-watcher subagent: ${out.observe.status}`);
+  log(`           tool calls: ${out.observe.toolCalls.join(', ') || '(none)'}`);
+  log(`           crossings via deterministic tool: ${out.opportunities}`);
   log(`  ORIENT   analyzer subagent: ${out.status}`);
   log(`           tool calls: ${out.toolCalls.join(', ') || '(none)'}`);
   log(`           scored via deterministic tool: ${out.scored}`);

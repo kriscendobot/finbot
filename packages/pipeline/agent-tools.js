@@ -48,6 +48,31 @@ export function pipelineToolRegistry() {
 export const PIPELINE_TOOL_NAMES = ['score_opportunities', 'realized_volatility', 'observe_opportunities'];
 
 /**
+ * Build the observe-phase (oracle-watcher) tool registry: the deterministic
+ * deviation detector exposed as `observe_opportunities`, so an inference-driven
+ * observer subagent can reason over a price-reading window and delegate the
+ * actual threshold-crossing detection to the deterministic `observeOpportunities`
+ * function rather than eyeballing the price moves by hand. Strictly read-only —
+ * the observer consumes a price history and produces opportunity-deviation
+ * events; it never trades and no wallet capability is reachable from the
+ * observe-phase tool subset. This is the OBSERVE-stage counterpart to the
+ * orient/decide/act registries: it exposes ONLY the detector, keeping the
+ * stage's authority to the least it needs (the risk-denominator
+ * `realized_volatility` is an orient-phase concern, not an observe one).
+ *
+ * @returns {Record<string, object>} a registry of `assertToolDef`-shaped tools
+ */
+export function observerToolRegistry() {
+  const tools = [observeOpportunitiesTool()];
+  const registry = {};
+  for (const t of tools) registry[t.name] = t;
+  return registry;
+}
+
+/** Names of the tools in {@link observerToolRegistry}, for capability subsets. */
+export const OBSERVER_TOOL_NAMES = ['observe_opportunities'];
+
+/**
  * Build the decide-phase (planner) tool registry: the deterministic `plan`
  * function exposed as `propose_rebalance`, so an inference-driven planner
  * subagent can reason over the analyzer's target allocation and the forecast,
