@@ -171,7 +171,8 @@ export async function dispatchObserver(input, deps) {
  * boundary-crossed and is never fed forward; on success this hands back the
  * `canonical` deterministic recompute, so no LLM-chosen value can reach
  * ORIENT/DECIDE/AUDIT/ACT. Returns `{ ok: false, reason }` when the stage did not
- * complete, never called the detector, or failed reconciliation; otherwise
+ * complete, never called the detector, surfaced no usable observation (an errored
+ * or malformed tool result), or failed reconciliation; otherwise
  * `{ ok: true, observation }` where `observation` is `dispatch.canonical`.
  *
  * Pulled out of `bin/finbot-dispatch` so the load-bearing "feed the trusted
@@ -187,6 +188,16 @@ export function guardedObservation(dispatch) {
   }
   if (!dispatch.toolCalls.includes('observe_opportunities')) {
     return { ok: false, reason: 'observer never called the deterministic observe_opportunities tool' };
+  }
+  // Distinct from a reconciliation divergence: the detector was called but no
+  // usable observation surfaced (an errored or json-less tool result → null),
+  // so `reconciled` is false for a different reason. Name the actual failed
+  // precondition rather than reporting a spurious "crossings diverge".
+  if (!dispatch.observed) {
+    return {
+      ok: false,
+      reason: 'observer called observe_opportunities but surfaced no usable observation (an errored or malformed tool result)',
+    };
   }
   if (!dispatch.reconciled) {
     return {

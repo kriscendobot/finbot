@@ -123,31 +123,21 @@ async function main() {
   const prices = world.priceFeed.current();
   const readings = windowFromHistory(sim.history, args.warmup);
 
-  // OBSERVE: dispatch the oracle-watcher subagent over the price window. It
-  // reasons then CALLS the deterministic `observe_opportunities` tool to detect
-  // the threshold crossings, so the OBSERVE stage runs by inference like every
-  // other stage rather than as a bare function call. Read-only: no wallet is
-  // reachable from the observe-phase tool subset. The extracted observation is
-  // the same `{ readings, crossings, observedAtTick }` the headless
-  // `observeOpportunities` returns, and `dispatchObserver` reconciles it against
-  // that deterministic recompute over the trusted window, so the crossings fed
-  // downstream are proven identical to the headless path (see the fail-fast
-  // guard below).
+  // OBSERVE by inference: dispatch the oracle-watcher subagent over the price
+  // window; it CALLS the deterministic `observe_opportunities` tool (read-only,
+  // no wallet reachable) rather than eyeballing the moves. `dispatchObserver`
+  // reconciles the surfaced crossings against a recompute over the trusted
+  // window — see its JSDoc and `guardedObservation` for the trust boundary.
   const observeInput = { readings, thresholdBps: args.threshold };
   const observeLlm = args.liveLlm
     ? makeAnthropicLlm(args.model ? { model: args.model } : {})
     : makeScriptedObserverLlm(observeInput);
   const observeDispatch = await dispatchObserver(observeInput, { spawn, finbotRoot: FINBOT_ROOT, llm: observeLlm });
 
-  // Fail fast BEFORE any downstream stage reads the observation: OBSERVE is the
-  // first stage and its crossings are the whole loop's input set, so a
-  // known-invalid OBSERVE must not drive ORIENT/DECIDE/AUDIT/ACT. `guardedObservation`
-  // (pipeline) applies the three checks — completed, the detector was called, and
-  // (because a live subagent chooses the `observe_opportunities` arguments freely)
-  // the surfaced crossings RECONCILE with the deterministic recompute over the
-  // trusted window — and on success hands back the TRUSTED `canonical` recompute,
-  // never the boundary-crossed observation, so no LLM-chosen value ever reaches
-  // the rest of the loop.
+  // Fail fast BEFORE any downstream stage reads the observation: `guardedObservation`
+  // refuses an unusable or non-reconciling OBSERVE (its crossings are the whole
+  // loop's input set) and hands back only the trusted `canonical` recompute, so no
+  // LLM-chosen value ever reaches the rest of the loop.
   const observeGuard = guardedObservation(observeDispatch);
   if (!observeGuard.ok) {
     console.error(`finbot-dispatch: ${observeGuard.reason}`);

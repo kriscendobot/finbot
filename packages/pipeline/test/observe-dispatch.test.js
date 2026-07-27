@@ -297,6 +297,30 @@ test('dispatchObserver: honors a zero threshold rather than defaulting it', asyn
   });
 });
 
+test('dispatchObserver: JSON-lossy prices (NaN/Infinity) collapse identically and still reconcile', async () => {
+  await withFinbotRoot(async (finbotRoot) => {
+    // Pins the reconciliation comment's load-bearing claim that JSON-lossy price
+    // values (NaN/Infinity -> null) collapse identically on BOTH the round-tripped
+    // observation and the in-process recompute at stringify time — so the strict
+    // JSON.stringify compare still reconciles. ATOM moves ~150bps (crosses at 50);
+    // the NaN/Infinity assets never cross (Math.abs(NaN) >= threshold is false).
+    const input = {
+      readings: [
+        { t: 0, prices: { ATOM: 10, OSMO: NaN, TIA: Infinity } },
+        { t: 1, prices: { ATOM: 9.85, OSMO: NaN, TIA: Infinity } },
+      ],
+      thresholdBps: 50,
+    };
+    const dispatch = await dispatchObserver(input, {
+      spawn, finbotRoot, llm: makeScriptedObserverLlm(input),
+    });
+    assert.equal(dispatch.reconciled, true,
+      'NaN/Infinity prices collapse to null identically on both operands, so the compare still reconciles');
+    assert.equal(dispatch.reportedCrossings.length, 1, 'only ATOM crosses; the NaN/Infinity assets never do');
+    assert.equal(dispatch.reportedCrossings[0].asset, 'ATOM');
+  });
+});
+
 for (const [label, readings] of [['empty', []], ['singleton', [{ t: 0, prices: { ATOM: 10 } }]]]) {
   test(`dispatchObserver: a ${label} reading window yields zero crossings and reconciles`, async () => {
     await withFinbotRoot(async (finbotRoot) => {
@@ -336,7 +360,40 @@ test('dispatchObserver (harness stub LLM): still completes and calls a determini
 
 test('lastObservationResult: returns null when no observe_opportunities call is present', () => {
   assert.equal(lastObservationResult([]), null);
-  assert.equal(lastObservationResult([{ type: 'tool_execution_end', toolCall: { name: 'score_opportunities' }, result: {} }]), null);
+  // Load-bearing for the tool-NAME filter: the foreign tool's result carries a
+  // real json block, so returning null proves the `name !== 'observe_opportunities'`
+  // guard rejected it — drop that guard and this value would surface instead.
+  assert.equal(
+    lastObservationResult([{
+      type: 'tool_execution_end',
+      toolCall: { name: 'score_opportunities' },
+      result: { content: [{ type: 'json', value: { crossings: [{ asset: 'ATOM' }] } }] },
+    }]),
+    null,
+  );
+});
+
+test('lastObservationResult: skips an errored or json-less observe_opportunities result', () => {
+  // The `isError` skip branch: a matching-name but errored tool result is ignored
+  // (dropping the guard would surface its json value).
+  assert.equal(
+    lastObservationResult([{
+      type: 'tool_execution_end',
+      toolCall: { name: 'observe_opportunities' },
+      result: { isError: true, content: [{ type: 'json', value: { crossings: [{ asset: 'ATOM' }] } }] },
+    }]),
+    null,
+  );
+  // The matching-name-but-no-json-block fall-through: a successful result whose
+  // content carries no json block yields null (surfaces downstream as observed:false).
+  assert.equal(
+    lastObservationResult([{
+      type: 'tool_execution_end',
+      toolCall: { name: 'observe_opportunities' },
+      result: { content: [{ type: 'text', text: 'no json here' }] },
+    }]),
+    null,
+  );
 });
 
 test('dispatchObserver: requires the harness spawn function', async () => {
@@ -385,6 +442,18 @@ test('guardedObservation: refuses a stage that never called the detector', () =>
   const guard = guardedObservation({ status: 'completed', toolCalls: [], reconciled: true, canonical: {} });
   assert.equal(guard.ok, false);
   assert.match(guard.reason, /never called/);
+});
+
+test('guardedObservation: refuses a called-but-unusable observation with an accurate reason', () => {
+  // The detector was called but surfaced no usable observation (an errored/json-less
+  // tool result); `reconciled` is false for a DIFFERENT reason than a divergence, so
+  // the refusal must name that precondition rather than reporting "crossings diverge".
+  const guard = guardedObservation({
+    status: 'completed', toolCalls: ['observe_opportunities'], observed: false, reconciled: false, canonical: {},
+  });
+  assert.equal(guard.ok, false);
+  assert.match(guard.reason, /no usable observation/);
+  assert.doesNotMatch(guard.reason, /diverge/, 'does not misdescribe a no-observation case as a divergence');
 });
 
 test('guardedObservation: refuses an incomplete dispatch', () => {

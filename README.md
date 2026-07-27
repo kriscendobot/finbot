@@ -94,7 +94,12 @@ now has an inference-driven form, not only the middle two:
 
 Each stage's structured product is extracted from the tool-execution events, so
 the inference path reproduces the headless path byte-for-byte (the planner's
-`proposal_hash`, the auditor's verdict, the observer's crossings):
+`proposal_hash`, the auditor's verdict, the observer's crossings). OBSERVE goes
+one step further: because it is the first stage — its crossings are the whole
+loop's input set — `dispatchObserver` **reconciles** the inference-surfaced
+crossings against the deterministic recompute over the trusted window at runtime
+and `guardedObservation` refuses a divergence, so that stage's byte-for-byte
+match is enforced rather than resting on the scripted double alone:
 
 ```
 node bin/finbot-dispatch --seed=7              # offline: deterministic scripted stage LLMs
