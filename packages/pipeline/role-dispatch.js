@@ -43,7 +43,7 @@ import {
   executorToolRegistry, EXECUTOR_TOOL_NAMES,
 } from './agent-tools.js';
 
-// --- OBSERVE stage: inference-driven oracle-watcher dispatch -----------------
+// OBSERVE stage: inference-driven oracle-watcher dispatch.
 
 /**
  * Compose the observer's dispatch brief from a window of price readings and an
@@ -171,7 +171,10 @@ export function lastObservationResult(events) {
  * calls `observe_opportunities` with the real reading window on turn 0, then
  * ends with a one-line summary on turn 1. The OBSERVE-stage counterpart to
  * {@link makeScriptedAnalyzerLlm} — exercises the same dispatch wiring as a real
- * provider with no network call.
+ * provider with no network call. The emitted messages carry a fixed tool-call
+ * id and `timestamp: 0` (never `crypto.randomBytes`/`Date.now`) so the whole
+ * event stream is byte-reproducible run-to-run, matching the "deterministic"
+ * contract determinism-invariant tests and journal fixtures rely on.
  *
  * @param {object} input  same shape passed to {@link dispatchObserver}
  * @returns {Function} an `llm` matching the spawn contract
@@ -188,13 +191,13 @@ export function makeScriptedObserverLlm(input) {
           { type: 'text', text: 'Detecting deviation crossings via the deterministic observer.' },
           {
             type: 'toolCall',
-            id: crypto.randomBytes(4).toString('hex'),
+            id: 'observe-opportunities-0',
             name: 'observe_opportunities',
             arguments: toolArgs,
           },
         ],
         stopReason: 'tool_use',
-        timestamp: Date.now(),
+        timestamp: 0,
       };
     }
     const summary = summarizeObservationFromToolResults(args.messages);
@@ -202,7 +205,7 @@ export function makeScriptedObserverLlm(input) {
       role: 'assistant',
       content: [{ type: 'text', text: summary }],
       stopReason: 'end_turn',
-      timestamp: Date.now(),
+      timestamp: 0,
     };
   };
 }

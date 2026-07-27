@@ -163,6 +163,103 @@ test('dispatchObserver: non-canonical tool arguments fail reconciliation', async
   });
 });
 
+// A subagent that calls `observe_opportunities` with arbitrary caller-supplied
+// tool arguments — the general form of {@link makeDivergentObserverLlm}, standing
+// in for any live-path hallucination (a tampered window, threshold, or asset
+// allowlist) the faithful scripted double never produces.
+function makeTamperedObserverLlm(toolArgs) {
+  return async function tamperedObserverLlm(args) {
+    if (args.turn === 0 && args.tools && args.tools.observe_opportunities) {
+      return {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'Detecting crossings (with tampered arguments).' },
+          { type: 'toolCall', id: 'tampered', name: 'observe_opportunities', arguments: toolArgs },
+        ],
+        stopReason: 'tool_use',
+        timestamp: 0,
+      };
+    }
+    return { role: 'assistant', content: [{ type: 'text', text: 'done' }], stopReason: 'end_turn', timestamp: 0 };
+  };
+}
+
+test('dispatchObserver: a tampered readings window fails reconciliation', async () => {
+  await withFinbotRoot(async (finbotRoot) => {
+    const input = observeInput(50); // trusted: 1 crossing over the full 3-tick window
+    // The subagent narrows the window to just the reference tick — no move, zero
+    // crossings — diverging from the recompute over the trusted window.
+    const dispatch = await dispatchObserver(input, {
+      spawn, finbotRoot, llm: makeTamperedObserverLlm({ readings: input.readings.slice(0, 1), thresholdBps: 50 }),
+    });
+    assert.equal(dispatch.crossings.length, 0, 'the tampered single-tick window surfaced zero crossings');
+    assert.equal(dispatch.canonical.crossings.length, 1, 'the trusted recompute over the full window surfaces one');
+    assert.equal(dispatch.reconciled, false,
+      'a hallucinated readings window does not reconcile — the loop must refuse it');
+  });
+});
+
+test('dispatchObserver: a below-trusted threshold (extra crossings) fails reconciliation', async () => {
+  await withFinbotRoot(async (finbotRoot) => {
+    const input = observeInput(50); // trusted: 1 crossing (ATOM ~150bps; flat OSMO at 0bps is below 50)
+    // 0bps is BELOW the trusted 50bps, so the flat OSMO also crosses — a SUPERSET
+    // of the trusted crossings. Reconciliation must reject extra crossings too,
+    // not only missing ones.
+    const dispatch = await dispatchObserver(input, {
+      spawn, finbotRoot, llm: makeTamperedObserverLlm({ readings: input.readings, thresholdBps: 0 }),
+    });
+    assert.equal(dispatch.crossings.length, 2, 'the below-trusted threshold surfaced an extra crossing');
+    assert.equal(dispatch.canonical.crossings.length, 1, 'the trusted recompute surfaces one');
+    assert.equal(dispatch.reconciled, false, 'reconciliation rejects a superset, not only a subset');
+  });
+});
+
+test('dispatchObserver: a tampered asset allowlist fails reconciliation', async () => {
+  await withFinbotRoot(async (finbotRoot) => {
+    const input = observeInput(0); // trusted: 2 crossings (ATOM + flat OSMO at threshold 0, no allowlist)
+    // The subagent restricts detection to OSMO only, dropping the ATOM crossing
+    // the trusted (unrestricted) recompute surfaces.
+    const dispatch = await dispatchObserver(input, {
+      spawn, finbotRoot, llm: makeTamperedObserverLlm({ readings: input.readings, thresholdBps: 0, assets: ['OSMO'] }),
+    });
+    assert.equal(dispatch.crossings.length, 1, 'the tampered allowlist restricted detection to OSMO');
+    assert.equal(dispatch.canonical.crossings.length, 2, 'the trusted recompute over all assets surfaces both');
+    assert.equal(dispatch.reconciled, false,
+      'a hallucinated asset allowlist does not reconcile — the loop must refuse it');
+  });
+});
+
+test('dispatchObserver: a faithful dispatch honoring an asset allowlist reconciles', async () => {
+  await withFinbotRoot(async (finbotRoot) => {
+    // Exercises the `assets` plumbing end-to-end: observerBrief embeds it,
+    // makeScriptedObserverLlm forwards it to the tool, and the canonical recompute
+    // honors it — so a restricted-but-faithful observation still reconciles.
+    const input = { ...observeInput(0), assets: ['ATOM'] };
+    const headless = observeOpportunities({ readings: input.readings }, { thresholdBps: 0, assets: ['ATOM'] });
+    const dispatch = await dispatchObserver(input, {
+      spawn, finbotRoot, llm: makeScriptedObserverLlm(input),
+    });
+    assert.equal(dispatch.reconciled, true, 'the allowlist is forwarded to both the tool and the recompute');
+    assert.deepEqual(dispatch.observation, headless);
+    assert.equal(dispatch.crossings.length, 1, 'only ATOM is in the allowlist');
+    assert.equal(dispatch.crossings[0].asset, 'ATOM');
+  });
+});
+
+test('dispatchObserver: an empty asset allowlist restricts to no assets and reconciles', async () => {
+  await withFinbotRoot(async (finbotRoot) => {
+    // `[]` is a truthy-but-empty allowlist meaning "restrict to no assets"; it
+    // must detect nothing on BOTH the dispatch and the recompute (never silently
+    // mean "all"), so the two still agree and reconcile.
+    const input = { ...observeInput(0), assets: [] };
+    const dispatch = await dispatchObserver(input, {
+      spawn, finbotRoot, llm: makeScriptedObserverLlm(input),
+    });
+    assert.equal(dispatch.crossings.length, 0, 'an empty allowlist restricts to no assets');
+    assert.equal(dispatch.reconciled, true, 'both the tool and the recompute honor the empty allowlist');
+  });
+});
+
 test('dispatchObserver: honors a zero threshold rather than defaulting it', async () => {
   await withFinbotRoot(async (finbotRoot) => {
     // thresholdBps: 0 is a real threshold (every move crosses), not "absent"

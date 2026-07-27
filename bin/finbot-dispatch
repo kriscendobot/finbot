@@ -159,7 +159,12 @@ async function main() {
     console.error('finbot-dispatch: SAFETY — observer crossings diverge from the deterministic recompute over the trusted window; refusing to drive the loop on them');
     process.exit(1);
   }
-  const observed = observeDispatch.observation;
+  // Feed the TRUSTED recompute (`canonical`) — not the boundary-crossed
+  // `observation` — into the rest of the loop. The reconciled guard above
+  // already proved them byte-equal, so this changes no value; it makes the
+  // downstream input set the deterministic recompute over the trusted window by
+  // construction, so no LLM-chosen value can ever reach ORIENT/DECIDE/AUDIT/ACT.
+  const observed = observeDispatch.canonical;
 
   const input = {
     opportunities: observed.crossings,
