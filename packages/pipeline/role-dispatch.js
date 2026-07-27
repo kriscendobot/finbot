@@ -34,6 +34,7 @@
 
 import crypto from 'node:crypto';
 
+import { observeOpportunities } from './oracle-watcher.js';
 import {
   pipelineToolRegistry, PIPELINE_TOOL_NAMES,
   observerToolRegistry, OBSERVER_TOOL_NAMES,
@@ -53,7 +54,7 @@ import {
  * @param {object} input  { readings, thresholdBps?, assets? }
  * @returns {string}
  */
-export function observeBrief(input) {
+export function observerBrief(input) {
   const payload = {
     readings: input.readings || [],
     thresholdBps: input.thresholdBps != null ? input.thresholdBps : null,
@@ -83,6 +84,16 @@ export function observeBrief(input) {
  * — is extracted from the tool-execution events, so the inference-driven path
  * and the headless `observeOpportunities` call yield the same crossings.
  *
+ * A live subagent chooses the `observe_opportunities` arguments freely, so the
+ * extracted observation is not trusted on its face: it is RECONCILED against a
+ * deterministic recompute over the same TRUSTED `input` window/threshold/assets.
+ * `reconciled` is true only when the two agree byte-for-byte — a hallucinated
+ * window, threshold, or allowlist yields `reconciled: false`, and the caller
+ * (`bin/finbot-dispatch`) refuses to drive the loop on a non-reconciling
+ * observation. This makes the "reproduces the headless path" invariant a runtime
+ * check, not a property of the scripted double alone. OBSERVE is the first
+ * stage, so an unreconciled divergence would change the whole loop's input set.
+ *
  * @param {object} input  { readings, thresholdBps?, assets? }
  * @param {object} deps
  * @param {Function} deps.spawn        the harness `spawn` function
@@ -90,7 +101,7 @@ export function observeBrief(input) {
  * @param {Function} [deps.llm]        injected LLM; omit to use the harness stub (offline)
  * @param {Record<string, object>} [deps.tools]  tool registry (default: observer detect tools)
  * @param {string[]} [deps.capabilities]         tool subset the observer may call (default: observer tool names)
- * @returns {Promise<object>} { handle, status, observation, crossings, observed, toolCalls, finalText }
+ * @returns {Promise<object>} { handle, status, observation, canonical, reconciled, crossings, observed, toolCalls, finalText }
  */
 export async function dispatchObserver(input, deps) {
   if (!deps || typeof deps.spawn !== 'function') {
@@ -102,7 +113,7 @@ export async function dispatchObserver(input, deps) {
   const handle = await deps.spawn(
     {
       role: 'oracle-watcher',
-      brief: observeBrief(input),
+      brief: observerBrief(input),
       capabilities,
       llm: deps.llm,
     },
@@ -113,10 +124,22 @@ export async function dispatchObserver(input, deps) {
   const toolCalls = extractToolCalls(handle.events);
   const observation = lastObservationResult(handle.events);
 
+  // The deterministic recompute over the TRUSTED input — the reference the
+  // extracted observation must match. Honors the same threshold/asset options a
+  // faithful dispatch would forward to the tool.
+  const canonical = observeOpportunities(
+    { readings: input.readings || [] },
+    { thresholdBps: input.thresholdBps, assets: input.assets },
+  );
+  const reconciled = observation != null
+    && JSON.stringify(observation) === JSON.stringify(canonical);
+
   return {
     handle,
     status: handle.status,
     observation,
+    canonical,
+    reconciled,
     crossings: observation ? observation.crossings || [] : [],
     observed: observation != null,
     toolCalls,

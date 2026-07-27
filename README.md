@@ -101,7 +101,7 @@ node bin/finbot-dispatch --seed=7              # offline: deterministic scripted
 node bin/finbot-dispatch --seed=7 --live-llm   # real inference (needs ANTHROPIC_API_KEY)
 ```
 
-This drives the whole OBSERVE→ORIENT→DECIDE→ACT loop end-to-end in dry-run (each
+This drives the whole OBSERVE->ORIENT->DECIDE->ACT loop end-to-end in dry-run (each
 stage runs only when the prior one warrants it — the planner when the analyzer
 proposes a rebalance, the executor when the auditor approves); every role is
 read-only and no stage's tool subset can reach a wallet capability. The executor

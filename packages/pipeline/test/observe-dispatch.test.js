@@ -21,8 +21,9 @@ import path from 'node:path';
 import { spawn } from '@finbot/harness/spawn';
 
 import { observeOpportunities } from '../oracle-watcher.js';
+import { observerToolRegistry, OBSERVER_TOOL_NAMES } from '../agent-tools.js';
 import {
-  dispatchObserver, observeBrief, makeScriptedObserverLlm, lastObservationResult,
+  dispatchObserver, observerBrief, makeScriptedObserverLlm, lastObservationResult,
 } from '../role-dispatch.js';
 
 async function withFinbotRoot(fn) {
@@ -52,12 +53,24 @@ function observeInput(thresholdBps = 50) {
   };
 }
 
-test('observeBrief: embeds the window and instructs detector use', () => {
-  const brief = observeBrief(observeInput());
+test('observerBrief: embeds the window and instructs detector use', () => {
+  const brief = observerBrief(observeInput());
   assert.match(brief, /observe_opportunities/);
   assert.match(brief, /read-only/);
   assert.match(brief, /OBSERVE phase/);
   assert.match(brief, /never score, propose, or trade/);
+});
+
+test('observe stage exposes exactly the read-only detector — no wallet-reaching tool', () => {
+  // Pins the no-wallet invariant the PR emphasizes: the observe-phase capability
+  // subset is exactly the deviation detector. Reddens if a future edit widens
+  // the registry (e.g. adds a signing/execution tool) or the capability names.
+  assert.deepEqual(OBSERVER_TOOL_NAMES, ['observe_opportunities']);
+  assert.deepEqual(Object.keys(observerToolRegistry()), ['observe_opportunities']);
+  for (const name of Object.keys(observerToolRegistry())) {
+    assert.doesNotMatch(name, /wallet|sign|execute|simulate|propose|audit/,
+      'no observe-phase tool reaches a wallet / action capability');
+  }
 });
 
 test('dispatchObserver (scripted LLM): drives the observe stage end-to-end via the deterministic detector', async () => {
@@ -93,6 +106,91 @@ test('dispatchObserver: the inference-driven crossings reproduce the headless ob
       'the inference path and the headless path agree on the full observation');
   });
 });
+
+test('dispatchObserver: a faithful dispatch reconciles against the deterministic recompute', async () => {
+  await withFinbotRoot(async (finbotRoot) => {
+    const input = observeInput();
+    const dispatch = await dispatchObserver(input, {
+      spawn, finbotRoot, llm: makeScriptedObserverLlm(input),
+    });
+    assert.equal(dispatch.reconciled, true,
+      'the extracted observation matches the recompute over the trusted window');
+    assert.deepEqual(dispatch.observation, dispatch.canonical);
+  });
+});
+
+// A subagent that calls `observe_opportunities` with a DIFFERENT threshold than
+// the trusted dispatch input — the live-path failure mode the scripted double
+// can never surface. The extracted crossings then diverge from the recompute,
+// so `reconciled` must be false and the bin refuses to drive the loop on them.
+function makeDivergentObserverLlm(input, tamperedThresholdBps) {
+  return async function divergentObserverLlm(args) {
+    if (args.turn === 0 && args.tools && args.tools.observe_opportunities) {
+      return {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'Detecting crossings (with a tampered threshold).' },
+          {
+            type: 'toolCall',
+            id: 'divergent',
+            name: 'observe_opportunities',
+            arguments: { readings: input.readings || [], thresholdBps: tamperedThresholdBps },
+          },
+        ],
+        stopReason: 'tool_use',
+        timestamp: 0,
+      };
+    }
+    return { role: 'assistant', content: [{ type: 'text', text: 'done' }], stopReason: 'end_turn', timestamp: 0 };
+  };
+}
+
+test('dispatchObserver: non-canonical tool arguments fail reconciliation', async () => {
+  await withFinbotRoot(async (finbotRoot) => {
+    const input = observeInput(50); // trusted: 1 crossing (ATOM down ~150bps)
+    // The subagent instead passes 300bps, which detects zero crossings.
+    const dispatch = await dispatchObserver(input, {
+      spawn, finbotRoot, llm: makeDivergentObserverLlm(input, 300),
+    });
+    assert.equal(dispatch.status, 'completed');
+    assert.ok(dispatch.toolCalls.includes('observe_opportunities'),
+      'the tool was still called — the loose "was it called" gate would pass');
+    assert.equal(dispatch.observed, true, 'a (divergent) observation was extracted');
+    assert.equal(dispatch.crossings.length, 0, 'the tampered threshold surfaced zero crossings');
+    assert.equal(dispatch.canonical.crossings.length, 1, 'the trusted recompute surfaces one');
+    assert.equal(dispatch.reconciled, false,
+      'divergent crossings do not reconcile with the recompute — the loop must refuse them');
+  });
+});
+
+test('dispatchObserver: honors a zero threshold rather than defaulting it', async () => {
+  await withFinbotRoot(async (finbotRoot) => {
+    // thresholdBps: 0 is a real threshold (every move crosses), not "absent"
+    // (which would default to 50). OSMO is flat (0bps) and still crosses at 0.
+    const input = observeInput(0);
+    const headless = observeOpportunities({ readings: input.readings }, { thresholdBps: 0 });
+    const dispatch = await dispatchObserver(input, {
+      spawn, finbotRoot, llm: makeScriptedObserverLlm(input),
+    });
+    assert.equal(dispatch.reconciled, true);
+    assert.deepEqual(dispatch.observation, headless);
+    assert.equal(dispatch.crossings.length, 2, 'ATOM and the flat OSMO both cross at threshold 0');
+  });
+});
+
+for (const [label, readings] of [['empty', []], ['singleton', [{ t: 0, prices: { ATOM: 10 } }]]]) {
+  test(`dispatchObserver: a ${label} reading window yields zero crossings and reconciles`, async () => {
+    await withFinbotRoot(async (finbotRoot) => {
+      const input = { readings, thresholdBps: 50 };
+      const dispatch = await dispatchObserver(input, {
+        spawn, finbotRoot, llm: makeScriptedObserverLlm(input),
+      });
+      assert.equal(dispatch.status, 'completed');
+      assert.equal(dispatch.crossings.length, 0);
+      assert.equal(dispatch.reconciled, true);
+    });
+  });
+}
 
 test('dispatchObserver: a quiet window surfaces zero crossings through the same tool', async () => {
   await withFinbotRoot(async (finbotRoot) => {

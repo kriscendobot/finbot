@@ -50,7 +50,7 @@ import { fileURLToPath } from 'node:url';
 
 import { makeWorld } from '../packages/simulator/world.js';
 import { runSimulator } from '../packages/simulator/runner.js';
-import { observeOpportunities, windowFromHistory } from '../packages/pipeline/oracle-watcher.js';
+import { windowFromHistory } from '../packages/pipeline/oracle-watcher.js';
 import { project } from '../packages/pipeline/forecaster.js';
 import {
   dispatchObserver, makeScriptedObserverLlm,
@@ -129,15 +129,37 @@ async function main() {
   // other stage rather than as a bare function call. Read-only: no wallet is
   // reachable from the observe-phase tool subset. The extracted observation is
   // the same `{ readings, crossings, observedAtTick }` the headless
-  // `observeOpportunities` returns, so the crossings fed downstream are
-  // identical; a deterministic fallback covers a dispatch that surfaced none.
+  // `observeOpportunities` returns, and `dispatchObserver` reconciles it against
+  // that deterministic recompute over the trusted window, so the crossings fed
+  // downstream are proven identical to the headless path (see the fail-fast
+  // guard below).
   const observeInput = { readings, thresholdBps: args.threshold };
   const observeLlm = args.liveLlm
     ? makeAnthropicLlm(args.model ? { model: args.model } : {})
     : makeScriptedObserverLlm(observeInput);
   const observeDispatch = await dispatchObserver(observeInput, { spawn, finbotRoot: FINBOT_ROOT, llm: observeLlm });
-  const observed = observeDispatch.observation
-    || observeOpportunities({ readings }, { thresholdBps: args.threshold });
+
+  // Fail fast BEFORE any downstream stage reads the observation: OBSERVE is the
+  // first stage and its crossings are the input set the whole loop reasons over,
+  // so a known-invalid OBSERVE must not drive ORIENT/DECIDE/AUDIT/ACT. The stage
+  // must have completed through the deterministic detector, and — because a
+  // live subagent chooses the `observe_opportunities` arguments freely — the
+  // crossings it surfaced must RECONCILE with the deterministic recompute over
+  // the trusted window. A divergence (a hallucinated window, threshold, or asset
+  // allowlist) exits 1 rather than silently feeding divergent crossings forward.
+  if (observeDispatch.status !== 'completed') {
+    console.error(`finbot-dispatch: observer dispatch did not complete (status=${observeDispatch.status})`);
+    process.exit(1);
+  }
+  if (!observeDispatch.toolCalls.includes('observe_opportunities')) {
+    console.error('finbot-dispatch: observer never called the deterministic observe_opportunities tool');
+    process.exit(1);
+  }
+  if (!observeDispatch.reconciled) {
+    console.error('finbot-dispatch: SAFETY — observer crossings diverge from the deterministic recompute over the trusted window; refusing to drive the loop on them');
+    process.exit(1);
+  }
+  const observed = observeDispatch.observation;
 
   const input = {
     opportunities: observed.crossings,
@@ -294,17 +316,6 @@ async function main() {
     printReport(out, args);
   }
 
-  // The OBSERVE stage must have completed through the deterministic detector
-  // for the inference path to count (the crossings it surfaced are what the
-  // downstream stages reason over).
-  if (observeDispatch.status !== 'completed') {
-    console.error(`finbot-dispatch: observer dispatch did not complete (status=${observeDispatch.status})`);
-    process.exit(1);
-  }
-  if (!observeDispatch.toolCalls.includes('observe_opportunities')) {
-    console.error('finbot-dispatch: observer never called the deterministic observe_opportunities tool');
-    process.exit(1);
-  }
   // Stage must actually have run through the deterministic scorer to count.
   if (dispatch.status !== 'completed') {
     console.error(`finbot-dispatch: analyzer dispatch did not complete (status=${dispatch.status})`);

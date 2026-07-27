@@ -44,7 +44,7 @@ export {
   executorToolRegistry, EXECUTOR_TOOL_NAMES,
 } from './agent-tools.js';
 export {
-  dispatchObserver, observeBrief, makeScriptedObserverLlm, lastObservationResult,
+  dispatchObserver, observerBrief, makeScriptedObserverLlm, lastObservationResult,
   dispatchAnalyzer, analyzerBrief, makeScriptedAnalyzerLlm,
   extractToolCalls, lastScoringResult,
   dispatchPlanner, plannerBrief, makeScriptedPlannerLlm, lastProposalResult,
