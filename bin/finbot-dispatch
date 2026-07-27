@@ -53,7 +53,7 @@ import { runSimulator } from '../packages/simulator/runner.js';
 import { windowFromHistory } from '../packages/pipeline/oracle-watcher.js';
 import { project } from '../packages/pipeline/forecaster.js';
 import {
-  dispatchObserver, makeScriptedObserverLlm,
+  dispatchObserver, guardedObservation, makeScriptedObserverLlm,
   dispatchAnalyzer, makeScriptedAnalyzerLlm,
   dispatchPlanner, makeScriptedPlannerLlm,
   dispatchAuditor, makeScriptedAuditorLlm,
@@ -140,34 +140,23 @@ async function main() {
   const observeDispatch = await dispatchObserver(observeInput, { spawn, finbotRoot: FINBOT_ROOT, llm: observeLlm });
 
   // Fail fast BEFORE any downstream stage reads the observation: OBSERVE is the
-  // first stage and its crossings are the input set the whole loop reasons over,
-  // so a known-invalid OBSERVE must not drive ORIENT/DECIDE/AUDIT/ACT. The stage
-  // must have completed through the deterministic detector, and — because a
-  // live subagent chooses the `observe_opportunities` arguments freely — the
-  // crossings it surfaced must RECONCILE with the deterministic recompute over
-  // the trusted window. A divergence (a hallucinated window, threshold, or asset
-  // allowlist) exits 1 rather than silently feeding divergent crossings forward.
-  if (observeDispatch.status !== 'completed') {
-    console.error(`finbot-dispatch: observer dispatch did not complete (status=${observeDispatch.status})`);
+  // first stage and its crossings are the whole loop's input set, so a
+  // known-invalid OBSERVE must not drive ORIENT/DECIDE/AUDIT/ACT. `guardedObservation`
+  // (pipeline) applies the three checks — completed, the detector was called, and
+  // (because a live subagent chooses the `observe_opportunities` arguments freely)
+  // the surfaced crossings RECONCILE with the deterministic recompute over the
+  // trusted window — and on success hands back the TRUSTED `canonical` recompute,
+  // never the boundary-crossed observation, so no LLM-chosen value ever reaches
+  // the rest of the loop.
+  const observeGuard = guardedObservation(observeDispatch);
+  if (!observeGuard.ok) {
+    console.error(`finbot-dispatch: ${observeGuard.reason}`);
     process.exit(1);
   }
-  if (!observeDispatch.toolCalls.includes('observe_opportunities')) {
-    console.error('finbot-dispatch: observer never called the deterministic observe_opportunities tool');
-    process.exit(1);
-  }
-  if (!observeDispatch.reconciled) {
-    console.error('finbot-dispatch: SAFETY — observer crossings diverge from the deterministic recompute over the trusted window; refusing to drive the loop on them');
-    process.exit(1);
-  }
-  // Feed the TRUSTED recompute (`canonical`) — not the boundary-crossed
-  // `observation` — into the rest of the loop. The reconciled guard above
-  // already proved them byte-equal, so this changes no value; it makes the
-  // downstream input set the deterministic recompute over the trusted window by
-  // construction, so no LLM-chosen value can ever reach ORIENT/DECIDE/AUDIT/ACT.
-  const observed = observeDispatch.canonical;
+  const observation = observeGuard.observation;
 
   const input = {
-    opportunities: observed.crossings,
+    opportunities: observation.crossings,
     readings,
     portfolio: world.portfolio.markToMarket(prices),
     prices,
@@ -218,7 +207,7 @@ async function main() {
       portfolio: input.portfolio,
       prices,
       currentTick: world.priceFeed.t,
-      oracleReadings: observed.crossings,
+      oracleReadings: observation.crossings,
     };
     const auditLlm = args.liveLlm
       ? makeAnthropicLlm(args.model ? { model: args.model } : {})
@@ -248,7 +237,7 @@ async function main() {
         { ensembleSize: 64, horizon: 12, render: false },
       ),
       currentTick: world.priceFeed.t,
-      oracleReadings: observed.crossings,
+      oracleReadings: observation.crossings,
     };
     const actLlm = args.liveLlm
       ? makeAnthropicLlm(args.model ? { model: args.model } : {})
@@ -264,7 +253,7 @@ async function main() {
       toolCalls: observeDispatch.toolCalls,
       observed: observeDispatch.observed,
     },
-    opportunities: observed.crossings.length,
+    opportunities: observation.crossings.length,
     toolCalls: dispatch.toolCalls,
     scored: dispatch.scored,
     next_action: dispatch.analysis ? dispatch.analysis.next_action : null,

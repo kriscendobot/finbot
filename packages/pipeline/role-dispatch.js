@@ -80,21 +80,22 @@ export function observerBrief(input) {
 /**
  * Dispatch the oracle-watcher as an inference-driven subagent over a price
  * window, with the observe-phase deterministic detector available as a tool.
- * The stage's product — the observation `{ readings` (the latest price *book*,
- * `Record<asset, price>` — distinct from the input's reading *window* array),
- * `crossings, observedAtTick }` — is extracted from the tool-execution events,
- * so the inference-driven path and the headless `observeOpportunities` call
- * yield the same crossings.
+ * The stage's product — the observation `{ readings, crossings, observedAtTick }`
+ * (where `readings` is the latest price *book*, `Record<asset, price>`, distinct
+ * from the input's reading *window* array) — is extracted from the tool-execution
+ * events, so the inference-driven path and the headless `observeOpportunities`
+ * call yield the same crossings.
  *
  * A live subagent chooses the `observe_opportunities` arguments freely, so the
  * extracted observation is not trusted on its face: it is RECONCILED against a
- * deterministic recompute over the same TRUSTED `input` window/threshold/assets.
- * `reconciled` is true only when the two agree byte-for-byte — a hallucinated
- * window, threshold, or allowlist yields `reconciled: false`, and the caller
- * (`bin/finbot-dispatch`) refuses to drive the loop on a non-reconciling
- * observation. This makes the "reproduces the headless path" invariant a runtime
- * check, not a property of the scripted double alone. OBSERVE is the first
- * stage, so an unreconciled divergence would change the whole loop's input set.
+ * deterministic recompute over the same TRUSTED `input` window/threshold/assets,
+ * making the "reproduces the headless path" invariant a runtime check rather than
+ * a property of the scripted double alone. `reconciled` is true only when the two
+ * agree byte-for-byte — a hallucinated window, threshold, or allowlist yields
+ * `reconciled: false`, and the caller (`bin/finbot-dispatch`, via
+ * {@link guardedObservation}) refuses to drive the loop on a non-reconciling
+ * observation. OBSERVE is the first stage, so an unreconciled divergence would
+ * change the whole loop's input set.
  *
  * @param {object} input  { readings, thresholdBps?, assets? }
  * @param {object} deps
@@ -103,13 +104,14 @@ export function observerBrief(input) {
  * @param {Function} [deps.llm]        injected LLM; omit to use the harness stub (offline)
  * @param {Record<string, object>} [deps.tools]  tool registry (default: observer detect tools)
  * @param {string[]} [deps.capabilities]         tool subset the observer may call (default: observer tool names)
- * @returns {Promise<object>} { handle, status, observation, canonical, reconciled, crossings, observed, toolCalls, finalText }.
- *   `observation` — and the `crossings` pulled from it — is the UNTRUSTED,
- *   boundary-crossed value the subagent surfaced; `canonical` is the trusted
- *   deterministic recompute and is the value a caller should feed downstream
- *   (`bin/finbot-dispatch` reads `canonical`, never `crossings`). `crossings` is
- *   exposed only for divergence reporting — it equals `canonical.crossings`
- *   exactly when `reconciled` is true, and may diverge otherwise.
+ * @returns {Promise<object>} { handle, status, observation, canonical, reconciled, reportedCrossings, observed, toolCalls, finalText }.
+ *   `canonical` is the trusted deterministic recompute and is the ONLY value a
+ *   caller should feed downstream (`bin/finbot-dispatch` reads `canonical.crossings`,
+ *   never the reported ones). `observation` and `reportedCrossings` are the
+ *   UNTRUSTED, boundary-crossed values the subagent surfaced, named to announce
+ *   they are for divergence reporting, not for driving the loop — `reportedCrossings`
+ *   equals `canonical.crossings` exactly when `reconciled` is true, and may diverge
+ *   otherwise.
  */
 export async function dispatchObserver(input, deps) {
   if (!deps || typeof deps.spawn !== 'function') {
@@ -156,11 +158,43 @@ export async function dispatchObserver(input, deps) {
     observation,
     canonical,
     reconciled,
-    crossings: observation ? observation.crossings || [] : [],
+    reportedCrossings: observation ? observation.crossings || [] : [],
     observed: observation != null,
     toolCalls,
     finalText: handle.result ? handle.result.finalText : '',
   };
+}
+
+/**
+ * Decide whether an OBSERVE dispatch is safe to drive the OODA loop, and select
+ * the TRUSTED value to feed downstream. The observation the subagent surfaced is
+ * boundary-crossed and is never fed forward; on success this hands back the
+ * `canonical` deterministic recompute, so no LLM-chosen value can reach
+ * ORIENT/DECIDE/AUDIT/ACT. Returns `{ ok: false, reason }` when the stage did not
+ * complete, never called the detector, or failed reconciliation; otherwise
+ * `{ ok: true, observation }` where `observation` is `dispatch.canonical`.
+ *
+ * Pulled out of `bin/finbot-dispatch` so the load-bearing "feed the trusted
+ * recompute, refuse a divergence" property is a testable pure function, not a
+ * caller-side convention that a regression could silently drop.
+ *
+ * @param {object} dispatch  a {@link dispatchObserver} return value
+ * @returns {{ ok: true, observation: object } | { ok: false, reason: string }}
+ */
+export function guardedObservation(dispatch) {
+  if (dispatch.status !== 'completed') {
+    return { ok: false, reason: `observer dispatch did not complete (status=${dispatch.status})` };
+  }
+  if (!dispatch.toolCalls.includes('observe_opportunities')) {
+    return { ok: false, reason: 'observer never called the deterministic observe_opportunities tool' };
+  }
+  if (!dispatch.reconciled) {
+    return {
+      ok: false,
+      reason: 'SAFETY — observer crossings diverge from the deterministic recompute over the trusted window; refusing to drive the loop on them',
+    };
+  }
+  return { ok: true, observation: dispatch.canonical };
 }
 
 /**
