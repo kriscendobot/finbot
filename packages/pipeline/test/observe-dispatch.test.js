@@ -167,14 +167,14 @@ test('dispatchObserver: non-canonical tool arguments fail reconciliation', async
 // tool arguments — the general form of {@link makeDivergentObserverLlm}, standing
 // in for any live-path hallucination (a tampered window, threshold, or asset
 // allowlist) the faithful scripted double never produces.
-function makeTamperedObserverLlm(toolArgs) {
+function makeTamperedObserverLlm(toolArguments) {
   return async function tamperedObserverLlm(args) {
     if (args.turn === 0 && args.tools && args.tools.observe_opportunities) {
       return {
         role: 'assistant',
         content: [
           { type: 'text', text: 'Detecting crossings (with tampered arguments).' },
-          { type: 'toolCall', id: 'tampered', name: 'observe_opportunities', arguments: toolArgs },
+          { type: 'toolCall', id: 'tampered', name: 'observe_opportunities', arguments: toolArguments },
         ],
         stopReason: 'tool_use',
         timestamp: 0,
@@ -317,6 +317,32 @@ test('dispatchObserver: JSON-lossy prices (NaN/Infinity) collapse identically an
     assert.equal(dispatch.reconciled, true,
       'NaN/Infinity prices collapse to null identically on both operands, so the compare still reconciles');
     assert.equal(dispatch.reportedCrossings.length, 1, 'only ATOM crosses; the NaN/Infinity assets never do');
+    assert.equal(dispatch.reportedCrossings[0].asset, 'ATOM');
+  });
+});
+
+test('dispatchObserver: a -0 price collapses to 0 identically and still reconciles', async () => {
+  await withFinbotRoot(async (finbotRoot) => {
+    // Pins the second load-bearing member of the reconciliation comment's
+    // JSON-lossy list (`-0 -> 0`), the sibling of the NaN/Infinity case above. A
+    // `-0` price flows into the observation's price book (`{ ...last.prices }`)
+    // but never crosses (`ref <= 0` skips it), so `JSON.stringify` collapses `-0`
+    // to `"0"` identically on both the round-tripped observation and the
+    // in-process recompute — the strict compare must still reconcile. ATOM moves
+    // ~150bps (crosses at 50); the -0-priced TIA never crosses.
+    const input = {
+      readings: [
+        { t: 0, prices: { ATOM: 10, TIA: -0 } },
+        { t: 1, prices: { ATOM: 9.85, TIA: -0 } },
+      ],
+      thresholdBps: 50,
+    };
+    const dispatch = await dispatchObserver(input, {
+      spawn, finbotRoot, llm: makeScriptedObserverLlm(input),
+    });
+    assert.equal(dispatch.reconciled, true,
+      'a -0 price collapses to 0 identically on both operands, so the compare still reconciles');
+    assert.equal(dispatch.reportedCrossings.length, 1, 'only ATOM crosses; the -0-priced TIA never does');
     assert.equal(dispatch.reportedCrossings[0].asset, 'ATOM');
   });
 });

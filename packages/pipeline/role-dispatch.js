@@ -190,7 +190,7 @@ export function guardedObservation(dispatch) {
     return { ok: false, reason: 'observer never called the deterministic observe_opportunities tool' };
   }
   // Distinct from a reconciliation divergence: the detector was called but no
-  // usable observation surfaced (an errored or json-less tool result → null),
+  // usable observation surfaced (an errored or json-less tool result -> null),
   // so `reconciled` is false for a different reason. Name the actual failed
   // precondition rather than reporting a spurious "crossings diverge".
   if (!dispatch.observed) {
@@ -243,9 +243,9 @@ export function lastObservationResult(events) {
 export function makeScriptedObserverLlm(input) {
   return async function scriptedObserverLlm(args) {
     if (args.turn === 0 && args.tools && args.tools.observe_opportunities) {
-      const toolArgs = { readings: input.readings || [] };
-      if (input.thresholdBps != null) toolArgs.thresholdBps = input.thresholdBps;
-      if (input.assets) toolArgs.assets = input.assets;
+      const toolArguments = { readings: input.readings || [] };
+      if (input.thresholdBps != null) toolArguments.thresholdBps = input.thresholdBps;
+      if (input.assets) toolArguments.assets = input.assets;
       return {
         role: 'assistant',
         content: [
@@ -254,7 +254,7 @@ export function makeScriptedObserverLlm(input) {
             type: 'toolCall',
             id: 'observe-opportunities-0',
             name: 'observe_opportunities',
-            arguments: toolArgs,
+            arguments: toolArguments,
           },
         ],
         stopReason: 'tool_use',
