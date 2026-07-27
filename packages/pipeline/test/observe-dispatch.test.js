@@ -260,6 +260,28 @@ test('dispatchObserver: an empty asset allowlist restricts to no assets and reco
   });
 });
 
+test('dispatchObserver: an absent threshold reconciles against the tool default', async () => {
+  await withFinbotRoot(async (finbotRoot) => {
+    // No `thresholdBps` at all (distinct from an explicit `0`): the scripted
+    // double OMITS the arg so the tool applies its own default (50), and the
+    // canonical recompute passes `thresholdBps: undefined` (same default). The
+    // absent-vs-explicit-zero corner — the null false-branch of both
+    // makeScriptedObserverLlm and the canonical recompute — must still reconcile,
+    // and agree with the headless call carrying no threshold option. Reddens if
+    // the tool's default and the recompute's default ever drift apart.
+    const input = { readings: observeInput().readings };
+    const headless = observeOpportunities({ readings: input.readings }, {});
+    const dispatch = await dispatchObserver(input, {
+      spawn, finbotRoot, llm: makeScriptedObserverLlm(input),
+    });
+    assert.equal(dispatch.reconciled, true,
+      'the absent-threshold dispatch reconciles with the default-threshold recompute');
+    assert.deepEqual(dispatch.observation, headless);
+    assert.deepEqual(dispatch.observation, dispatch.canonical);
+    assert.equal(dispatch.crossings.length, 1, 'ATOM crosses the default 50bps; flat OSMO does not');
+  });
+});
+
 test('dispatchObserver: honors a zero threshold rather than defaulting it', async () => {
   await withFinbotRoot(async (finbotRoot) => {
     // thresholdBps: 0 is a real threshold (every move crosses), not "absent"

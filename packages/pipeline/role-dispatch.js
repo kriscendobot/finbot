@@ -80,9 +80,11 @@ export function observerBrief(input) {
 /**
  * Dispatch the oracle-watcher as an inference-driven subagent over a price
  * window, with the observe-phase deterministic detector available as a tool.
- * The stage's product — the observation `{ readings, crossings, observedAtTick }`
- * — is extracted from the tool-execution events, so the inference-driven path
- * and the headless `observeOpportunities` call yield the same crossings.
+ * The stage's product — the observation `{ readings` (the latest price *book*,
+ * `Record<asset, price>` — distinct from the input's reading *window* array),
+ * `crossings, observedAtTick }` — is extracted from the tool-execution events,
+ * so the inference-driven path and the headless `observeOpportunities` call
+ * yield the same crossings.
  *
  * A live subagent chooses the `observe_opportunities` arguments freely, so the
  * extracted observation is not trusted on its face: it is RECONCILED against a
@@ -101,7 +103,13 @@ export function observerBrief(input) {
  * @param {Function} [deps.llm]        injected LLM; omit to use the harness stub (offline)
  * @param {Record<string, object>} [deps.tools]  tool registry (default: observer detect tools)
  * @param {string[]} [deps.capabilities]         tool subset the observer may call (default: observer tool names)
- * @returns {Promise<object>} { handle, status, observation, canonical, reconciled, crossings, observed, toolCalls, finalText }
+ * @returns {Promise<object>} { handle, status, observation, canonical, reconciled, crossings, observed, toolCalls, finalText }.
+ *   `observation` — and the `crossings` pulled from it — is the UNTRUSTED,
+ *   boundary-crossed value the subagent surfaced; `canonical` is the trusted
+ *   deterministic recompute and is the value a caller should feed downstream
+ *   (`bin/finbot-dispatch` reads `canonical`, never `crossings`). `crossings` is
+ *   exposed only for divergence reporting — it equals `canonical.crossings`
+ *   exactly when `reconciled` is true, and may diverge otherwise.
  */
 export async function dispatchObserver(input, deps) {
   if (!deps || typeof deps.spawn !== 'function') {
@@ -131,6 +139,14 @@ export async function dispatchObserver(input, deps) {
     { readings: input.readings || [] },
     { thresholdBps: input.thresholdBps, assets: input.assets },
   );
+  // `JSON.stringify` string-equality is a sound structural compare HERE only
+  // because both operands are outputs of the same pure `observeOpportunities`
+  // over identically-ordered readings: key insertion order matches, and any
+  // JSON-lossy case (NaN/Infinity->null, -0->0, dropped undefined) collapses
+  // identically on both sides. It fails SAFE — a real divergence never
+  // stringifies equal, so a spurious mismatch costs only an exit-1 upstream,
+  // never a false accept. A future edit that compares a value from a DIFFERENT
+  // producer must revisit this and use an order-insensitive deep-equal.
   const reconciled = observation != null
     && JSON.stringify(observation) === JSON.stringify(canonical);
 
