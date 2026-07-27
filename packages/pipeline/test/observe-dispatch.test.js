@@ -361,6 +361,55 @@ for (const [label, readings] of [['empty', []], ['singleton', [{ t: 0, prices: {
   });
 }
 
+test('dispatchObserver: an absent readings window yields zero crossings and reconciles', async () => {
+  await withFinbotRoot(async (finbotRoot) => {
+    // No `readings` key at all (distinct from an explicit `[]`): the
+    // `input.readings || []` fallback in dispatchObserver, observerBrief,
+    // makeScriptedObserverLlm, and the canonical recompute must all take the
+    // falsy branch and agree on an empty observation — the untested fallback
+    // (every prior case supplies a truthy array, so `[] || []` returns the first
+    // `[]`, never the fallback).
+    const input = { thresholdBps: 50 };
+    const dispatch = await dispatchObserver(input, {
+      spawn, finbotRoot, llm: makeScriptedObserverLlm(input),
+    });
+    assert.equal(dispatch.status, 'completed');
+    assert.equal(dispatch.reportedCrossings.length, 0);
+    assert.equal(dispatch.reconciled, true);
+  });
+});
+
+// The threshold is the one reconciled input whose value the subagent forwards
+// through its chosen `observe_opportunities` tool arguments, while the canonical
+// recompute receives `input.thresholdBps` directly — the two operands reach
+// their producer by different paths. Its out-of-band / JSON-lossy value set
+// (NaN, ±Infinity, a negative threshold) is therefore the corner where the two
+// paths could default apart (e.g. a serializing transport collapsing NaN->null,
+// which the tool would then default to 50 while the recompute keeps the raw
+// NaN). A faithful dispatch forwards the raw value on BOTH paths, so each must
+// still reconcile and agree crossing-for-crossing; this reddens if a future edit
+// lets the transports diverge for these values.
+for (const [label, thresholdBps] of [
+  ['NaN', NaN],
+  ['Infinity', Infinity],
+  ['-Infinity', -Infinity],
+  ['a negative', -5],
+]) {
+  test(`dispatchObserver: ${label} threshold — tool path and recompute agree, so it reconciles`, async () => {
+    await withFinbotRoot(async (finbotRoot) => {
+      const input = observeInput(thresholdBps);
+      const dispatch = await dispatchObserver(input, {
+        spawn, finbotRoot, llm: makeScriptedObserverLlm(input),
+      });
+      assert.equal(dispatch.status, 'completed');
+      assert.equal(dispatch.reconciled, true,
+        'the faithful dispatch forwards the raw threshold on both paths, so they still reconcile');
+      assert.deepEqual(dispatch.reportedCrossings, dispatch.canonical.crossings,
+        'the tool path and the deterministic recompute agree crossing-for-crossing');
+    });
+  });
+}
+
 test('dispatchObserver: a quiet window surfaces zero crossings through the same tool', async () => {
   await withFinbotRoot(async (finbotRoot) => {
     // A 300bps threshold is above the ~150bps ATOM move, so nothing crosses.
