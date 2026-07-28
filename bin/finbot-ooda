@@ -28,9 +28,12 @@
  *                    rather than silently collapsing back to --warmup
  *   --threshold=BPS  oracle deviation threshold in basis points (default 30)
  *   --ensemble=N     forecaster ensemble size (default 200)
- *   --horizon=N      forecaster horizon in whole ticks, >= 1 (default 20); it is the denominator of
- *                    the coverage ratio --data-sufficiency-min gates on, so a value that is not a
- *                    tick count is rejected (exit 2) rather than silently making that gate unevaluable
+ *   --horizon=N      forecaster BASE horizon in whole ticks, >= 1 (default 20); the projected horizon
+ *                    is the denominator of the coverage ratio --data-sufficiency-min gates on, so a
+ *                    value that is not a tick count is rejected (exit 2) rather than silently making
+ *                    that gate unevaluable. The projected horizon is this value AFTER any regime
+ *                    stretch (see --regime-horizon-stretch, which defaults to 0.5 under --adaptive-vol),
+ *                    so a persistent regime raises the denominator and lowers the achievable coverage
  *   --tail-floor=F   auditor tail-risk floor as a fraction of NAV (default 0.6)
  *   --regime-tail-bump=F  extra tail floor a fully persistent vol regime adds (default: 0.1 when
  *                    --adaptive-vol is on, else 0); a persistent GARCH regime tightens the audit gate
@@ -43,10 +46,11 @@
  *                    gates a forecast whose horizon outruns its observed window. An F the gate could
  *                    not evaluate (non-finite, negative, empty, or a positive value that quantizes to
  *                    zero at the coverage descriptor's 12-decimal resolution) is rejected (exit 2)
- *                    rather than silently disarming the gate. The achievable coverage is (observed returns of the
- *                    worst-covered asset) / --horizon, so the defaults (--warmup=10, --horizon=20)
- *                    top out near 0.45; widen the observed window with --fit-window (or --warmup) to
- *                    make a requirement of 1.0 reachable
+ *                    rather than silently disarming the gate. The achievable coverage is (observed returns of
+ *                    the worst-covered asset) / (the PROJECTED horizon, i.e. --horizon after any regime
+ *                    stretch), so the defaults (--warmup=10, --horizon=20, no --adaptive-vol) top out near
+ *                    0.45, and less than that when --adaptive-vol stretches the horizon; widen the observed
+ *                    window with --fit-window (or --warmup) to make a requirement of 1.0 reachable
  *   --multi          run the multi-instrument world (correlated growth legs + a yield leg)
  *   --adaptive-vol[=mle|auto|auto-egarch|auto-family]  fit a conditional-vol surface from the window; the
  *                    forecaster projects the ensemble under it and the analyzer
@@ -64,23 +68,29 @@ import process from 'node:process';
 
 import { makeWorld } from '../packages/simulator/world.js';
 import { runSimulator } from '../packages/simulator/runner.js';
-// `round12` is the ONE quantizer both the gate and this report compare through
-// (a local copy would let the label drift from the verdict it claims to mirror),
-// and `sanitizeLabel` is the ONE scrubber both apply to a caller-supplied
-// identifier before it lands in a record. Both come through the package entry
-// point, like `runOodaCycle`, rather than by reaching around it into a module.
-import { runOodaCycle, round12, sanitizeLabel } from '../packages/pipeline/index.js';
+// This report is a RECORDER of the same coverage evidence the auditor's verdict
+// records, so it shares every rule that evidence is written by rather than
+// re-approximating any of them: `round12` is the ONE quantizer, `formatCoverage`
+// the ONE formatter (a local `toFixed` would print a passing coverage as the
+// number that means "no gate at all"), `sanitizeLabel` the ONE scrubber for a
+// caller-supplied identifier, and `coverageThresholdUsable` the ONE definition
+// of a threshold the gate can evaluate — the test this CLI's validation must not
+// drift from. All come through the package entry point, like `runOodaCycle`,
+// rather than by reaching around it into a module.
+import {
+  runOodaCycle, round12, sanitizeLabel, formatCoverage, coverageThresholdUsable,
+} from '../packages/pipeline/index.js';
 
 /**
  * A flag value as a number, or NaN when the flag carried no value at all. Never
  * `Number(null)` / `Number('  ')`, both of which are 0 — a real, meaningful
  * setting for several of these knobs.
  *
- * @param {string|null} val
+ * @param {string|null} value
  * @returns {number}
  */
-function numberOrNaN(val) {
-  return val === null || String(val).trim() === '' ? NaN : Number(val);
+function numberOrNaN(value) {
+  return value === null || String(value).trim() === '' ? NaN : Number(value);
 }
 
 function parseArgs(argv) {
@@ -142,27 +152,23 @@ function parseArgs(argv) {
   // is NaN and `NaN > 0` is false, so an unvalidated value would wire the knob,
   // print the coverage line, and emit no invariant at all — a gate the operator
   // believes is armed and is not. Fail fast instead, as finbot-eval does for
-  // --significance-alpha. The test is the auditor's own, so a value the CLI
-  // accepts is a value the gate can evaluate: finite, non-negative, and — when
-  // positive — does not quantize to zero at the descriptor's 12-decimal
-  // resolution, below which no coverage could ever fail it. (That boundary is
-  // where `round12` rounds up, just above 5e-13, not 1e-12 itself.)
-  if (args.dataSufficiencyMin != null
-      && !(Number.isFinite(args.dataSufficiencyMin) && args.dataSufficiencyMin >= 0
-           && (args.dataSufficiencyMin === 0 || round12(args.dataSufficiencyMin) > 0))) {
+  // --significance-alpha. The test is the auditor's own exported predicate — not
+  // a restatement of it — so a value this CLI accepts is by construction a value
+  // the gate can evaluate.
+  if (args.dataSufficiencyMin != null && !coverageThresholdUsable(args.dataSufficiencyMin)) {
     console.error('finbot-ooda: --data-sufficiency-min must be a finite number >= 0 that, when '
       + "positive, does not quantize to zero at the descriptor's 12-decimal resolution "
       + '(for example --data-sufficiency-min=1)');
     process.exit(2);
   }
-  // The horizon is the DENOMINATOR of the ratio that gate reads, so leaving it
-  // unvalidated would disarm through the sibling flag: `--horizon=abc` yields a
-  // horizon that is not a tick count, hence an unmeasurable coverage descriptor,
-  // and an operator who armed the gate would watch it reject everything without
-  // learning why. A horizon is a whole number of ticks, and at least one — a
-  // zero-tick projection is the one shape the gate passes unconditionally
-  // (it cannot outrun a window it never used), which is not a cycle worth
-  // running and is not a way to arm a gate.
+  // The horizon is the base of the DENOMINATOR the gate's ratio is taken over,
+  // so leaving it unvalidated would disarm through the sibling flag:
+  // `--horizon=abc` yields a horizon that is not a tick count, hence an
+  // unmeasurable coverage descriptor, and an operator who armed the gate would
+  // watch it reject everything without learning why. A horizon is a whole number
+  // of ticks, and at least one: a zero-tick projection clears no positive
+  // coverage requirement anyway (the armed gate has NO unconditional pass — see
+  // `dataSufficiencyGate`), so it is not a cycle worth running.
   if (!(Number.isInteger(args.horizon) && args.horizon >= 1)) {
     console.error('finbot-ooda: --horizon must be a whole number of ticks >= 1 '
       + '(for example --horizon=20)');
@@ -389,7 +395,10 @@ function printReport(res, args) {
       const worstAsset = typeof dataSufficiency.worstAsset === 'string'
         ? sanitizeLabel(dataSufficiency.worstAsset) : null;
       const onAsset = worstAsset ? ` on ${worstAsset}` : '';
-      const coverage = measured ? dataSufficiency.coverageRatio.toFixed(2) : 'UNMEASURABLE';
+      // The auditor's own formatter, not a local `toFixed`: below three decimals
+      // a flat format renders a coverage that PASSES as `0.00`, the number that
+      // reads as the OFF value, on the line that is this report's evidence.
+      const coverage = measured ? formatCoverage(dataSufficiency.coverageRatio) : 'UNMEASURABLE';
       const ticks = dataSufficiency.horizon == null ? 'unmeasurable' : `${dataSufficiency.horizon}-tick`;
       log(`           data-sufficiency: coverage=${coverage}${onAsset} `
         + `(${dataSufficiency.historyReturns} observed return(s) / ${ticks} horizon)`

@@ -21,7 +21,7 @@ import { observeOpportunities, windowFromHistory } from './oracle-watcher.js';
 import { analyze } from './analyzer.js';
 import { project } from './forecaster.js';
 import { plan } from './planner.js';
-import { audit } from './auditor.js';
+import { audit, coverageGateArmed } from './auditor.js';
 import { execute } from './executor.js';
 import { navOf } from './rebalance.js';
 
@@ -168,13 +168,11 @@ export async function runOodaCycle(input) {
   // can no longer disarm the gate: an explicit `false` under an armed threshold
   // leaves the auditor with no evidence, which now FAILS the invariant closed
   // rather than passing it vacuously. Both off -> unchanged.
-  // The predicate MIRRORS the auditor's arming test exactly — supplied, and not
-  // the number 0 — read strictly rather than through `Number()`, so a malformed
-  // threshold (which arms the gate there) also enables the evidence here instead
-  // of coercing onto the OFF value.
-  const gateMinCoverage = auditorConfig.dataSufficiencyMinCoverage;
+  // The arming test is the auditor's own exported predicate, not a copy of it: a
+  // mirror that drifted would either withhold evidence from an armed gate or
+  // arm the forecaster's measurement for a gate that is off.
   if (forecasterConfig.reportDataSufficiency === undefined
-      && gateMinCoverage != null && gateMinCoverage !== 0) {
+      && coverageGateArmed(auditorConfig.dataSufficiencyMinCoverage)) {
     forecasterConfig.reportDataSufficiency = true;
   }
   const forecast = project(

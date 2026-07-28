@@ -13,21 +13,30 @@
 
 export { observeOpportunities, windowFromHistory } from './oracle-watcher.js';
 export { analyze, realizedVolatility } from './analyzer.js';
-// `round12` and `computeDataSufficiency` are named here, not only on the
-// `./forecaster` subpath, because they are cross-MODULE contracts with
-// out-of-package consumers (the auditor's gate and `bin/finbot-ooda` both
-// quantize through the one `round12`): an export the package's own bins consume
-// belongs at the entry point, so "exactly one quantizer" is enforceable from it.
-export {
-  project, makeRebalanceAction, round12, computeDataSufficiency,
-} from './forecaster.js';
+// `round12` is named here, not only on the `./forecaster` subpath, because it is
+// a cross-MODULE contract with an out-of-package consumer: the auditor's gate and
+// `bin/finbot-ooda` both quantize through the one `round12`, and an export the
+// package's own bins consume belongs at the entry point, so "exactly one
+// quantizer" is enforceable from it. `computeDataSufficiency` is NOT promoted —
+// it has no consumer outside `forecaster.js` (its tests import the module
+// directly), and the criterion has to hold for every name it covers.
+export { project, makeRebalanceAction, round12 } from './forecaster.js';
 export { plan, hashProposal } from './planner.js';
 export {
   toleranceFromProfile, selectAllocationForProfile, planForProfile,
 } from './profile-allocation.js';
-// `sanitizeLabel` likewise: a caller-supplied identifier that the auditor
-// sanitizes before recording is sanitized by every module that records it.
-export { audit, sanitizeLabel } from './auditor.js';
+// The auditor's recording and gating primitives are promoted on the same
+// criterion, and each has the same out-of-package consumer — `bin/finbot-ooda`,
+// which re-records the coverage evidence and validates the flag that arms the
+// gate. A caller-supplied identifier the auditor sanitizes before recording is
+// sanitized (and bounded, hence `MAX_LABEL_CODE_POINTS`) by every module that
+// records it; a coverage ratio the auditor formats for a record is formatted the
+// same way by every module that records it; and the arming/usability predicates
+// are the one definition the CLI's validation must not drift from.
+export {
+  audit, sanitizeLabel, MAX_LABEL_CODE_POINTS, formatCoverage,
+  coverageThresholdUsable, coverageGateArmed,
+} from './auditor.js';
 export { execute, currentNav } from './executor.js';
 export {
   navOf, computeTargetBalances, deriveSteps, applyStepsToPortfolio,

@@ -59,7 +59,7 @@ test('finbot-ooda: an armed gate rejects a thin forecast and labels it SCARCE', 
   // the operator required.
   const result = runCli('--horizon=20', '--data-sufficiency-min=1', '--ensemble=8');
   assert.equal(result.status, 0);
-  assert.match(result.stdout, /data-sufficiency: coverage=0\.45 on ATOM .*SCARCE/);
+  assert.match(result.stdout, /data-sufficiency: coverage=0\.450 on ATOM .*SCARCE/);
   assert.match(result.stdout, /auditor: REJECTED failed=forecast-data-sufficiency/);
 });
 
@@ -85,7 +85,7 @@ test('finbot-ooda: an armed gate that the forecast CLEARS approves, with no SCAR
   const result = runCli('--warmup=40', '--fit-window=40', '--horizon=20',
     '--data-sufficiency-min=1', '--ensemble=8');
   assert.equal(result.status, 0);
-  assert.match(result.stdout, /data-sufficiency: coverage=1\.95 on ATOM/);
+  assert.match(result.stdout, /data-sufficiency: coverage=1\.950 on ATOM/);
   assert.ok(!/SCARCE/.test(result.stdout), 'a cleared gate never labels the forecast scarce');
   assert.match(result.stdout, /\[PASS\] forecast-data-sufficiency/);
   assert.match(result.stdout, /auditor: APPROVED/);
@@ -99,7 +99,7 @@ test('finbot-ooda: the gate is wired in the MULTI world too, not only the single
   const result = runCli('--multi', '--seed=3', '--drift=-0.03', '--horizon=20',
     '--data-sufficiency-min=1', '--ensemble=8');
   assert.equal(result.status, 0);
-  assert.match(result.stdout, /data-sufficiency: coverage=0\.45 on ATOM .*SCARCE/);
+  assert.match(result.stdout, /data-sufficiency: coverage=0\.450 on ATOM .*SCARCE/);
   assert.match(result.stdout, /auditor: REJECTED failed=forecast-data-sufficiency/);
 });
 

@@ -99,7 +99,12 @@ perfectly fresh and still be thin. The forecast carries a measured descriptor
 (`{ historyFrames, historyReturns, worstAsset, horizon, coverageRatio }`);
 coverage is observed returns per projected tick, measured PER ASSET and reported
 for the WORST-covered one, so a freshly-listed instrument cannot hide behind its
-better-observed neighbours.
+better-observed neighbours. The measurement names no fallback for a projection
+carrying no nameable asset: with no asset set, nothing distinguishes a price from
+any other positive number, so an unknown shape measures ZERO rather than
+everything. Evidence-free frames — an empty price map, a `0` or negative stall
+sentinel, an inherited or accessor price — pad nothing, and the ownness check
+that decides so is itself prototype-independent.
 
 ```pseudo
 if data_sufficiency_min_coverage is supplied and is not the number 0:  # absent / null / 0 is OFF

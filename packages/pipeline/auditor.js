@@ -18,6 +18,8 @@ import { stepHasRealRoute } from './substrates.js';
 import { worstAssetPersistence, persistenceStress, round12 } from './forecaster.js';
 
 /** @import { DataSufficiency, ForecastProjection } from './forecaster.js' */
+/** @import { Proposal } from './planner.js' */
+/** @import { Opportunity } from './oracle-watcher.js' */
 
 /**
  * @typedef {object} AuditVerdict
@@ -29,7 +31,7 @@ import { worstAssetPersistence, persistenceStress, round12 } from './forecaster.
 
 /**
  * @param {object} input
- * @param {import('./planner.js').Proposal} input.proposal
+ * @param {Proposal} input.proposal
  * @param {ForecastProjection|null|undefined} input.forecast   the projection that justified the
  *   proposal. Declared possibly-absent and read as possibly-malformed on purpose: `audit()` is
  *   reached with a CALLER-supplied forecast (the LLM-facing `audit_proposal` tool, the executor's
@@ -37,7 +39,7 @@ import { worstAssetPersistence, persistenceStress, round12 } from './forecaster.
  * @param {{ cash: number, balances: Record<string, number> }} input.portfolio  pre-trade snapshot
  * @param {Record<string, number>} input.prices
  * @param {number} input.currentTick                 freshness clock
- * @param {import('./oracle-watcher.js').Opportunity[]} [input.oracleReadings]   cited readings (carry observedAtTick)
+ * @param {Opportunity[]} [input.oracleReadings]   cited readings (carry observedAtTick)
  * @param {object} [config]
  * @param {number} [config.maxStepPct]               default 0.25
  * @param {number} [config.maxDayPct]                default 0.50
@@ -54,17 +56,10 @@ import { worstAssetPersistence, persistenceStress, round12 } from './forecaster.
  * @param {number} [config.stalenessWindowTicks]     cited readings no older than this (default 5)
  * @param {unknown} [config.dataSufficiencyMinCoverage]  minimum forecast coverage ratio (observed returns per
  *   projected tick) the gate requires. Declared `unknown` because it is caller-supplied and every branch
- *   below reads it as such. Absent, `null`, or the number 0 is OFF: the invariant is not even emitted,
- *   so the verdict is byte-identical to before. When armed, a forecast whose coverage — RECOMPUTED from the
- *   descriptor's own counts, never read off its reported ratio — falls below the requirement fails the gate,
- *   and so does a forecast carrying no measurable descriptor, one whose counts refute each other, and one
- *   whose own `horizon` is absent or unreadable: an armed gate with no evidence, or contradictory evidence,
- *   fails CLOSED rather than approving vacuously. Only a `number` is honored: any other type (`''`, `false`, `[]`, `'1'`,
- *   a Symbol) is an unusable threshold, as is a non-finite or negative number or a positive one that
- *   quantizes to zero at the descriptor's own 12-decimal resolution (which no coverage could fail — the
- *   boundary is where `round12` rounds up, just above 5e-13, not 1e-12 itself), and an unusable threshold
- *   arms the gate and fails it closed rather than coercing onto the OFF value — a malformed knob can never
- *   silently degrade to no gate at all.
+ *   below reads it as such. `coverageGateArmed` decides OFF-vs-armed and `coverageThresholdUsable` decides
+ *   whether an armed gate can evaluate the threshold at all; both are exported, and their docstrings carry
+ *   the rationale. Armed, the gate fails CLOSED — see `dataSufficiencyGate`, and
+ *   `skills/pre-execution-audit/SKILL.md` § 7 for the canonical statement.
  * @returns {AuditVerdict}
  */
 export function audit(input, config = {}) {
@@ -83,23 +78,13 @@ export function audit(input, config = {}) {
   const regimePersistenceHi = withDefault(config.regimePersistenceHi, 0.98);
   const regimeTailFloorCap = withDefault(config.regimeTailFloorCap, 0.98);
   const stalenessWindowTicks = withDefault(config.stalenessWindowTicks, 5);
-  // Read the gate's threshold STRICTLY, never through `Number()`: the whole
-  // falsy family (`''`, `'  '`, `false`, `[]`, `null`-ish objects) coerces to 0,
-  // which is exactly the OFF value — a coercing read hands an operator who asked
-  // for a gate no gate at all, and `Number()` on a Symbol or a hostile `valueOf`
-  // throws out of the auditor instead of returning a verdict. A non-number is an
-  // unusable threshold: it ARMS the gate and fails it closed (below).
+  // The threshold's arming and usability tests are the exported predicates, so
+  // the CLI's flag validation and the cycle's evidence auto-enable cannot drift
+  // from the gate they claim to mirror.
   const rawMinCoverage = config.dataSufficiencyMinCoverage;
   const dataSufficiencyMinCoverage = typeof rawMinCoverage === 'number' ? rawMinCoverage : NaN;
-  // A positive threshold BELOW the descriptor's own 12-decimal resolution is
-  // unusable too: every coverage would quantize to at-or-above it, so the gate
-  // would be armed and vacuous — the same "armed and isn't" mode a coerced
-  // threshold produces.
-  const minCoverageUsable = Number.isFinite(dataSufficiencyMinCoverage)
-    && dataSufficiencyMinCoverage >= 0
-    && (dataSufficiencyMinCoverage === 0 || round12(dataSufficiencyMinCoverage) > 0);
-  const dataSufficiencyArmed = rawMinCoverage != null
-    && (!minCoverageUsable || dataSufficiencyMinCoverage > 0);
+  const minCoverageUsable = coverageThresholdUsable(rawMinCoverage);
+  const dataSufficiencyArmed = coverageGateArmed(rawMinCoverage);
 
   const { proposal, forecast, prices } = input;
   const nav = navOf(input.portfolio, prices);
@@ -139,7 +124,7 @@ export function audit(input, config = {}) {
       // The asset name is caller-supplied on the same untrusted surface the
       // descriptor's `worstAsset` arrives on, and lands in the same recorded
       // detail line — so it takes the same sanitizer. A family, not a special case.
-      riskDetail = `${labelOr(s.asset, 'an unnamed asset')} weight ${(weight * 100).toFixed(1)}% exceeds concentration cap ${(concentrationCapPct * 100).toFixed(0)}%`;
+      riskDetail = `${sanitizedLabelOr(s.asset, 'an unnamed asset')} weight ${(weight * 100).toFixed(1)}% exceeds concentration cap ${(concentrationCapPct * 100).toFixed(0)}%`;
       break;
     }
   }
@@ -175,7 +160,7 @@ export function audit(input, config = {}) {
       : p05Equity == null
         ? `forecast carries no finite p05 terminal equity vs floor ${floor.toFixed(2)}`
         : `forecast p05 terminal equity ${p05Equity.toFixed(2)} vs floor ${floor.toFixed(2)} (${(regime.floorPct * 100).toFixed(1)}% of NAV${regime.tightened
-          ? `; regime-tightened from ${(tailFloorPct * 100).toFixed(1)}% on persistence ${regime.persistence.toFixed(3)} of ${safeLabel(regime.worstAsset)}`
+          ? `; regime-tightened from ${(tailFloorPct * 100).toFixed(1)}% on persistence ${regime.persistence.toFixed(3)} of ${sanitizedLabel(regime.worstAsset)}`
           : ''})`,
   });
 
@@ -215,7 +200,7 @@ export function audit(input, config = {}) {
     const unreachable = realRouteSteps.filter((s) => !stepHasRealRoute(s));
     routePass = unreachable.length === 0;
     routeDetail = routePass
-      ? `all ${realRouteSteps.length} step(s) carry a reachable ${labelOr(proposal.substrate, 'substrate')} place/route`
+      ? `all ${realRouteSteps.length} step(s) carry a reachable ${sanitizedLabelOr(proposal.substrate, 'substrate')} place/route`
       : `${unreachable.length} step(s) have an unresolved place/route (unmapped or unknown venue)`;
   }
   results.push({ name: 'place-route-reachability', pass: routePass, detail: routeDetail });
@@ -244,6 +229,55 @@ export function audit(input, config = {}) {
     invariant_results: results,
     failed_invariants: failed,
   };
+}
+
+/**
+ * Can the data-sufficiency gate EVALUATE this threshold?
+ *
+ * Read strictly, never through `Number()`: the whole falsy family (`''`, `'  '`,
+ * `false`, `[]`) coerces to 0, which is exactly the OFF value — a coercing read
+ * hands an operator who asked for a gate no gate at all — and `Number()` on a
+ * Symbol or a hostile `valueOf` throws out of the auditor instead of returning a
+ * verdict. A positive threshold BELOW the descriptor's own 12-decimal resolution
+ * is unusable too: every coverage would quantize to at-or-above it, so the gate
+ * would be armed and vacuous, the same "armed and isn't" mode a coerced
+ * threshold produces. (That boundary is where `round12` rounds up, just above
+ * 5e-13, not 1e-12 itself.)
+ *
+ * Exported as the ONE definition of the predicate, for the same reason `round12`
+ * is the one quantizer it is built on: `bin/finbot-ooda` rejects a threshold the
+ * gate could not evaluate, and `ooda-cycle.js` enables the forecaster's evidence
+ * for a threshold that arms it. A copy in either place drifts, and both
+ * directions of drift are silent — relax it and the CLI exits 2 on values the
+ * gate accepts; tighten it and the CLI accepts a value that arms the gate and
+ * fails it closed, which is the disarm-by-typo the validation exists to prevent.
+ *
+ * @param {unknown} value   `config.dataSufficiencyMinCoverage`, as supplied
+ * @returns {boolean}
+ */
+export function coverageThresholdUsable(value) {
+  return typeof value === 'number'
+    && Number.isFinite(value)
+    && value >= 0
+    && (value === 0 || round12(value) > 0);
+}
+
+/**
+ * Is the data-sufficiency gate ARMED by this threshold?
+ *
+ * Absent, `null`, or the number 0 is OFF: the invariant is not even emitted, so
+ * the verdict is byte-identical to before. Anything else arms it — including a
+ * threshold the gate cannot evaluate, which arms it and fails it CLOSED rather
+ * than coercing onto the OFF value, so a malformed knob can never silently
+ * degrade to no gate at all.
+ *
+ * @param {unknown} value   `config.dataSufficiencyMinCoverage`, as supplied
+ * @returns {boolean}
+ */
+export function coverageGateArmed(value) {
+  if (value == null) return false;
+  if (!coverageThresholdUsable(value)) return true;
+  return value > 0;
 }
 
 /**
@@ -280,6 +314,13 @@ function wholeCount(value) {
  * `[[Get]]`), because an own accessor on untrusted input would otherwise run
  * inside `audit()`.
  *
+ * The descriptor's own `value` is tested with `Object.hasOwn`, never `'value' in
+ * descriptor`: a descriptor is an ordinary object inheriting from
+ * `Object.prototype`, and `in` walks that chain, so a single polluted
+ * `Object.prototype.value` would make every ACCESSOR descriptor — which carries
+ * no own `value` — answer with the polluted value. That is the same substitution
+ * this function exists to refuse, reintroduced by the ownness check itself.
+ *
  * @param {unknown} object
  * @param {string} key
  * @returns {unknown}
@@ -292,7 +333,7 @@ function readOwn(object, key) {
   } catch (_error) {
     return undefined; // a hostile proxy trap owes a verdict, not an exception
   }
-  return descriptor && 'value' in descriptor ? descriptor.value : undefined;
+  return descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
 }
 
 /**
@@ -331,26 +372,31 @@ function describeThreshold(value) {
  * @param {unknown} value
  * @returns {string|null}  null when the value is not a string at all
  */
-function safeLabel(value) {
+function sanitizedLabel(value) {
   if (typeof value !== 'string') return null;
   return sanitizeLabel(value);
 }
 
 /**
- * `safeLabel` with a fallback for the non-string case, for the detail lines that
+ * `sanitizedLabel` with a fallback for the non-string case, for the detail lines that
  * want a word there rather than `null`.
  *
  * @param {unknown} value
  * @param {string} fallback
  * @returns {string}
  */
-function labelOr(value, fallback) {
-  const label = safeLabel(value);
+function sanitizedLabelOr(value, fallback) {
+  const label = sanitizedLabel(value);
   return label != null && label !== '' ? label : fallback;
 }
 
-/** The label cap, in CODE POINTS (see `sanitizeLabel`). */
-const MAX_LABEL_CODE_POINTS = 48;
+/**
+ * The label cap, in CODE POINTS (see `sanitizeLabel`). Exported alongside the
+ * sanitizer for the same reason the sanitizer is exported: a module that records
+ * one of these labels needs the bound to size its field and to tell a truncated
+ * label from one that genuinely ends in `...`.
+ */
+export const MAX_LABEL_CODE_POINTS = 48;
 
 /**
  * Rewrite every character that could restructure the record to `?`, and cap the
@@ -364,17 +410,31 @@ const MAX_LABEL_CODE_POINTS = 48;
  * reader treats as structure, not text: C0 and DEL, the C1 block (U+0085 NEL and
  * U+009B CSI reach a TTY), the Unicode line terminators U+2028 / U+2029 (line
  * breaks to any Unicode-aware splitter, and NOT escaped by `JSON.stringify`),
- * and the bidi overrides U+202A–U+202E / U+2066–U+2069, which can visually
- * reorder a verdict without changing a byte of it.
+ * the bidi overrides U+202A-U+202E / U+2066-U+2069, which can visually reorder a
+ * verdict without changing a byte of it, and the SURROGATE range U+D800-U+DFFF.
+ *
+ * The surrogate clause is what makes the well-formedness claim below true of the
+ * INPUT, not just of this function's own truncation. The string iterator yields
+ * an unpaired surrogate as a lone code point, so a caller-supplied
+ * `worstAsset: 'AT\uD83DOM'` would otherwise pass through unchanged: the
+ * journal's UTF-8 writer degrades it to U+FFFD while `JSON.stringify` emits
+ * `"AT\ud83dOM"` — two readers, divergent bytes, which is exactly the hazard
+ * cited for the truncation. A well-formed astral pair is unaffected: the
+ * iterator yields it as one code point at or above U+10000, and only an
+ * UNPAIRED unit ever surfaces in the surrogate range.
  *
  * Truncation is by CODE POINT, matching the iteration: `slice` is code-unit
- * indexed, so capping there would split an astral pair and emit a lone
- * surrogate — a string that is not well-formed UTF-16, which the journal's UTF-8
- * writer degrades to U+FFFD while `--json` serializes it as `\ud83d`. Two
- * readers, divergent bytes, on the record that attests why execution was gated.
+ * indexed, so capping there would split an astral pair and emit exactly such a
+ * lone surrogate.
+ *
+ * The output is at most `MAX_LABEL_CODE_POINTS + 3` code points — the cap plus
+ * the `...` truncation marker — which is why that constant is exported: a
+ * co-recorder cannot size the field, or tell a truncation from a label that
+ * really ends in an ellipsis, without it.
  *
  * @param {string} text
- * @returns {string}
+ * @returns {string}  at most `MAX_LABEL_CODE_POINTS + 3` code points, always
+ *   well-formed UTF-16, carrying no structural code point
  */
 export function sanitizeLabel(text) {
   const printable = [];
@@ -384,7 +444,8 @@ export function sanitizeLabel(text) {
       || (code >= 0x7f && code <= 0x9f)
       || code === 0x2028 || code === 0x2029
       || (code >= 0x202a && code <= 0x202e)
-      || (code >= 0x2066 && code <= 0x2069);
+      || (code >= 0x2066 && code <= 0x2069)
+      || (code >= 0xd800 && code <= 0xdfff);
     printable.push(structural ? '?' : character);
     if (printable.length > MAX_LABEL_CODE_POINTS) {
       return `${printable.slice(0, MAX_LABEL_CODE_POINTS).join('')}...`;
@@ -409,7 +470,7 @@ export function sanitizeLabel(text) {
  * not resolve in the applicant's favour.
  *
  * Every read inside is already individually guarded — `readOwn` catches its own
- * proxy trap, and `finiteNumber` / `wholeCount` / `safeLabel` are total over
+ * proxy trap, and `finiteNumber` / `wholeCount` / `sanitizedLabel` are total over
  * every value — so there is no outer `try` here: a throw escaping this function
  * would be an auditor bug, and swallowing it behind "carries no measurable
  * descriptor" would report that bug as the applicant's fault.
@@ -442,7 +503,7 @@ function readDataSufficiency(forecast) {
   const historyReturns = wholeCount(readOwn(raw, 'historyReturns'));
   const historyFrames = wholeCount(readOwn(raw, 'historyFrames'));
   const horizon = wholeCount(readOwn(raw, 'horizon'));
-  const worstAsset = safeLabel(readOwn(raw, 'worstAsset'));
+  const worstAsset = sanitizedLabel(readOwn(raw, 'worstAsset'));
   if (coverageRatio == null || coverageRatio < 0) {
     return {
       snapshot: null,
@@ -529,7 +590,9 @@ function dataSufficiencyGate({ forecast, minCoverage, minCoverageUsable, rawMinC
   const {
     coverageRatio, historyReturns, historyFrames, horizon, worstAsset, forecastHorizon,
   } = snapshot;
-  const onAsset = worstAsset != null ? ` on ${worstAsset}` : '';
+  // Same emptiness test `sanitizedLabelOr` applies: an empty label is not a name, and
+  // would leave a dangling ` on ` in the record.
+  const onAsset = worstAsset != null && worstAsset !== '' ? ` on ${worstAsset}` : '';
   const evidence = `(${historyReturns} observed return(s) / ${horizon}-tick horizon)`;
   if (forecastHorizon !== horizon) {
     return {
@@ -573,10 +636,17 @@ function dataSufficiencyGate({ forecast, minCoverage, minCoverageUsable, rawMinC
  * The detail line IS the evidence for refusing irreversible action, so below the
  * three-decimal resolution it switches to exponential rather than lying.
  *
+ * Exported for the reason `round12` and `sanitizeLabel` are: the CLI report
+ * re-prints the same coverage from the same descriptor, so it is a RECORDER too,
+ * and a figure written in two places is formatted by one formatter. A second,
+ * coarser rule there (a flat `toFixed(2)`) would print a passing `0.002`
+ * coverage as `0.00` — the same "reads as the OFF value" lie this function
+ * exists to refuse, reintroduced one module over.
+ *
  * @param {number} value
  * @returns {string}
  */
-function formatCoverage(value) {
+export function formatCoverage(value) {
   if (value !== 0 && Math.abs(value) < 5e-4) return value.toExponential(3);
   return value.toFixed(3);
 }
@@ -611,7 +681,15 @@ function regimeTailFloor({
   // The portfolio is only as safe as its most persistent instrument's regime;
   // key off the worst (max-persistence) fitted asset — the SAME worst-asset the
   // forecaster's regime-horizon stretch keys off, via the shared helper.
-  const { worstAsset, persistence } = worstAssetPersistence(forecast && forecast.volFit);
+  //
+  // `volFit` is read through `readOwn`, like every other field of this untrusted
+  // forecast: a plain `forecast.volFit` would run an own accessor inside
+  // `audit()` — and this call precedes every fail-closed branch below, so a
+  // throwing getter would abort the audit with no verdict at all, the one
+  // outcome `readOwn` exists to prevent. Own-only for the same reason too: an
+  // inherited `volFit` is regime evidence the producer never supplied, and it
+  // would silently move the floor this gate enforces.
+  const { worstAsset, persistence } = worstAssetPersistence(readOwn(forecast, 'volFit'));
   if (worstAsset == null) return base;
 
   const stress = persistenceStress(persistence, regimePersistenceLo, regimePersistenceHi);

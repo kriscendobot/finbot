@@ -89,16 +89,24 @@ export function fitForecastWorld(world, readings, adaptiveVol) {
       if (st.selection != null) assets[asset].selection = st.selection;
       if (st.selectionMargin != null) assets[asset].selectionMargin = round12(st.selectionMargin);
       if (st.oosQlike != null) {
-        assets[asset].oosQlike = Object.fromEntries(
+        assets[asset].oosQlike = Object.freeze(Object.fromEntries(
           Object.entries(st.oosQlike).map(([model, value]) => [model, round12(value)]),
-        );
+        ));
       }
+      // Each per-asset record is frozen HERE, not only the map holding them:
+      // `persistence` is the leaf the auditor's regime-tail-floor actually
+      // reads, so a freeze that stopped at the container would leave the one
+      // field that moves the floor writable after the artifact was hashed.
+      Object.freeze(assets[asset]);
     }
     fit.assets = Object.freeze(assets);
   }
   // Frozen for the same reason the data-sufficiency descriptor is: this record
   // is aliased into the hashed `projectionArtifact` and read by the auditor's
-  // regime-tail-floor, so hash and evidence must not be able to diverge.
+  // regime-tail-floor, so hash and evidence must not be able to diverge. The
+  // freeze is applied at every depth a consumer reads (the fit, its `assets`
+  // map, each per-asset record, and each record's `oosQlike`), because a
+  // container-only freeze proves nothing about the leaf a gate keys off.
   return { world: fitWorld, fit: Object.freeze(fit) };
 }
 
@@ -119,20 +127,34 @@ export function fitForecastWorld(world, readings, adaptiveVol) {
  * pass-through is the second overload, for the artifact-summary call sites that
  * quantize a possibly-absent stat.
  *
- * @overload
- * @param {number} x
- * @returns {number}
- *
- * @overload
- * @param {unknown} x
- * @returns {unknown}
- *
- * @param {unknown} x
- * @returns {unknown}  the quantized number, or `x` unchanged when it is not a
- *   finite number (the callers that need a number check first)
+ * Each overload gets its OWN comment block, and the implementation signature a
+ * final one: TypeScript's `@overload` form reads one signature per block, so
+ * collapsing them into a single block would publish the permissive
+ * `unknown -> unknown` signature alone — exactly the shape the paragraph above
+ * says the cross-module consumers cannot use.
  */
-export function round12(x) {
-  return typeof x === 'number' && Number.isFinite(x) ? Number(x.toFixed(12)) : x;
+
+/**
+ * @overload
+ * @param {number} value
+ * @returns {number}
+ */
+
+/**
+ * @overload
+ * @param {unknown} value
+ * @returns {unknown}
+ */
+
+/**
+ * @param {unknown} value
+ * @returns {unknown}  the quantized number, or `value` unchanged when it is not
+ *   a finite number (the callers that need a number check first)
+ */
+export function round12(value) {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? Number(value.toFixed(12))
+    : value;
 }
 
 /**
@@ -146,28 +168,50 @@ export function round12(x) {
  * Shared by the auditor's regime-tail-floor and the forecaster's regime-horizon
  * so the two levers key off the SAME worst-asset the same way.
  *
+ * TOTAL over every input, because one of its two callers is the auditor, whose
+ * `forecast` is caller-supplied on the `audit_proposal` / fire-time re-audit
+ * surface: a hostile `assets` proxy that throws from `ownKeys`, or a stat record
+ * that throws from a `persistence` accessor, reads as no regime signal — the
+ * same inert answer an absent volFit gives. A gate owes a verdict, not an
+ * exception, and this call runs BEFORE every fail-closed branch the auditor has.
+ *
  * @param {object|null|undefined} volFit   a forecast's `volFit` (`{ assets: { [asset]: { persistence } } }`)
  * @returns {{ worstAsset: string|null, persistence: number }}
  */
 export function worstAssetPersistence(volFit) {
-  const assets = volFit && volFit.assets;
-  if (!assets || typeof assets !== 'object') return { worstAsset: null, persistence: 0 };
+  const inert = { worstAsset: null, persistence: 0 };
+  const assets = volFit && typeof volFit === 'object' ? volFit.assets : null;
+  if (!assets || typeof assets !== 'object') return inert;
+  let entries;
+  try {
+    entries = Object.entries(assets);
+  } catch (_error) {
+    return inert; // a hostile ownKeys trap is not a regime signal
+  }
   let worstAsset = null;
   let maxPersistence = -Infinity;
-  for (const [asset, st] of Object.entries(assets)) {
-    const p = st && typeof st.persistence === 'number' ? st.persistence : null;
-    if (p == null || !Number.isFinite(p)) continue;
+  for (const [asset, st] of entries) {
+    let p;
+    try {
+      p = st && typeof st === 'object' ? st.persistence : null;
+    } catch (_error) {
+      continue; // a throwing accessor is no persistence estimate
+    }
+    if (typeof p !== 'number' || !Number.isFinite(p)) continue;
     // Ties break LEXICOGRAPHICALLY, never on `Object.entries` order: this
     // `worstAsset` rides into `horizonRegime` and thence into the hashed
     // artifact, so a key-order tie-break would make `projectionId` depend on how
     // the price map happened to be built — the same discipline (and the same
     // reason) as the data-sufficiency descriptor's worst-constituent tie-break.
-    if (p > maxPersistence || (p === maxPersistence && asset < worstAsset)) {
+    // The `worstAsset != null` guard is what makes the comparison well-typed:
+    // it holds whenever `maxPersistence` is finite, but only the explicit test
+    // says so to a reader (or a checker) of this line alone.
+    if (p > maxPersistence || (p === maxPersistence && worstAsset != null && asset < worstAsset)) {
       maxPersistence = p;
       worstAsset = asset;
     }
   }
-  if (worstAsset == null) return { worstAsset: null, persistence: 0 };
+  if (worstAsset == null) return inert;
   return { worstAsset, persistence: maxPersistence };
 }
 
@@ -246,11 +290,19 @@ export function regimeHorizon({ baseHorizon, volFit, stretch, lo, hi, cap }) {
  * POSITIVE in the name: a finite `0` or `-1` is not an observation here.
  *
  * The property is read through its own DESCRIPTOR rather than by `frame[asset]`:
- * `Object.hasOwn` proves the property exists, not that it is a data property, so
- * a plain read would invoke an own accessor — and a frame is untrusted input, so
- * a hostile getter would throw out of `project()` instead of counting as no
- * evidence. An accessor carries no `value`, so it reads as absent, which is the
- * fail-closed answer on the producing side too.
+ * a bare `Object.hasOwn(frame, asset)` proves the property exists, not that it
+ * is a data property, so a plain read would invoke an own accessor — and a frame
+ * is untrusted input, so a hostile getter would throw out of `project()` instead
+ * of counting as no evidence. An accessor carries no `value`, so it reads as
+ * absent, which is the fail-closed answer on the producing side too.
+ *
+ * The descriptor's own `value` is tested with `Object.hasOwn`, never `'value' in
+ * descriptor`: a descriptor object is an ordinary object inheriting from
+ * `Object.prototype`, and `in` is `HasProperty`, which walks that chain. A single
+ * polluted `Object.prototype.value` would otherwise make every ACCESSOR
+ * descriptor — which carries no own `value` — answer with the polluted price,
+ * turning "this frame observed nothing" into full coverage. The ownness check
+ * must itself be prototype-independent, or it is not an ownness check.
  *
  * @param {unknown} frame
  * @param {string} asset
@@ -264,43 +316,22 @@ function hasOwnPositivePrice(frame, asset) {
   } catch (_error) {
     return false; // a hostile proxy trap is not evidence either
   }
-  if (!descriptor || !('value' in descriptor)) return false;
+  if (!descriptor || !Object.hasOwn(descriptor, 'value')) return false;
   const price = descriptor.value;
   return typeof price === 'number' && Number.isFinite(price) && price > 0;
 }
 
 /**
- * The own data-property names of an untrusted frame, or an empty list. Own, and
- * NOT enumerable-only: `Object.keys` would disagree with `hasOwnPositivePrice`
- * on a non-enumerable own price, so the same frame would count as observed when
- * an asset is named and unobserved when it is not.
- *
- * Named for the guard rather than for the intrinsic it wraps: unlike
- * `Object.getOwnPropertyNames`, a hostile `ownKeys` trap yields an empty list
- * (no evidence) rather than an exception out of `project()`.
- *
- * @param {unknown} frame
- * @returns {string[]}
- */
-function safeOwnPropertyNames(frame) {
-  if (!frame || typeof frame !== 'object') return [];
-  try {
-    return Object.getOwnPropertyNames(frame);
-  } catch (_error) {
-    return [];
-  }
-}
-
-/**
- * Read one element of an untrusted array-like by INDEX, without letting a
+ * Read one ELEMENT of an untrusted array-like by index, without letting a
  * hostile `get` trap abort the measurement: a frame that throws on read is not
- * evidence, exactly as a frame carrying no own price is not.
+ * evidence, exactly as a frame carrying no own price is not. (Named for what it
+ * returns — the element — as its sibling `safeLength` is.)
  *
  * @param {ArrayLike<unknown>} arrayLike
  * @param {number} index
  * @returns {unknown}  the element, or `undefined` when the read throws
  */
-function safeIndex(arrayLike, index) {
+function safeElementAt(arrayLike, index) {
   try {
     return arrayLike[index];
   } catch (_error) {
@@ -309,11 +340,26 @@ function safeIndex(arrayLike, index) {
 }
 
 /**
+ * The walk budget for an untrusted array-like (see `safeLength`). Four orders of
+ * magnitude above any window this loop is run on — `--fit-window` is a tick
+ * count an operator types — and small enough that the walk is bounded work.
+ */
+const MAX_UNTRUSTED_LENGTH = 1e6;
+
+/**
  * The length of an untrusted array-like as a whole, non-negative count, read
  * EXACTLY ONCE so a `length` trap that answers differently on each read cannot
  * grow the window mid-walk (a one-element array reporting a rising `length`
  * would otherwise pad the frame count with `undefined`s that read as observed
  * only if the predicate let them).
+ *
+ * Snapshotting is necessary but not sufficient: a length is also BOUNDED, because
+ * `Array.isArray` is true of a Proxy over an array and `length` is writable, so a
+ * single honest-looking frame can report `2**53-1` and turn a measurement into an
+ * unbounded synchronous walk inside the OODA loop. Every other hostile shape here
+ * degrades to "no evidence" in O(1); this one must degrade too. Truncating to the
+ * budget is the fail-closed direction — a shorter window carries FEWER returns,
+ * hence less coverage, never more.
  *
  * @param {ArrayLike<unknown>} arrayLike
  * @returns {number}
@@ -325,7 +371,8 @@ function safeLength(arrayLike) {
   } catch (_error) {
     return 0;
   }
-  return typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? Math.trunc(raw) : 0;
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || !(raw > 0)) return 0;
+  return Math.min(Math.trunc(raw), MAX_UNTRUSTED_LENGTH);
 }
 
 /**
@@ -340,10 +387,11 @@ function safeLength(arrayLike) {
  * caller-supplied, `Array.isArray` says nothing about which `map` a [[Get]]
  * resolves to, and an own `map` that fabricates a longer mask would forge the
  * very coverage this measurement exists to bound. For the same reason the
- * length is snapshotted once (`safeLength`) and each element read through
- * `safeIndex`: a `length` trap that grows on each read would pad the window,
- * and a throwing `get` trap would abort `project()` instead of reading as the
- * absence of evidence it is.
+ * length is snapshotted once and bounded (`safeLength`) and each element read
+ * through `safeElementAt`: a `length` trap that grows on each read would pad the
+ * window, one that reports an enormous length would hang the walk, and a
+ * throwing `get` trap would abort `project()` instead of reading as the absence
+ * of evidence it is.
  *
  * @param {ArrayLike<unknown>} frames
  * @param {(frame: unknown) => boolean} observed
@@ -355,7 +403,7 @@ function countObservedFramesAndReturns(frames, observed) {
   let run = 0;
   const length = safeLength(frames);
   for (let i = 0; i < length; i += 1) {
-    if (!observed(safeIndex(frames, i))) { run = 0; continue; }
+    if (!observed(safeElementAt(frames, i))) { run = 0; continue; }
     run += 1;
     historyFrames += 1;
     if (run > 1) historyReturns += 1;
@@ -372,10 +420,13 @@ function countObservedFramesAndReturns(frames, observed) {
  * reads as no names rather than aborting `project()`.
  *
  * The second half of the return says whether the list was MALFORMED — supplied
- * but carrying nothing measurable. That is not the same as "no assets named":
- * naming none falls back to portfolio-wide counting, which is strictly more
- * permissive than any per-asset measure, so a malformed list must not reach it.
- * A measurement feeding a fail-closed gate degrades toward LESS coverage.
+ * but carrying an element this measurement cannot name an asset from. ANY
+ * non-string element malforms the WHOLE list, rather than being quietly dropped:
+ * coverage is the worst-covered constituent, so silently measuring a SUBSET
+ * reports at-least-as-much coverage as measuring the whole (`[42, 'ATOM']` would
+ * otherwise read as `['ATOM']` and hide whatever the unnameable element stood
+ * for). A measurement feeding a fail-closed gate degrades toward LESS coverage,
+ * so an unreadable element makes the list unmeasurable, not smaller.
  *
  * @param {unknown} assets
  * @returns {{ named: string[], malformed: boolean }}
@@ -385,11 +436,17 @@ function namedAssets(assets) {
   if (!Array.isArray(assets)) return { named: [], malformed: true };
   const named = [];
   const length = safeLength(assets);
+  // `safeLength` truncates at its budget, which is the fail-CLOSED direction for
+  // a frame window (fewer frames, less coverage) and the fail-OPEN one here
+  // (fewer constituents, and worst-of-a-subset is at least worst-of-the-whole).
+  // A list long enough to be truncated is therefore unmeasurable, not shorter.
+  if (length >= MAX_UNTRUSTED_LENGTH) return { named: [], malformed: true };
   for (let i = 0; i < length; i += 1) {
-    const asset = safeIndex(assets, i);
-    if (typeof asset === 'string') named.push(asset);
+    const asset = safeElementAt(assets, i);
+    if (typeof asset !== 'string') return { named: [], malformed: true };
+    named.push(asset);
   }
-  return { named, malformed: named.length === 0 && length > 0 };
+  return { named, malformed: false };
 }
 
 /**
@@ -400,13 +457,21 @@ function namedAssets(assets) {
  * stalled feed emitting empty price maps (`{}`, once the reading's `prices` is
  * unwrapped) reads as a full window.
  *
- * With no assets named (omitted OR an empty array), a frame counts when it
- * carries at least one own positive price, and no per-asset worst constituent
- * can be named. A MALFORMED list (supplied, non-empty, and carrying no asset
- * name at all — `['ATOM']` with a hijacked `filter`, `[42]`, a bare string)
- * measures ZERO rather than falling back to that portfolio-wide count, which is
- * strictly more permissive: every other unknown path here degrades fail-closed
- * and this one must too. The bare-count overload trusts a caller that already
+ * With NO assets named — omitted, an empty array, or a MALFORMED list (`[42]`, a
+ * bare string, a list with any unnameable element) — the measurement is ZERO.
+ * There is no portfolio-wide fallback that counts a frame carrying "at least one
+ * own positive price", because without an asset set to intersect against, no
+ * predicate can tell a price from any other positive number: a stalled feed
+ * emitting `{ observedAtTick: n }` frames observes no price at all and would
+ * measure full coverage, as would an array-shaped frame (own `length`) or a
+ * boxed string. That fallback was strictly more permissive than every per-asset
+ * path around it, and a measurement feeding a fail-closed gate degrades toward
+ * LESS coverage, uniformly — an unknown shape is absence of evidence, and
+ * absence of evidence is not evidence of sufficiency. `project()` names the
+ * projected target weights, so the zero case is a projection with no targets:
+ * nothing to measure per asset, hence nothing measured.
+ *
+ * The bare-count overload trusts a caller that already
  * counted its own window: only a `number` is honored (never `Number('8')`), its
  * coercion is guarded (`Number.isFinite` + `Math.trunc`, never `| 0`, which is
  * ToInt32 and wraps a large count around 2^31), and it too names no worst asset.
@@ -428,15 +493,11 @@ function measureHistoryCoverage(frames, assets) {
       ? Math.max(0, Math.trunc(frames)) : 0;
     return { historyFrames: count, historyReturns: Math.max(0, count - 1), worstAsset: null };
   }
-  const { named, malformed } = namedAssets(assets);
-  if (malformed) return { historyFrames: 0, historyReturns: 0, worstAsset: null };
-  if (named.length === 0) {
-    const counts = countObservedFramesAndReturns(
-      frames,
-      (frame) => safeOwnPropertyNames(frame).some((asset) => hasOwnPositivePrice(frame, asset)),
-    );
-    return { ...counts, worstAsset: null };
-  }
+  const { named } = namedAssets(assets);
+  // No nameable asset — malformed, empty, or omitted — measures zero. See the
+  // docstring: there is nothing to intersect an "is this a price?" predicate
+  // against, so the only honest count is none.
+  if (named.length === 0) return { historyFrames: 0, historyReturns: 0, worstAsset: null };
   // Seeded from the first named asset rather than from `null`, so the declared
   // (non-nullable) return holds on every path a checker can see, not only on the
   // one the empty-list early return happens to have excluded.
@@ -463,11 +524,15 @@ function measureHistoryCoverage(frames, assets) {
 /**
  * @typedef {object} DataSufficiency
  * @property {number} historyFrames    observed frames carrying an own POSITIVE price for the
- *   worst-covered asset (with no assets named: frames carrying at least one own positive price; on the
- *   bare-count overload: the count the caller supplied). Positive, not merely finite: a `0` or negative
+ *   worst-covered asset (0 when no asset was nameable; on the bare-count overload: the count the
+ *   caller supplied). Positive, not merely finite: a `0` or negative
  *   price is a stalled/absent sentinel that no return can be computed across, so it is not evidence
  * @property {number} historyReturns   the returns those frames yield — only ADJACENT observed frames
- *   yield a return, so a gappy window carries fewer returns than `historyFrames - 1`
+ *   yield a return, so a gappy window carries fewer returns than `historyFrames - 1`. A count of
+ *   OBSERVATIONS, not of information: a feed that repeats one unchanging price yields returns here
+ *   (each adjacent pair is two observations) though it carries no new signal, which is why the vol
+ *   fit refuses such a window (`fitForecastWorld`) while this descriptor still measures it. Coverage
+ *   answers "did the feed report across this span", not "did the reports say anything"
  * @property {string|null} worstAsset  the asset the coverage was measured on (null when none were
  *   named, and on the bare-count overload, which has no frames to measure per asset)
  * @property {number|null} horizon     the ticks projected forward, NORMALIZED to a whole tick count:
@@ -517,10 +582,10 @@ function measureHistoryCoverage(frames, assets) {
  *   untrusted shapes, so each price is read from its own descriptor and type-checked rather than assumed
  * @param {unknown} args.horizon   ticks projected forward; anything that is not a non-negative integer
  *   tick count is reported as UNMEASURABLE (`horizon: null`) rather than normalized to a number
- * @param {unknown} [args.assets]   the assets projected; coverage is the worst-covered of these. Omitted
- *   OR EMPTY (as `project()` passes when `targetWeights` is empty) falls back to portfolio-wide counting —
- *   a frame counts when it carries at least one own positive price — and reports `worstAsset: null`. A
- *   supplied-but-unmeasurable list measures zero instead, never the more permissive fallback
+ * @param {unknown} [args.assets]   the assets projected; coverage is the worst-covered of these. Omitted,
+ *   EMPTY (as `project()` passes when `targetWeights` is empty), or carrying any element that is not an
+ *   asset name measures ZERO and reports `worstAsset: null`: with no asset set, no predicate can tell a
+ *   price from any other positive number, so there is nothing to measure rather than everything
  * @returns {DataSufficiency}   frozen, so the descriptor a consumer gates on cannot diverge from the
  *   one `projectionArtifact` hashed
  */
@@ -542,8 +607,13 @@ export function computeDataSufficiency({ frames, horizon, assets }) {
   // Frozen at production: `projectionArtifact` aliases this object into the
   // record whose JSON becomes `projectionId`, so a holder mutating it after the
   // id was computed would leave the hash and the evidence a fail-closed gate
-  // reads disagreeing on the one field that decides the verdict. (`Object.freeze`,
-  // not `harden`: this module is used without `lockdown()`.)
+  // reads disagreeing on the one field that decides the verdict. `Object.freeze`
+  // rather than `harden` because this module must work whether or not
+  // `lockdown()` has run — importing the package entry point pulls in
+  // `cap-attenuation.js`, which does call it, but importing `./forecaster.js`
+  // alone does not, and `harden` is not a global until then. A shallow freeze
+  // suffices HERE only because every field of this record is a primitive; where
+  // that does not hold (the vol fit's per-asset stats) the freeze goes deeper.
   return Object.freeze({
     historyFrames,
     historyReturns,

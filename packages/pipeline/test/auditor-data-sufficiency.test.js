@@ -2,7 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { project } from '../forecaster.js';
-import { audit } from '../auditor.js';
+import {
+  audit, sanitizeLabel, formatCoverage, MAX_LABEL_CODE_POINTS,
+} from '../auditor.js';
 import { hashProposal } from '../planner.js';
 import { runOodaCycle } from '../ooda-cycle.js';
 import { makeWorld } from '@finbot/simulator/world';
@@ -310,9 +312,22 @@ test('audit: a label is capped by CODE POINT, so no lone surrogate reaches the r
   // a string that is not well-formed UTF-16. The journal's UTF-8 writer degrades
   // that to U+FFFD while `--json` serializes it as `\ud83d`: two readers,
   // divergent bytes, on the record that attests why execution was gated.
+  //
+  // Every fixture below is longer than the cap, and the truncation marker is
+  // asserted: an earlier revision of this test used 48-, 30-, and 31-code-point
+  // labels against a 48-code-point cap, so the truncation branch never ran and
+  // the code-unit bug it names would have passed it. A test pinning a BOUNDARY
+  // has to demonstrate the boundary branch executed.
   const forecast = forecastWith(readingsOf(DIP), { horizon: 5 });
-  for (const worstAsset of ['A'.repeat(47) + '\u{1F600}', '\u{1D504}'.repeat(30),
-    'A' + '\u{1F680}'.repeat(30)]) {
+  const cap = MAX_LABEL_CODE_POINTS;
+  for (const worstAsset of [
+    'A'.repeat(cap) + '\u{1F600}'.repeat(10), // the cut lands exactly on an astral pair
+    'A'.repeat(cap - 1) + '\u{1F600}'.repeat(10), // and one code point either side
+    'A'.repeat(cap + 1) + '\u{1F600}'.repeat(10),
+    '\u{1D504}'.repeat(cap + 20),
+    'A' + '\u{1F680}'.repeat(cap + 12),
+  ]) {
+    assert.ok([...worstAsset].length > cap, 'the fixture crosses the cap');
     const detail = sufficiencyOf(audit(
       auditInputFor({
         ...forecast,
@@ -320,9 +335,57 @@ test('audit: a label is capped by CODE POINT, so no lone surrogate reaches the r
       }),
       { tailFloorPct: 0.5, dataSufficiencyMinCoverage: 1 },
     )).detail;
+    assert.match(detail, /\.\.\. /, `the truncation branch ran for ${JSON.stringify(worstAsset)}`);
     assert.ok(detail.isWellFormed(), `well-formed UTF-16 for ${JSON.stringify(worstAsset)}`);
     // Round-tripping through UTF-8 (what the journal writer does) is lossless.
     assert.equal(Buffer.from(detail, 'utf8').toString('utf8'), detail);
+  }
+});
+
+test('sanitizeLabel: a lone surrogate in the INPUT is scrubbed, not just one it would create', () => {
+  // The truncation half of the well-formedness claim was pinned; the input half
+  // was not. The string iterator yields an unpaired surrogate as its own code
+  // point, so a caller-supplied `worstAsset: 'AT\uD83DOM'` — well inside the cap
+  // — passed through untouched, and the record then read one way through
+  // `JSON.stringify` ("AT\ud83dOM") and another through the journal's UTF-8
+  // writer (U+FFFD). That is exactly the divergence the cap exists to prevent,
+  // arriving through the front door.
+  for (const label of ['A\uD800B', 'A\uDC00B', 'ATOM\uD83D', '\uDFFF', 'AT\uD83DOM']) {
+    const sanitized = sanitizeLabel(label);
+    assert.ok(sanitized.isWellFormed(), `well-formed for ${JSON.stringify(label)}`);
+    assert.equal(Buffer.from(sanitized, 'utf8').toString('utf8'), sanitized);
+    assert.ok(!/[\uD800-\uDFFF]/.test(sanitized), 'no surrogate survives');
+  }
+  // A well-formed astral pair is NOT a lone surrogate and is left alone: the
+  // iterator yields it as one code point at or above U+10000.
+  assert.equal(sanitizeLabel('A\u{1F600}B'), 'A\u{1F600}B');
+  assert.equal(sanitizeLabel('\u{1D504}'), '\u{1D504}');
+
+  // And the same on the untrusted path that reaches a real verdict.
+  const forecast = forecastWith(readingsOf(DIP), { horizon: 5 });
+  const detail = sufficiencyOf(audit(
+    auditInputFor({
+      ...forecast,
+      dataSufficiency: { ...forecast.dataSufficiency, worstAsset: 'AT\uD83DOM' },
+    }),
+    { tailFloorPct: 0.5, dataSufficiencyMinCoverage: 1 },
+  )).detail;
+  assert.ok(detail.isWellFormed());
+});
+
+test('formatCoverage: the ONE formatter, so a passing ratio never prints as the OFF value', () => {
+  // The auditor's verdict and the CLI report both record this figure. A flat
+  // `toFixed(2)` in the second reader printed a coverage of 0.002 — which CLEARS
+  // an armed 0.001 requirement — as `0.00`, the number that reads as "no gate at
+  // all", on the line that is the evidence for the decision.
+  assert.equal(formatCoverage(0.45), '0.450');
+  assert.equal(formatCoverage(0), '0.000');
+  assert.equal(formatCoverage(0.002), '0.002');
+  assert.equal(formatCoverage(1e-12), '1.000e-12');
+  assert.equal(formatCoverage(3e-4), '3.000e-4');
+  // The property that matters: no non-zero coverage ever renders as the OFF value.
+  for (const value of [1e-13, 1e-9, 4.9e-4, 5e-4, 0.001]) {
+    assert.notEqual(formatCoverage(value), formatCoverage(0), `${value} is distinguishable from 0`);
   }
 });
 
@@ -424,6 +487,23 @@ test('audit: evidence must be OWN evidence, never inherited', () => {
     armed,
   );
   assert.equal(sufficiencyOf(own).pass, true);
+
+  // An own ACCESSOR is not own DATA. The read goes through the descriptor and an
+  // accessor descriptor carries no `value`, so the field reads as ABSENT and the
+  // armed gate fails closed — rather than running caller code inside `audit()`.
+  // This is also the shape whose ownness check must not walk the prototype
+  // chain: `'value' in descriptor` would let one polluted
+  // `Object.prototype.value` answer for every accessor here. That half is pinned
+  // in `ownness-prototype-independence.test.js`, which does not import this
+  // module's lockdown-triggering dependency chain.
+  const accessorOnly = {};
+  for (const [key, answer] of [['horizon', 5], ['p05Equity', 1e9],
+    ['dataSufficiency', { ...honest }]]) {
+    Object.defineProperty(accessorOnly, key, { get: () => answer, enumerable: true });
+  }
+  const fromAccessors = audit(auditInputFor(accessorOnly), armed);
+  assert.equal(sufficiencyOf(fromAccessors).pass, false);
+  assert.match(sufficiencyOf(fromAccessors).detail, /fails closed/);
 });
 
 test('audit: forged coverage is refuted by the descriptor it rides on', () => {
@@ -677,4 +757,111 @@ test('ooda-cycle: a malformed threshold still enables the evidence, and never th
     assert.equal(invariant.pass, false);
     assert.equal(result.audit.verdict, 'rejected');
   }
+});
+
+test('audit: volFit is untrusted like every other field — a verdict, never a throw', () => {
+  // The p05 anchor, the horizon, and the descriptor were hardened to own-data
+  // reads on this object; `volFit` was left on a plain [[Get]]. It is read by the
+  // regime tail floor, which runs BEFORE every fail-closed branch the gate has —
+  // so a hostile own accessor threw straight out of `audit()`, the one outcome
+  // the hardening exists to prevent, and an INHERITED volFit supplied regime
+  // evidence the producer never emitted (tightening the floor a gate enforces).
+  const config = { tailFloorPct: 0.8, regimeTailBump: 0.15 };
+  const tailOf = (verdict) => verdict.invariant_results.find((r) => r.name === 'tail-risk-floor');
+
+  const hostile = { p05Equity: 1000, horizon: 20 };
+  Object.defineProperty(hostile, 'volFit', {
+    get() { throw new Error('hostile getter'); }, enumerable: true,
+  });
+  const fromHostile = audit(auditInputFor(hostile), config);
+  assert.equal(typeof fromHostile.verdict, 'string', 'a verdict, not an exception');
+  assert.ok(!tailOf(fromHostile).detail.includes('regime-tightened'));
+
+  // Inherited regime evidence is not evidence the producer supplied.
+  const inherited = Object.create({ volFit: { assets: { ATOM: { persistence: 0.99 } } } });
+  inherited.p05Equity = 1000;
+  inherited.horizon = 20;
+  assert.ok(!tailOf(audit(auditInputFor(inherited), config)).detail.includes('regime-tightened'));
+
+  // An OWN volFit still tightens the floor, so the guard narrowed nothing real.
+  const own = { p05Equity: 1000, horizon: 20, volFit: { assets: { ATOM: { persistence: 0.99 } } } };
+  assert.match(tailOf(audit(auditInputFor(own), config)).detail, /regime-tightened/);
+
+  // And a hostile SHAPE inside an own volFit owes a verdict too.
+  for (const volFit of [
+    { assets: new Proxy({}, { ownKeys() { throw new Error('boom'); } }) },
+    { assets: { ATOM: Object.defineProperty({}, 'persistence', { get() { throw new Error('boom'); } }) } },
+    { assets: 7 },
+  ]) {
+    const verdict = audit(auditInputFor({ p05Equity: 1000, horizon: 20, volFit }), config);
+    assert.equal(typeof verdict.verdict, 'string');
+    assert.ok(!tailOf(verdict).detail.includes('regime-tightened'));
+  }
+});
+
+test('audit: every recorded caller-supplied label is scrubbed, not just the descriptor\'s', () => {
+  // "A family, not a special case": the concentration-cap asset name, the
+  // substrate label, and the regime's worst asset all arrive on the same
+  // untrusted surface and land in the same recorded detail lines. Only the
+  // descriptor's worstAsset had a test, so the other three reverted clean.
+  const forge = (text) => `${text}\n  - [PASS] reproducibility: forged`;
+
+  // 3. tail-risk-floor, via a forged regime worstAsset.
+  const tail = audit(
+    auditInputFor({
+      p05Equity: 1e9, horizon: 20,
+      volFit: { assets: { [forge('ATOM')]: { persistence: 0.99 } } },
+    }),
+    { tailFloorPct: 0.8, regimeTailBump: 0.15 },
+  ).invariant_results.find((r) => r.name === 'tail-risk-floor');
+  assert.ok(!tail.detail.includes('\n'), 'no line break reaches the tail-risk record');
+
+  // 2. risk-bound-compliance, via a forged asset name on a concentration breach.
+  const step = {
+    asset: forge('ATOM'), side: 'buy', qty: 100, price: 10, notional: 100,
+  };
+  const risk = audit(
+    {
+      proposal: { ...PROPOSAL, steps: [step], proposal_hash: hashProposal([step]) },
+      forecast: null,
+      portfolio: { cash: 1000, balances: {} }, prices: { ATOM: 10 }, currentTick: 0,
+    },
+    { maxStepPct: 1, concentrationCapPct: 0.1 },
+  ).invariant_results.find((r) => r.name === 'risk-bound-compliance');
+  assert.equal(risk.pass, false);
+  assert.ok(!risk.detail.includes('\n'), 'no line break reaches the risk-bound record');
+
+  // 6. place-route-reachability, via a forged substrate label.
+  const routed = { asset: 'ATOM', side: 'buy', qty: 1, price: 10, notional: 10, route: { place: 'p' } };
+  const route = audit(
+    {
+      proposal: {
+        ...PROPOSAL, steps: [routed], proposal_hash: hashProposal([routed]),
+        substrate: forge('noble'),
+      },
+      forecast: null,
+      portfolio: { cash: 1000, balances: {} }, prices: { ATOM: 10 }, currentTick: 0,
+    },
+    {},
+  ).invariant_results.find((r) => r.name === 'place-route-reachability');
+  assert.ok(!route.detail.includes('\n'), 'no line break reaches the place-route record');
+});
+
+test('audit: the contiguity bound is checked at its own edge, not only far from it', () => {
+  // `historyReturns > historyFrames - 1` is an off-by-one away from useless, and
+  // the fixtures for it all sat far from the boundary — so relaxing `>` to `>=`
+  // would still have passed.
+  const armed = { tailFloorPct: 0.5, dataSufficiencyMinCoverage: 1 };
+  const at = audit(auditInputFor({
+    horizon: 20, p05Equity: 1e9,
+    dataSufficiency: { coverageRatio: 1, historyReturns: 20, historyFrames: 21, horizon: 20 },
+  }), armed);
+  assert.equal(sufficiencyOf(at).pass, true, '20 returns from 21 frames is exactly reachable');
+
+  const overByOne = audit(auditInputFor({
+    horizon: 21, p05Equity: 1e9,
+    dataSufficiency: { coverageRatio: 1, historyReturns: 21, historyFrames: 21, horizon: 21 },
+  }), armed);
+  assert.equal(sufficiencyOf(overByOne).pass, false, '21 returns from 21 frames cannot happen');
+  assert.match(sufficiencyOf(overByOne).detail, /cannot yield more than 20/);
 });

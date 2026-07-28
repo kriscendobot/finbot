@@ -234,3 +234,39 @@ test("adaptiveVol estimate: 'mle' flows through the forecaster end to end", () =
   assert.equal(histJson(mle), histJson(mle2));
   assert.equal(projectionId(mle), projectionId(mle2));
 });
+
+test('the vol fit is frozen at EVERY depth a consumer reads, not only at its root', () => {
+  // `projectionArtifact` aliases `volFit` into the record whose JSON becomes
+  // `projectionId`, and the auditor's regime tail floor reads
+  // `volFit.assets[asset].persistence` from that same object AFTER the id was
+  // computed. A freeze that stopped at `fit` and `fit.assets` left every
+  // per-asset record writable — so the leaf that MOVES the floor was the one
+  // field the freeze did not cover, and a holder could lower the floor a gate
+  // enforces without changing the hash that attests it.
+  const readings = turbulentReadings();
+  const f = project(
+    { world: calmWorld(7), targetWeights: TARGET, bounds: BOUNDS, readings },
+    {
+      ensembleSize: 40, horizon: 10, baseSeed: 100,
+      adaptiveVol: { kind: 'auto-garch-family' },
+    },
+  );
+  assert.ok(f.volFit, 'the fixture produced a fit to freeze');
+  assert.ok(Object.isFrozen(f.volFit));
+  assert.ok(Object.isFrozen(f.volFit.assets));
+
+  const assetNames = Object.keys(f.volFit.assets);
+  assert.ok(assetNames.length > 0, 'the fixture fitted at least one asset');
+  for (const asset of assetNames) {
+    const stats = f.volFit.assets[asset];
+    assert.ok(Object.isFrozen(stats), `${asset}'s stat record is frozen`);
+    const before = stats.persistence;
+    assert.throws(() => { 'use strict'; stats.persistence = 0.1; }, TypeError, asset);
+    assert.equal(stats.persistence, before, `${asset}'s persistence is unchanged`);
+    // `oosQlike` is the one nested record inside a stat record.
+    if (stats.oosQlike != null) {
+      assert.ok(Object.isFrozen(stats.oosQlike), `${asset}'s oosQlike is frozen`);
+      assert.throws(() => { 'use strict'; stats.oosQlike.garch = 0; }, TypeError);
+    }
+  }
+});

@@ -39,14 +39,14 @@ function worldFor(tag) {
 
 test('computeDataSufficiency: coverage is observed returns per projected tick', () => {
   const frames = readingsOf(DIP).map((r) => r.prices);
-  const sufficiency = computeDataSufficiency({ frames, horizon: 5 });
+  const sufficiency = computeDataSufficiency({ frames, horizon: 5, assets: ['ATOM'] });
   assert.equal(sufficiency.historyFrames, 16);
   assert.equal(sufficiency.historyReturns, 15);
   assert.equal(sufficiency.horizon, 5);
   assert.equal(sufficiency.coverageRatio, 3); // 15 returns / 5 ticks
 
   // A horizon that outruns the window carries thin coverage.
-  const thin = computeDataSufficiency({ frames: frames.slice(0, 4), horizon: 20 });
+  const thin = computeDataSufficiency({ frames: frames.slice(0, 4), horizon: 20, assets: ['ATOM'] });
   assert.equal(thin.historyReturns, 3);
   assert.equal(thin.coverageRatio, 0.15);
 
@@ -80,9 +80,37 @@ test('computeDataSufficiency: evidence-free frames cannot pad the coverage', () 
   assert.equal(padded.historyFrames, 4);
   assert.equal(padded.worstAsset, 'ATOM');
 
-  // With no assets named, a frame still needs at least one finite price.
-  assert.equal(computeDataSufficiency({ frames: [...real, ...padding], horizon: 8 }).historyFrames, 4);
-  assert.equal(computeDataSufficiency({ frames: [{ ATOM: NaN }, { ATOM: 10 }], horizon: 1 }).historyFrames, 1);
+  // A non-finite price is a sentinel, not an observation.
+  assert.equal(computeDataSufficiency({
+    frames: [{ ATOM: NaN }, { ATOM: 10 }], horizon: 1, assets: ['ATOM'],
+  }).historyFrames, 1);
+});
+
+test('computeDataSufficiency: with NO asset nameable, the measurement is zero — never a portfolio-wide count', () => {
+  // Regression: a "counts as observed if the frame carries at least one own
+  // positive price" fallback is strictly MORE permissive than every per-asset
+  // path around it, because with no asset set no predicate can tell a price from
+  // any other positive number. A stalled feed emitting `{ observedAtTick: n }`
+  // observes no price at all and measured FULL coverage under that rule — enough
+  // to clear an armed `dataSufficiencyMinCoverage: 1`.
+  const stalled = Array.from({ length: 21 }, (_unused, n) => ({ observedAtTick: n + 1 }));
+  for (const [label, assets] of [['omitted', undefined], ['empty', []], ['null', null]]) {
+    const measured = computeDataSufficiency({ frames: stalled, horizon: 20, assets });
+    assert.equal(measured.coverageRatio, 0, `assets ${label}`);
+    assert.equal(measured.historyFrames, 0, `assets ${label}`);
+    assert.equal(measured.historyReturns, 0, `assets ${label}`);
+    assert.equal(measured.worstAsset, null, `assets ${label}`);
+  }
+  // The other spellings of the same padding: an array-shaped frame (own `length`
+  // is a positive number) and a boxed string (own indices are not prices).
+  for (const frames of [[[1], [1], [1]], [Object('ab'), Object('ab'), Object('ab')]]) {
+    assert.equal(computeDataSufficiency({ frames, horizon: 2 }).coverageRatio, 0);
+  }
+  // And REAL price frames measure zero too when no asset is named: the rule is
+  // uniform, not a special case for hostile shapes.
+  const real = [{ ATOM: 1 }, { ATOM: 2 }, { ATOM: 3 }];
+  assert.equal(computeDataSufficiency({ frames: real, horizon: 4 }).coverageRatio, 0);
+  assert.equal(computeDataSufficiency({ frames: real, horizon: 4, assets: ['ATOM'] }).coverageRatio, 0.5);
 });
 
 test('computeDataSufficiency: coverage is the WORST-covered projected asset', () => {
@@ -105,13 +133,39 @@ test('computeDataSufficiency: only an OWN, positive price is evidence', () => {
   // same padding `{ prices: {} }` attempts, one lookup deeper.
   const inherited = Array.from({ length: 6 }, () => Object.create({ ATOM: 100 }));
   assert.equal(computeDataSufficiency({ frames: inherited, horizon: 5, assets: ['ATOM'] }).historyFrames, 0);
-  assert.equal(computeDataSufficiency({ frames: inherited, horizon: 5 }).historyFrames, 0);
 
   // A zero (or negative) price is a stalled-feed sentinel, not an observation:
   // no return can be computed across it.
   const stalled = Array.from({ length: 21 }, () => ({ ATOM: 0 }));
   assert.equal(computeDataSufficiency({ frames: stalled, horizon: 20, assets: ['ATOM'] }).coverageRatio, 0);
-  assert.equal(computeDataSufficiency({ frames: [{ ATOM: -1 }, { ATOM: 10 }], horizon: 1 }).historyFrames, 1);
+  assert.equal(computeDataSufficiency({
+    frames: [{ ATOM: -1 }, { ATOM: 10 }], horizon: 1, assets: ['ATOM'],
+  }).historyFrames, 1);
+});
+
+test('computeDataSufficiency: the OWNNESS check is itself prototype-independent', () => {
+  // Regression: the own price is read from its own DESCRIPTOR (so a hostile
+  // accessor cannot run inside project()), and the descriptor is then asked for
+  // its own `value`. Asking with `'value' in descriptor` reintroduces exactly the
+  // substitution the descriptor read exists to refuse: a descriptor is an
+  // ordinary object inheriting from Object.prototype, and `in` walks that chain,
+  // so ONE polluted `Object.prototype.value` makes every ACCESSOR descriptor —
+  // which carries no own `value` — answer with the polluted price.
+  const accessorFrames = Array.from({ length: 3 }, () => Object.defineProperty(
+    {}, 'ATOM', { get: () => 0, enumerable: true },
+  ));
+  const clean = computeDataSufficiency({ frames: accessorFrames, horizon: 2, assets: ['ATOM'] });
+  assert.equal(clean.coverageRatio, 0);
+
+  Object.prototype.value = 42; // eslint-disable-line no-extend-native
+  try {
+    const polluted = computeDataSufficiency({
+      frames: accessorFrames, horizon: 2, assets: ['ATOM'],
+    });
+    assert.deepEqual(polluted, clean, 'a polluted Object.prototype.value supplied no evidence');
+  } finally {
+    delete Object.prototype.value;
+  }
 });
 
 test('computeDataSufficiency: a return needs two ADJACENT observations', () => {
@@ -202,17 +256,19 @@ test('computeDataSufficiency: untrusted frames cannot forge or abort the measure
   });
   assert.equal(guarded.historyFrames, 2);
   assert.equal(guarded.historyReturns, 0); // the accessor frame splits the run
-  // Same on the no-assets-named path, which enumerates the frame's own names.
-  assert.equal(computeDataSufficiency({ frames: [hostile], horizon: 4 }).historyFrames, 0);
+  // And a window that is ONLY the hostile frame carries no evidence at all.
+  assert.equal(computeDataSufficiency({
+    frames: [hostile], horizon: 4, assets: ['ATOM'],
+  }).historyFrames, 0);
 });
 
 test('computeDataSufficiency: the ASSET list is walked by index too, never through its own filter', () => {
   // The sibling hazard, and the one that runs in the GATE-APPROVING direction:
   // `assets.filter` is a [[Get]] on a caller-supplied array exactly as
-  // `frames.map` is. An own `filter` that drops the thin constituent swaps
-  // per-asset worst-constituent measurement for the portfolio-wide fallback, and
-  // the forged counts stay internally consistent — so the auditor's recompute
-  // and its frames-vs-returns cross-check cannot refute them.
+  // `frames.map` is. An own `filter` that drops the thin constituent narrows the
+  // worst-constituent measurement to its better-observed neighbours, and the
+  // forged counts stay internally consistent — so the auditor's recompute and its
+  // frames-vs-returns cross-check cannot refute them.
   const frames = [{ A: 1 }, { A: 1 }, { A: 1 }, { A: 1, B: 9 }];
   const honest = computeDataSufficiency({ frames, horizon: 4, assets: ['A', 'B'] });
   assert.equal(honest.worstAsset, 'B');
@@ -240,14 +296,11 @@ test('computeDataSufficiency: the ASSET list is walked by index too, never throu
   assert.equal(computeDataSufficiency({ frames, horizon: 4, assets: throwing }).worstAsset, 'A');
 });
 
-test('computeDataSufficiency: a MALFORMED asset list measures zero, never the permissive fallback', () => {
-  // Naming no assets falls back to portfolio-wide counting, which is strictly
-  // MORE permissive than any per-asset measure. A list that was supplied but
-  // carries no asset name is not "no assets named" — it is a broken input, and a
-  // measurement feeding a fail-closed gate degrades toward LESS coverage, never
-  // more. Every other unknown path here degrades closed; this one must too.
+test('computeDataSufficiency: a MALFORMED asset list measures zero, and ANY unnameable element malforms it', () => {
+  // A measurement feeding a fail-closed gate degrades toward LESS coverage,
+  // never more. Every unknown path here degrades closed.
   const frames = [{ A: 1 }, { A: 1 }, { A: 1 }];
-  assert.equal(computeDataSufficiency({ frames, horizon: 4 }).coverageRatio, 0.5); // fallback
+  assert.equal(computeDataSufficiency({ frames, horizon: 4, assets: ['A'] }).coverageRatio, 0.5);
   for (const [label, assets] of [['[42]', [42]], ["'ATOM'", 'ATOM'], ['[Symbol]', [Symbol('A')]],
     ['[{}]', [{}]], ['7', 7], ['[null]', [null]]]) {
     const measured = computeDataSufficiency({ frames, horizon: 4, assets });
@@ -255,10 +308,18 @@ test('computeDataSufficiency: a MALFORMED asset list measures zero, never the pe
     assert.equal(measured.historyFrames, 0);
     assert.equal(measured.worstAsset, null);
   }
-  // An EMPTY list is not malformed — it is how `project()` spells "no target
-  // weights", and it keeps the documented portfolio-wide fallback.
-  assert.equal(computeDataSufficiency({ frames, horizon: 4, assets: [] }).coverageRatio, 0.5);
-  assert.equal(computeDataSufficiency({ frames, horizon: 4, assets: null }).coverageRatio, 0.5);
+  // Regression: a PARTIALLY malformed list must not be silently narrowed to its
+  // readable elements. Coverage is the worst-covered constituent, so measuring a
+  // SUBSET reports at-least-as-much coverage as measuring the whole — the
+  // fail-OPEN direction, on the list that decides what gets measured at all.
+  const mixed = [{ A: 1 }, { A: 1 }, { A: 1, B: 9 }];
+  assert.equal(computeDataSufficiency({ frames: mixed, horizon: 4, assets: ['A', 'B'] }).coverageRatio, 0);
+  for (const assets of [[42, 'A'], ['A', 42], ['A', null], ['A', 'B', {}]]) {
+    const measured = computeDataSufficiency({ frames: mixed, horizon: 4, assets });
+    assert.equal(measured.coverageRatio, 0, `assets ${JSON.stringify(assets)}`);
+    assert.equal(measured.historyFrames, 0);
+    assert.equal(measured.worstAsset, null);
+  }
 });
 
 test('computeDataSufficiency: a hostile FRAMES proxy cannot pad or abort the measurement', () => {
@@ -269,14 +330,20 @@ test('computeDataSufficiency: a hostile FRAMES proxy cannot pad or abort the mea
   // try/catch exists to forbid.
   const real = [{ ATOM: 1 }];
   let reads = 0;
+  // The trap's growth is BOUNDED (it stops climbing at 64). Unbounded, a
+  // regression that removed the snapshot would not fail this test — the loop
+  // condition would re-read a length that always outruns the index, and the
+  // suite would hang instead of reporting a diagnosis. A guard test must fail,
+  // not diverge.
   const growing = new Proxy(real, {
     get(target, key, receiver) {
-      if (key === 'length') { reads += 1; return reads; }
+      if (key === 'length') { reads = Math.min(reads + 1, 64); return reads; }
       return Reflect.get(target, key, receiver);
     },
   });
   // The length is snapshotted ONCE, so the window is the one frame that exists.
   assert.equal(computeDataSufficiency({ frames: growing, horizon: 2, assets: ['ATOM'] }).historyFrames, 1);
+  assert.equal(reads, 1, 'length was read exactly once');
 
   const throwing = new Proxy([{ ATOM: 1 }, { ATOM: 1 }], {
     get(target, key, receiver) {
@@ -299,14 +366,14 @@ test('computeDataSufficiency: the descriptor is FROZEN, so it cannot drift from 
   assert.equal(descriptor.coverageRatio, 1.75);
 });
 
-test('computeDataSufficiency: a non-enumerable own price counts on BOTH paths', () => {
-  // `Object.keys` is enumerable-only while the per-asset read is not, so the two
-  // paths would otherwise disagree about the same frame: observed when the asset
-  // is named, unobserved when it is not.
+test('computeDataSufficiency: a non-enumerable own price is still an own price', () => {
+  // The per-asset read goes through the own descriptor, which is not
+  // enumerable-only: a price the feed defined non-enumerably is an observation
+  // the feed made, and reading it any other way would make the count depend on a
+  // property attribute that says nothing about the evidence.
   const frame = () => Object.defineProperty({}, 'ATOM', { value: 10, enumerable: false });
   const frames = [frame(), frame()];
   assert.equal(computeDataSufficiency({ frames, horizon: 4, assets: ['ATOM'] }).historyFrames, 2);
-  assert.equal(computeDataSufficiency({ frames, horizon: 4 }).historyFrames, 2);
 });
 
 test('project: off by default — the descriptor is null and the hashed artifact is byte-identical', () => {
@@ -413,4 +480,54 @@ test('project: a regime-stretched horizon lowers the coverage it must justify', 
   assert.equal(stretched.dataSufficiency.coverageRatio, computeDataSufficiency({
     frames: window.map((r) => r.prices), horizon: stretched.horizon, assets: ['ATOM'],
   }).coverageRatio);
+});
+
+test('computeDataSufficiency: a reported length is BOUNDED, not merely snapshotted', () => {
+  // `Array.isArray` is true of a Proxy over an array and `length` is writable, so
+  // a single honest-looking frame can report `2**53-1`. Snapshotting the length
+  // defeats a trap that GROWS; it does nothing about one that starts enormous,
+  // and the walk then becomes unbounded synchronous work inside the OODA loop.
+  // Every other hostile shape here degrades to "no evidence" in O(1); this one
+  // must degrade too. Truncation is the fail-CLOSED direction: a shorter window
+  // carries fewer returns, hence less coverage, never more.
+  const huge = new Proxy([{ ATOM: 1 }, { ATOM: 2 }], {
+    get(target, key, receiver) {
+      if (key === 'length') return Number.MAX_SAFE_INTEGER;
+      return Reflect.get(target, key, receiver);
+    },
+  });
+  const startedAt = process.hrtime.bigint();
+  const measured = computeDataSufficiency({ frames: huge, horizon: 2, assets: ['ATOM'] });
+  const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+  // Bounded work, and bounded evidence: the two real frames are all that is
+  // observed, and the padding indices read as `undefined` — not as prices.
+  assert.equal(measured.historyFrames, 2);
+  assert.equal(measured.historyReturns, 1);
+  assert.equal(measured.coverageRatio, 0.5);
+  assert.ok(elapsedMs < 30_000, `the walk terminated (${elapsedMs.toFixed(0)}ms)`);
+
+  // A plain (non-proxied) array of absurd length is the same hazard with no
+  // proxy at all, and must not be walked to its end either.
+  const sparse = new Array(2 ** 32 - 1);
+  sparse[0] = { ATOM: 1 };
+  sparse[1] = { ATOM: 2 };
+  assert.equal(computeDataSufficiency({ frames: sparse, horizon: 2, assets: ['ATOM'] }).historyReturns, 1);
+});
+
+test('computeDataSufficiency: an absurdly long ASSET list malforms rather than narrowing', () => {
+  // The length bound truncates, which is fail-closed for a FRAME window (fewer
+  // frames, less coverage) and fail-OPEN for an asset list: worst-of-a-subset is
+  // at least worst-of-the-whole, so a truncated list would report at-least-as-
+  // much coverage as the real one. A list long enough to be truncated is
+  // therefore unmeasurable, not shorter.
+  const frames = [{ ATOM: 1 }, { ATOM: 2 }, { ATOM: 3 }];
+  const enormous = new Proxy(['ATOM'], {
+    get(target, key, receiver) {
+      if (key === 'length') return Number.MAX_SAFE_INTEGER;
+      return Reflect.get(target, key, receiver);
+    },
+  });
+  const measured = computeDataSufficiency({ frames, horizon: 2, assets: enormous });
+  assert.equal(measured.coverageRatio, 0);
+  assert.equal(measured.worstAsset, null);
 });

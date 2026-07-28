@@ -899,13 +899,31 @@ binary pre-execution gate for the graded planner downweight it also asked for.
   `Array.isArray` is proxy-transparent and says nothing about which method a
   `[[Get]]` resolves to. The length is snapshotted once and each element read
   through a guard, so a growing `length` trap cannot pad the window and a throwing
-  `get` trap yields no-evidence rather than an exception out of `project()`. A
-  *malformed* asset list (supplied, non-empty, carrying no asset name) measures
-  zero rather than falling back to the portfolio-wide count, which is strictly
-  more permissive: a measurement feeding a fail-closed gate degrades toward less
-  coverage, never more. The descriptor is frozen at production, alongside
-  `volFit` and `horizonRegime`, so the hashed artifact and the evidence the gate
-  reads cannot diverge after the id is computed.
+  `get` trap yields no-evidence rather than an exception out of `project()`, and
+  the snapshotted length is also *bounded*, since a proxy over an array can report
+  `2**53-1` and turn the walk into unbounded synchronous work. The ownness check
+  is itself prototype-independent (`Object.hasOwn(descriptor, 'value')`, never
+  `'value' in descriptor`, which walks the descriptor's own prototype chain and
+  would let one polluted `Object.prototype.value` supply a price for every
+  accessor). The descriptor is frozen at production, alongside `volFit` and
+  `horizonRegime`, so the hashed artifact and the evidence the gate reads cannot
+  diverge after the id is computed — and the `volFit` freeze reaches each
+  per-asset stat record, not merely the container, because `persistence` is the
+  leaf the auditor's tail floor actually reads.
+- **No asset nameable means zero, not a portfolio-wide count.** An earlier
+  revision fell back, when no asset was named, to counting a frame as observed if
+  it carried *at least one* own positive price. That was strictly more permissive
+  than every per-asset path around it, and unfixably so: without an asset set to
+  intersect against, no predicate distinguishes a price from any other positive
+  number, so a stalled feed emitting `{ observedAtTick: n }` frames — no price
+  observed at all — measured full coverage, as did an array-shaped frame and a
+  boxed string. The fallback is gone: omitted, empty, and malformed asset lists
+  all measure zero, and *any* unnameable element malforms the whole list rather
+  than narrowing the measurement to its readable elements (worst-of-a-subset is
+  at least worst-of-the-whole, so silent narrowing runs gate-approving too). A
+  measurement feeding a fail-closed gate degrades toward less coverage,
+  uniformly: an unknown shape is absence of evidence, and absence of evidence is
+  not evidence of sufficiency.
 - **An unmeasurable horizon is `null`, not `0`.** A horizon that is not a whole,
   non-negative tick count (a `NaN` from a typo'd flag, a negative, a fraction)
   yields `horizon: null` / `coverageRatio: null`. Clamping it to `0` was the
@@ -1008,21 +1026,58 @@ binary pre-execution gate for the graded planner downweight it also asked for.
   records it. It scrubs the whole structural class rather than just `\n` — C0
   and DEL, the C1 block (U+0085 NEL, U+009B CSI), the Unicode line terminators
   U+2028/U+2029 (line breaks to any Unicode-aware splitter, and *not* escaped by
-  `JSON.stringify`), and the bidi overrides — and truncates by *code point*
-  rather than by code unit, so an astral name cannot be cut mid-surrogate into a
-  string that the journal's UTF-8 writer and `--json` disagree about. It applies
-  to the concentration-cap `asset` and the `substrate` label too, not only to the
-  descriptor's `worstAsset`.
-- **One quantizer, exported.** The gate's recompute-and-compare is only correct
-  while both sides quantize identically, so `round12` is now exported from
-  `forecaster.js` and imported by the auditor and the CLI report rather than
-  copied under a "mirrors X" comment. A drift there would fail every honest
-  forecast closed — an availability failure on a live-execution gate.
+  `JSON.stringify`), the bidi overrides, and the *surrogate range* itself — and
+  truncates by *code point* rather than by code unit. Both halves of the
+  well-formedness claim matter: the code-point truncation stops the sanitizer
+  from cutting an astral name mid-surrogate, and the surrogate clause stops a
+  lone surrogate that arrived in the INPUT from passing straight through. Either
+  way the result is a string the journal's UTF-8 writer (U+FFFD) and `--json`
+  (`\ud83d`) disagree about, on the record attesting why execution was gated.
+  It applies to the concentration-cap `asset` and the `substrate` label too, not
+  only to the descriptor's `worstAsset`. `MAX_LABEL_CODE_POINTS` is exported
+  alongside it, so a co-recorder can size the field and tell a truncation from a
+  label that genuinely ends in an ellipsis.
+- **One quantizer, one formatter, one arming predicate — all exported.** The
+  gate's recompute-and-compare is only correct while both sides quantize
+  identically, so `round12` is exported from `forecaster.js` and imported by the
+  auditor and the CLI report rather than copied under a "mirrors X" comment. A
+  drift there would fail every honest forecast closed — an availability failure
+  on a live-execution gate. The same discipline had to reach one level further
+  than it first did, to the things *built on* the quantizer: `formatCoverage`
+  (the CLI re-printed the same evidence through a flat `toFixed(2)`, which renders
+  a coverage that PASSES a 0.001 requirement as `0.00`, the number that reads as
+  the OFF value) and the arming/usability predicates (`coverageGateArmed`,
+  `coverageThresholdUsable`), which the CLI's flag validation and
+  `ooda-cycle.js`'s evidence auto-enable had each restated under a "mirrors the
+  auditor's test exactly" comment. Relax the copy and the CLI exits 2 on values
+  the gate accepts; tighten it and the CLI accepts a value that arms the gate and
+  fails it closed — the disarm-by-typo the validation exists to prevent. When a
+  PR exports a primitive to defeat duplication, the copies of the *predicate
+  built on it* are the next place to look; the "mirrors" comment is the tell.
+  `computeDataSufficiency` is deliberately NOT on the entry point: the criterion
+  is an actual cross-module consumer, and it has none.
 - **Tests.** `packages/pipeline/test/forecaster-data-sufficiency.test.js`,
-  `.../auditor-data-sufficiency.test.js`, and `.../cli-ooda-flags.test.js` are
-  the inventory: the producer's padding and forgery defenses, every fail-closed
-  path on the consumer, and the operator surface's validations and both gate
-  outcomes. They are the enumeration, so this note does not duplicate it.
+  `.../auditor-data-sufficiency.test.js`, `.../ownness-prototype-independence.test.js`,
+  and `.../cli-ooda-flags.test.js` are the inventory: the producer's padding and
+  forgery defenses, every fail-closed path on the consumer, and the operator
+  surface's validations and both gate outcomes. They are the enumeration, so this
+  note does not duplicate it. Two shapes are worth naming as *how* the gaps were
+  found rather than *what* they cover. A test pinning a BOUNDARY must demonstrate
+  the boundary branch executed — the label-truncation test used 48-, 30-, and
+  31-code-point fixtures against a 48-code-point cap, so the branch never ran and
+  the code-unit bug it named would have passed it. And an adversarial guard test
+  must bound its own divergence: the growing-`length` proxy climbed without limit,
+  so removing the snapshot it guards would have hung the suite rather than failing
+  with a diagnosis.
+- **`ownness-prototype-independence.test.js` imports `forecaster.js` and nothing
+  else, deliberately.** `auditor.js` reaches `cap-attenuation.js` transitively
+  (auditor → substrates → cap-attenuation), whose import calls `lockdown()` and
+  freezes `Object.prototype` — so the prototype-pollution attack cannot even be
+  staged in a process that imported it. That shields the auditor's half of the
+  `'value' in descriptor` hazard today, by an import chain with nothing to do
+  with the gate; it is a reason to fix the check, not to trust it.
+  `forecaster.js` pulls in no such chain, so the producing side is exposed in an
+  ordinary process and that test's attack is a live one.
 
 Reconciled in this change: the invariant now appears in
 `skills/pre-execution-audit/SKILL.md` (the canonical home, § 7 plus its config
