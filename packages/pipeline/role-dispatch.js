@@ -103,7 +103,8 @@ export async function dispatchObserver(input, deps) {
   if (!deps || typeof deps.spawn !== 'function') {
     throw new Error('dispatchObserver: deps.spawn (the harness spawn function) is required');
   }
-  const tools = observerToolRegistry(input);
+  const trustedInput = harden(structuredClone(input || {}));
+  const tools = observerToolRegistry(trustedInput);
   const capabilities = OBSERVER_TOOL_NAMES;
 
   const handle = await deps.spawn(
@@ -122,19 +123,24 @@ export async function dispatchObserver(input, deps) {
 
   // The deterministic recompute over the trusted input is both the reference
   // result and the only value that may reach a later OODA stage.
-  const canonical = observeOpportunities(
-    { readings: input.readings || [] },
-    { thresholdBps: input.thresholdBps, assets: input.assets },
-  );
+  let canonical = null;
+  try {
+    canonical = observeOpportunities(
+      { readings: trustedInput.readings || [] },
+      { thresholdBps: trustedInput.thresholdBps, assets: trustedInput.assets },
+    );
+  } catch {
+    // Preserve the guard's fail-closed result shape for malformed trusted input.
+  }
   // Both operands are produced by the same deterministic function over the
   // same dispatch-bound input. This catches a broken bound tool without
   // treating model JSON formatting or key order as a safety failure.
-  const reconciled = reportedObservation != null
+  const reconciled = canonical != null && reportedObservation != null
     && JSON.stringify(reportedObservation) === JSON.stringify(canonical);
 
   return {
     handle,
-    status: handle.status,
+    status: canonical == null ? 'error' : handle.status,
     reportedObservation,
     canonical,
     reconciled,

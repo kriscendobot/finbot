@@ -38,14 +38,14 @@ import { execute } from './executor.js';
  * @returns {Record<string, object>} a registry of `assertToolDef`-shaped tools
  */
 export function pipelineToolRegistry() {
-  const tools = [scoreOpportunitiesTool(), realizedVolatilityTool(), observeOpportunitiesTool()];
+  const tools = [scoreOpportunitiesTool(), realizedVolatilityTool()];
   const registry = {};
   for (const t of tools) registry[t.name] = t;
   return registry;
 }
 
 /** Names of the tools in {@link pipelineToolRegistry}, for capability subsets. */
-export const PIPELINE_TOOL_NAMES = ['score_opportunities', 'realized_volatility', 'observe_opportunities'];
+export const PIPELINE_TOOL_NAMES = ['score_opportunities', 'realized_volatility'];
 
 /**
  * Build the observe-phase (oracle-watcher) tool registry: the deterministic
@@ -60,10 +60,15 @@ export const PIPELINE_TOOL_NAMES = ['score_opportunities', 'realized_volatility'
  * stage's authority to the least it needs (the risk-denominator
  * `realized_volatility` is an orient-phase concern, not an observe one).
  *
+ * @param {object} trustedInput oracle window, threshold, and asset allowlist
+ *   captured at dispatch creation; it is cloned and hardened before vending.
  * @returns {Record<string, object>} a registry of `assertToolDef`-shaped tools
  */
-export function observerToolRegistry(trustedInput = undefined) {
-  const tools = [observeOpportunitiesTool(trustedInput)];
+export function observerToolRegistry(trustedInput) {
+  if (trustedInput == null) {
+    throw new TypeError('observerToolRegistry requires dispatch-bound trusted input');
+  }
+  const tools = [observeOpportunitiesTool(harden(structuredClone(trustedInput)))];
   const registry = {};
   for (const t of tools) registry[t.name] = t;
   return registry;
@@ -442,30 +447,23 @@ function realizedVolatilityTool() {
   };
 }
 
-/** `observeOpportunities` as a tool (the observe-phase detector). */
-function observeOpportunitiesTool(trustedInput = undefined) {
+/** `observeOpportunities` as a dispatch-bound tool (the observe-phase detector). */
+function observeOpportunitiesTool(trustedInput) {
   return {
     name: 'observe_opportunities',
     description:
-      'Detect opportunity-deviation events over a price-reading window: assets whose price has '
-      + 'deviated from the window reference by more than thresholdBps. Read-only. Returns the '
-      + 'crossings (most significant first) and the latest price book.',
+      'Detect opportunity-deviation events over this dispatch\'s trusted price-reading window. '
+      + 'Inputs are bound by the dispatch and cannot be changed by the model. Read-only. Returns '
+      + 'the crossings (most significant first) and the latest price book.',
     inputSchema: {
       type: 'object',
-      properties: {
-        readings: { type: 'array', description: 'ordered window: [{ t, prices: { ASSET: price } }]' },
-        thresholdBps: { type: 'number', description: 'minimum |deviation| in basis points to emit (default 50)' },
-        assets: { type: 'array', description: 'optional asset allowlist' },
-      },
-      required: ['readings'],
-      additionalProperties: true,
+      properties: {},
+      additionalProperties: false,
     },
-    run: async (args) => {
+    run: async () => {
       try {
-        // A dispatch binds its trusted input here. The model still chooses
-        // whether to call the detector, but cannot alter the oracle window
-        // that the detector observes by reserializing tool arguments.
-        const source = trustedInput || args;
+        // The model chooses whether to call the detector, but not its inputs.
+        const source = trustedInput;
         const opts = {};
         if (source.thresholdBps != null) opts.thresholdBps = source.thresholdBps;
         if (source.assets) opts.assets = source.assets;

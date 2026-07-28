@@ -76,8 +76,9 @@ test('observe stage exposes exactly the read-only detector — no wallet-reachin
   // subset is exactly the deviation detector. Reddens if a future edit widens
   // the registry (e.g. adds a signing/execution tool) or the capability names.
   assert.deepEqual(OBSERVER_TOOL_NAMES, ['observe_opportunities']);
-  assert.deepEqual(Object.keys(observerToolRegistry()), ['observe_opportunities']);
-  for (const name of Object.keys(observerToolRegistry())) {
+  const registry = observerToolRegistry(observeInput());
+  assert.deepEqual(Object.keys(registry), ['observe_opportunities']);
+  for (const name of Object.keys(registry)) {
     assert.doesNotMatch(name, /wallet|sign|execute|simulate|propose|audit/,
       'no observe-phase tool reaches a wallet / action capability');
   }

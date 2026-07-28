@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 
 import { assertToolDef } from '@finbot/harness/schemas';
 
-import { pipelineToolRegistry, PIPELINE_TOOL_NAMES } from '../agent-tools.js';
+import { pipelineToolRegistry, PIPELINE_TOOL_NAMES, observerToolRegistry } from '../agent-tools.js';
 import { observeOpportunities } from '../oracle-watcher.js';
 import { analyze } from '../analyzer.js';
 
@@ -51,13 +51,18 @@ test('realized_volatility tool: returns a positive vol for a moving series', asy
   assert.ok(jsonBlock.value.volatility > 0);
 });
 
-test('observe_opportunities tool: surfaces a crossing past threshold', async () => {
-  const tool = pipelineToolRegistry().observe_opportunities;
-  const result = await tool.run({ readings: readings([10, 10.1, 10.6]), thresholdBps: 50 });
+test('observe_opportunities tool: uses its dispatch-bound input', async () => {
+  const tool = observerToolRegistry({ readings: readings([10, 10.1, 10.6]), thresholdBps: 50 })
+    .observe_opportunities;
+  const result = await tool.run({});
   assert.equal(result.ok, true);
   const jsonBlock = result.content.find((c) => c.type === 'json');
   assert.equal(jsonBlock.value.crossings.length, 1);
   assert.equal(jsonBlock.value.crossings[0].asset, 'ATOM');
+});
+
+test('observerToolRegistry: requires trusted dispatch input', () => {
+  assert.throws(() => observerToolRegistry(), /dispatch-bound trusted input/);
 });
 
 test('score_opportunities tool: empty inputs degrade to no-action, not an error', async () => {
