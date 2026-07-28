@@ -19,10 +19,13 @@
  *   --seed=N         PRNG seed (default 7)
  *   --drift=F        per-tick GBM drift for ATOM (default -0.01, biases a dip)
  *   --vol=F          per-tick GBM volatility for ATOM (default 0.02)
- *   --warmup=N       price-feed warmup ticks before the cycle (default 10)
- *   --fit-window=N   longer rolling window for the GARCH vol-surface fit only (default = warmup);
+ *   --warmup=N       price-feed warmup ticks before the cycle (default 10); a whole tick count
+ *   --fit-window=N   longer rolling window for the GARCH vol-surface fit only (default 0 = warmup);
  *                    set > warmup (e.g. 13+) so `--adaptive-vol=mle` engages the per-asset MLE while
- *                    the oracle deviation / realized-vol reads stay on the short `warmup` window
+ *                    the oracle deviation / realized-vol reads stay on the short `warmup` window.
+ *                    It is the observed window the coverage ratio --data-sufficiency-min gates on
+ *                    counts returns from, so a value that is not a tick count is rejected (exit 2)
+ *                    rather than silently collapsing back to --warmup
  *   --threshold=BPS  oracle deviation threshold in basis points (default 30)
  *   --ensemble=N     forecaster ensemble size (default 200)
  *   --horizon=N      forecaster horizon in whole ticks, >= 1 (default 20); it is the denominator of
@@ -38,9 +41,9 @@
  *   --data-sufficiency-min=F  require the forecast's coverage ratio (observed returns per projected
  *                    tick) to be >= F or the auditor rejects (default: off; F=0 is also off); names +
  *                    gates a forecast whose horizon outruns its observed window. An F the gate could
- *                    not evaluate (non-finite, negative, empty, or a positive value below the
- *                    coverage descriptor's 1e-12 resolution) is rejected (exit 2) rather than
- *                    silently disarming the gate. The achievable coverage is (observed returns of the
+ *                    not evaluate (non-finite, negative, empty, or a positive value that quantizes to
+ *                    zero at the coverage descriptor's 12-decimal resolution) is rejected (exit 2)
+ *                    rather than silently disarming the gate. The achievable coverage is (observed returns of the
  *                    worst-covered asset) / --horizon, so the defaults (--warmup=10, --horizon=20)
  *                    top out near 0.45; widen the observed window with --fit-window (or --warmup) to
  *                    make a requirement of 1.0 reachable
@@ -61,10 +64,24 @@ import process from 'node:process';
 
 import { makeWorld } from '../packages/simulator/world.js';
 import { runSimulator } from '../packages/simulator/runner.js';
-import { runOodaCycle } from '../packages/pipeline/index.js';
-// The ONE quantizer both the gate and this report compare through; a local copy
-// would let the label drift from the verdict it claims to mirror.
-import { round12 } from '../packages/pipeline/forecaster.js';
+// `round12` is the ONE quantizer both the gate and this report compare through
+// (a local copy would let the label drift from the verdict it claims to mirror),
+// and `sanitizeLabel` is the ONE scrubber both apply to a caller-supplied
+// identifier before it lands in a record. Both come through the package entry
+// point, like `runOodaCycle`, rather than by reaching around it into a module.
+import { runOodaCycle, round12, sanitizeLabel } from '../packages/pipeline/index.js';
+
+/**
+ * A flag value as a number, or NaN when the flag carried no value at all. Never
+ * `Number(null)` / `Number('  ')`, both of which are 0 — a real, meaningful
+ * setting for several of these knobs.
+ *
+ * @param {string|null} val
+ * @returns {number}
+ */
+function numberOrNaN(val) {
+  return val === null || String(val).trim() === '' ? NaN : Number(val);
+}
 
 function parseArgs(argv) {
   const args = {
@@ -80,8 +97,13 @@ function parseArgs(argv) {
     if (key === '--seed') args.seed = Number(val);
     else if (key === '--drift') args.drift = Number(val);
     else if (key === '--vol') args.vol = Number(val);
-    else if (key === '--warmup') args.warmup = Number(val);
-    else if (key === '--fit-window') args.fitWindow = Number(val);
+    // The two observed-window flags carry the coverage ratio's NUMERATOR, so a
+    // bare `--warmup` / `--fit-window` (or a blank value) must not read as the
+    // number 0 the way `Number(null)` and `Number('  ')` do — 0 is `--fit-window`'s
+    // documented "unset" value, so a typo would silently narrow the window the
+    // gate measures. NaN routes both to the validation below instead.
+    else if (key === '--warmup') args.warmup = numberOrNaN(val);
+    else if (key === '--fit-window') args.fitWindow = numberOrNaN(val);
     else if (key === '--threshold') args.threshold = Number(val);
     else if (key === '--ensemble') args.ensemble = Number(val);
     else if (key === '--horizon') args.horizon = Number(val);
@@ -92,9 +114,7 @@ function parseArgs(argv) {
     // A bare `--data-sufficiency-min`, or an empty/whitespace value, carries no
     // number; NaN routes it to the validation below rather than to `Number(null)`
     // or `Number('  ')`, both of which are 0 — the silently-off value.
-    else if (key === '--data-sufficiency-min') {
-      args.dataSufficiencyMin = val === null || String(val).trim() === '' ? NaN : Number(val);
-    }
+    else if (key === '--data-sufficiency-min') args.dataSufficiencyMin = numberOrNaN(val);
     else if (key === '--journal') args.journal = val;
     else if (key === '--json') args.json = true;
     else if (key === '--multi') args.multi = true;
@@ -124,13 +144,15 @@ function parseArgs(argv) {
   // believes is armed and is not. Fail fast instead, as finbot-eval does for
   // --significance-alpha. The test is the auditor's own, so a value the CLI
   // accepts is a value the gate can evaluate: finite, non-negative, and — when
-  // positive — at or above the descriptor's 12-decimal resolution, below which
-  // no coverage could ever fail it.
+  // positive — does not quantize to zero at the descriptor's 12-decimal
+  // resolution, below which no coverage could ever fail it. (That boundary is
+  // where `round12` rounds up, just above 5e-13, not 1e-12 itself.)
   if (args.dataSufficiencyMin != null
       && !(Number.isFinite(args.dataSufficiencyMin) && args.dataSufficiencyMin >= 0
            && (args.dataSufficiencyMin === 0 || round12(args.dataSufficiencyMin) > 0))) {
-    console.error('finbot-ooda: --data-sufficiency-min must be a finite number >= 0, and >= 1e-12 when '
-      + 'positive (for example --data-sufficiency-min=1)');
+    console.error('finbot-ooda: --data-sufficiency-min must be a finite number >= 0 that, when '
+      + "positive, does not quantize to zero at the descriptor's 12-decimal resolution "
+      + '(for example --data-sufficiency-min=1)');
     process.exit(2);
   }
   // The horizon is the DENOMINATOR of the ratio that gate reads, so leaving it
@@ -145,6 +167,21 @@ function parseArgs(argv) {
     console.error('finbot-ooda: --horizon must be a whole number of ticks >= 1 '
       + '(for example --horizon=20)');
     process.exit(2);
+  }
+  // `--fit-window` is the NUMERATOR's window — the observed history the coverage
+  // ratio counts returns from — so it validates for the same reason `--horizon`
+  // does. Unvalidated, `Number('abc')` is NaN and `config.fitWindowTicks && NaN >
+  // windowTicks` is false, so the window silently collapses back to `--warmup`
+  // and the operator gets a rejection naming a gate they believe they widened
+  // past. A flag that arms a safety gate validates every sibling flag the gate's
+  // arithmetic reads, not only the one it divides by. 0 is the documented
+  // "unset" value (fall back to --warmup); --warmup itself takes the same shape.
+  for (const [flag, value, min] of [['--fit-window', args.fitWindow, 0], ['--warmup', args.warmup, 0]]) {
+    if (!(Number.isInteger(value) && value >= min)) {
+      console.error(`finbot-ooda: ${flag} must be a whole number of ticks >= ${min} `
+        + `(for example ${flag}=20)`);
+      process.exit(2);
+    }
   }
   return args;
 }
@@ -347,7 +384,11 @@ function printReport(res, args) {
         ? !gate.pass
         : args.dataSufficiencyMin > 0
           && (!measured || round12(dataSufficiency.coverageRatio) < round12(args.dataSufficiencyMin));
-      const onAsset = dataSufficiency.worstAsset ? ` on ${dataSufficiency.worstAsset}` : '';
+      // Sanitized here as it is in the verdict: this report is a record too, and
+      // the descriptor it reads is the same untrusted, caller-supplied object.
+      const worstAsset = typeof dataSufficiency.worstAsset === 'string'
+        ? sanitizeLabel(dataSufficiency.worstAsset) : null;
+      const onAsset = worstAsset ? ` on ${worstAsset}` : '';
       const coverage = measured ? dataSufficiency.coverageRatio.toFixed(2) : 'UNMEASURABLE';
       const ticks = dataSufficiency.horizon == null ? 'unmeasurable' : `${dataSufficiency.horizon}-tick`;
       log(`           data-sufficiency: coverage=${coverage}${onAsset} `

@@ -24,13 +24,13 @@ in-process for a dry-run cycle with **no LLM required**.
 | -------------------- | ------------------------------------------------------------------------- |
 | `oracle-watcher.js`  | detect price deviations past a basis-point threshold over a reading window |
 | `analyzer.js`        | risk-adjusted scoring (price edge + APR carry, less a correlated-cluster penalty); single- or multi-leg target allocation; no-action is valid |
-| `forecaster.js`      | Monte Carlo via the simulator's nested-fork `forecast()`; deterministic    |
+| `forecaster.js`      | Monte Carlo via the simulator's nested-fork `forecast()`; deterministic; measures the projection's data sufficiency under `reportDataSufficiency` |
 | `planner.js`         | ymax-shaped proposal: hashed steps + forecast/analysis citations           |
-| `auditor.js`         | the invariant set: citation-completeness, risk-bound-compliance, tail-risk-floor, reproducibility, pricing-freshness, place-route-reachability, and the opt-in forecast-data-sufficiency gate (emitted only when `dataSufficiencyMinCoverage` is set) |
+| `auditor.js`         | the invariant set: citation-completeness, risk-bound-compliance, tail-risk-floor, reproducibility, pricing-freshness, place-route-reachability, plus the opt-in forecast-data-sufficiency gate |
 | `executor.js`        | dry-run simulation on a clone; refuses live without authorization          |
 | `rebalance.js`       | ymax-shaped `computeTargetBalances` + `deriveSteps` solver                  |
 | `cap-attenuation.js` | the wallet boundary: capability map, interface-guarded revocable wallet     |
-| `ooda-cycle.js`      | `runOodaCycle` — wires the six roles + optional journal recording          |
+| `ooda-cycle.js`      | `runOodaCycle` — wires the six roles + optional journal recording; an armed auditor gate auto-enables the forecaster evidence it reads |
 
 ## Multi-instrument portfolios
 

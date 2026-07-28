@@ -1,6 +1,6 @@
 ---
 created: 2026-06-17
-updated: 2026-06-17
+updated: 2026-07-28
 author: architect
 ---
 
@@ -22,7 +22,7 @@ The invariant set (initial; the maintainer will grow this over time):
 4. **Reproducibility.** Recompute the `proposal_hash` from the plan body; if the recomputed hash does not match the planner's named hash, the plan has been tampered with or the planner is buggy. Either way, the auditor rejects.
 5. **Pricing freshness.** Every cited oracle reading is fresh (within a configured staleness window). A plan that cites a one-hour-old price is not eligible for live execution.
 6. **No off-chain dependencies in the on-chain steps.** Each step's preconditions are verifiable from chain state and oracle readings alone; the plan does not assume any off-chain trust (the planner / analyzer / forecaster artifacts are off-chain inputs that the auditor verifies, but the step's success or failure is determined on-chain). The deterministic implementation names this `place-route-reachability`.
-7. **Forecast data-sufficiency** (opt-in; OFF unless the operator sets a minimum coverage ratio). A projection whose horizon outruns its observed window is extrapolating past its evidence — the pre-execution sibling of pricing freshness, since a forecast can be fresh and still be thin. Coverage is observed returns per projected tick, measured per asset and judged on the worst-covered one. Armed, the gate fails CLOSED: no readable evidence, or evidence that contradicts itself, rejects rather than approving vacuously.
+7. **Forecast data-sufficiency** (opt-in; OFF unless the operator sets a minimum coverage ratio). A projection whose horizon outruns its observed window is extrapolating past its evidence — the pre-execution sibling of pricing freshness, since a forecast can be fresh and still be thin. Coverage is observed returns per projected tick, measured per asset and judged on the worst-covered one. Armed, the gate fails CLOSED: no readable evidence, or evidence that contradicts itself, rejects rather than approving vacuously, and there is no zero-horizon exemption. What it bounds is FORGERY, not provenance: the counts are self-reported by the artifact being gated, so an internally consistent fabrication clears it. The descriptor must therefore come from the projection that was cited — never hand-built to satisfy the gate.
 
 ## Skills
 

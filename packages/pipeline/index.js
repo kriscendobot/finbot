@@ -13,12 +13,21 @@
 
 export { observeOpportunities, windowFromHistory } from './oracle-watcher.js';
 export { analyze, realizedVolatility } from './analyzer.js';
-export { project, makeRebalanceAction } from './forecaster.js';
+// `round12` and `computeDataSufficiency` are named here, not only on the
+// `./forecaster` subpath, because they are cross-MODULE contracts with
+// out-of-package consumers (the auditor's gate and `bin/finbot-ooda` both
+// quantize through the one `round12`): an export the package's own bins consume
+// belongs at the entry point, so "exactly one quantizer" is enforceable from it.
+export {
+  project, makeRebalanceAction, round12, computeDataSufficiency,
+} from './forecaster.js';
 export { plan, hashProposal } from './planner.js';
 export {
   toleranceFromProfile, selectAllocationForProfile, planForProfile,
 } from './profile-allocation.js';
-export { audit } from './auditor.js';
+// `sanitizeLabel` likewise: a caller-supplied identifier that the auditor
+// sanitizes before recording is sanitized by every module that records it.
+export { audit, sanitizeLabel } from './auditor.js';
 export { execute, currentNav } from './executor.js';
 export {
   navOf, computeTargetBalances, deriveSteps, applyStepsToPortfolio,

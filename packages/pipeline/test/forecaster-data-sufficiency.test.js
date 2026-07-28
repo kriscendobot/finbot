@@ -177,10 +177,18 @@ test('computeDataSufficiency: a horizon that is not a tick count is UNMEASURABLE
 
 test('computeDataSufficiency: untrusted frames cannot forge or abort the measurement', () => {
   // `Array.isArray` says nothing about which `map` a [[Get]] resolves to, and an
-  // OWN `map` shadows the primordial even under lockdown. The measurement walks
-  // by index instead, so a hijacked method cannot fabricate the coverage mask.
+  // OWN `map` shadows the primordial. The measurement walks by index instead, so
+  // a hijacked method cannot fabricate the coverage mask.
+  //
+  // Built with `defineProperty`, not assignment: this repo calls
+  // `lockdown({ overrideTaming: 'severe' })` in cap-attenuation.js, under which
+  // `forged.map = ...` in strict-mode ESM THROWS. A fixture that cannot be
+  // constructed in the process the code actually runs in pins nothing; the
+  // defineProperty shape is the one that stays reachable post-lockdown.
   const forged = [{ ATOM: 1 }, { ATOM: 1 }, { ATOM: 1 }];
-  forged.map = () => Array.from({ length: 40 }, () => true);
+  Object.defineProperty(forged, 'map', {
+    value: () => Array.from({ length: 40 }, () => true), configurable: true, writable: true,
+  });
   const measured = computeDataSufficiency({ frames: forged, horizon: 20, assets: ['ATOM'] });
   assert.equal(measured.historyFrames, 3);
   assert.equal(measured.historyReturns, 2);
@@ -196,6 +204,99 @@ test('computeDataSufficiency: untrusted frames cannot forge or abort the measure
   assert.equal(guarded.historyReturns, 0); // the accessor frame splits the run
   // Same on the no-assets-named path, which enumerates the frame's own names.
   assert.equal(computeDataSufficiency({ frames: [hostile], horizon: 4 }).historyFrames, 0);
+});
+
+test('computeDataSufficiency: the ASSET list is walked by index too, never through its own filter', () => {
+  // The sibling hazard, and the one that runs in the GATE-APPROVING direction:
+  // `assets.filter` is a [[Get]] on a caller-supplied array exactly as
+  // `frames.map` is. An own `filter` that drops the thin constituent swaps
+  // per-asset worst-constituent measurement for the portfolio-wide fallback, and
+  // the forged counts stay internally consistent — so the auditor's recompute
+  // and its frames-vs-returns cross-check cannot refute them.
+  const frames = [{ A: 1 }, { A: 1 }, { A: 1 }, { A: 1, B: 9 }];
+  const honest = computeDataSufficiency({ frames, horizon: 4, assets: ['A', 'B'] });
+  assert.equal(honest.worstAsset, 'B');
+  assert.equal(honest.coverageRatio, 0); // B has 1 frame, so no return: fails an armed gate
+
+  const hijacked = ['A', 'B'];
+  Object.defineProperty(hijacked, 'filter', {
+    value: () => [], configurable: true, writable: true,
+  });
+  const measured = computeDataSufficiency({ frames, horizon: 4, assets: hijacked });
+  assert.deepEqual(measured, honest, 'the hijacked filter changed nothing');
+
+  // The mirror case: a filter that INVENTS a constituent.
+  const inventing = ['A'];
+  Object.defineProperty(inventing, 'filter', {
+    value: () => ['GHOST'], configurable: true, writable: true,
+  });
+  assert.equal(computeDataSufficiency({ frames, horizon: 4, assets: inventing }).worstAsset, 'A');
+
+  // And a THROWING trap owes a measurement, not an exception out of project().
+  const throwing = ['A'];
+  Object.defineProperty(throwing, 'filter', {
+    value: () => { throw new Error('boom'); }, configurable: true, writable: true,
+  });
+  assert.equal(computeDataSufficiency({ frames, horizon: 4, assets: throwing }).worstAsset, 'A');
+});
+
+test('computeDataSufficiency: a MALFORMED asset list measures zero, never the permissive fallback', () => {
+  // Naming no assets falls back to portfolio-wide counting, which is strictly
+  // MORE permissive than any per-asset measure. A list that was supplied but
+  // carries no asset name is not "no assets named" — it is a broken input, and a
+  // measurement feeding a fail-closed gate degrades toward LESS coverage, never
+  // more. Every other unknown path here degrades closed; this one must too.
+  const frames = [{ A: 1 }, { A: 1 }, { A: 1 }];
+  assert.equal(computeDataSufficiency({ frames, horizon: 4 }).coverageRatio, 0.5); // fallback
+  for (const [label, assets] of [['[42]', [42]], ["'ATOM'", 'ATOM'], ['[Symbol]', [Symbol('A')]],
+    ['[{}]', [{}]], ['7', 7], ['[null]', [null]]]) {
+    const measured = computeDataSufficiency({ frames, horizon: 4, assets });
+    assert.equal(measured.coverageRatio, 0, `assets ${label}`);
+    assert.equal(measured.historyFrames, 0);
+    assert.equal(measured.worstAsset, null);
+  }
+  // An EMPTY list is not malformed — it is how `project()` spells "no target
+  // weights", and it keeps the documented portfolio-wide fallback.
+  assert.equal(computeDataSufficiency({ frames, horizon: 4, assets: [] }).coverageRatio, 0.5);
+  assert.equal(computeDataSufficiency({ frames, horizon: 4, assets: null }).coverageRatio, 0.5);
+});
+
+test('computeDataSufficiency: a hostile FRAMES proxy cannot pad or abort the measurement', () => {
+  // `Array.isArray` is proxy-transparent, so the walk's own reads are the last
+  // line: an unguarded `frames.length` re-read each iteration lets a growing
+  // trap pad the window, and an unguarded index read lets a throwing trap escape
+  // as an exception out of `project()` — the failure the sibling helpers' own
+  // try/catch exists to forbid.
+  const real = [{ ATOM: 1 }];
+  let reads = 0;
+  const growing = new Proxy(real, {
+    get(target, key, receiver) {
+      if (key === 'length') { reads += 1; return reads; }
+      return Reflect.get(target, key, receiver);
+    },
+  });
+  // The length is snapshotted ONCE, so the window is the one frame that exists.
+  assert.equal(computeDataSufficiency({ frames: growing, horizon: 2, assets: ['ATOM'] }).historyFrames, 1);
+
+  const throwing = new Proxy([{ ATOM: 1 }, { ATOM: 1 }], {
+    get(target, key, receiver) {
+      if (key !== 'length') throw new Error('boom');
+      return Reflect.get(target, key, receiver);
+    },
+  });
+  const measured = computeDataSufficiency({ frames: throwing, horizon: 2, assets: ['ATOM'] });
+  assert.equal(measured.historyFrames, 0); // a frame that throws on read is not evidence
+  assert.equal(measured.coverageRatio, 0);
+});
+
+test('computeDataSufficiency: the descriptor is FROZEN, so it cannot drift from the hash', () => {
+  // `projectionArtifact` aliases this object into the record whose JSON becomes
+  // `projectionId`. A holder mutating it afterwards would leave hash and evidence
+  // disagreeing on the one field a fail-closed gate reads.
+  const descriptor = computeDataSufficiency({ frames: 8, horizon: 4 });
+  assert.ok(Object.isFrozen(descriptor));
+  assert.throws(() => { 'use strict'; descriptor.coverageRatio = 99; }, TypeError);
+  assert.equal(descriptor.coverageRatio, 1.75);
 });
 
 test('computeDataSufficiency: a non-enumerable own price counts on BOTH paths', () => {
@@ -230,6 +331,14 @@ test('project: off by default — the descriptor is null and the hashed artifact
   delete strippedArtifact.dataSufficiency;
   assert.deepEqual(strippedArtifact, projectionArtifact(base));
   assert.equal(projectionId(base), projectionId({ ...reported, dataSufficiency: null }));
+
+  // The BEFORE arm. Every assertion above compares two runs of the SAME build,
+  // so once the field is omitted from the artifact they all pass by construction
+  // — and a future change to the artifact shape would move both arms together,
+  // leaving the byte-identity claim with nothing pinning it. This literal is the
+  // id this exact fixture produced on `origin/main` (verified by running the
+  // pre-PR tree), so it is the one arm this build cannot move.
+  assert.equal(projectionId(base), '939ffb96c26c0227');
 });
 
 test('project: reported coverage is deterministic and tracks the horizon', () => {

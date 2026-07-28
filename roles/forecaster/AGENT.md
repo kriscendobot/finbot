@@ -1,6 +1,6 @@
 ---
 created: 2026-06-17
-updated: 2026-06-17
+updated: 2026-07-28
 author: architect
 ---
 
@@ -22,6 +22,7 @@ The output is:
 - A set of quantile statistics (5th, 25th, 50th, 75th, 95th percentile).
 - A path-dependent statistic set (max drawdown distribution, time-to-recovery distribution).
 - A visual projection rendered deterministically given the same input seed.
+- Optionally, a **data-sufficiency descriptor** naming whether the projection outruns its observed window (`{ historyFrames, historyReturns, worstAsset, horizon, coverageRatio }` — coverage is observed returns per projected tick, measured per asset and reported for the worst-covered one). Measurement only, no threshold: the consumer owns the comparison, and the [auditor](../auditor/AGENT.md)'s opt-in invariant 7 is the gate that judges it. Off unless requested, so the hashed artifact is unchanged when it is not.
 
 ## Skills
 

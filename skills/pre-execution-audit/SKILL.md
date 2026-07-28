@@ -1,6 +1,6 @@
 ---
 created: 2026-06-17
-updated: 2026-06-17
+updated: 2026-07-28
 author: architect
 ---
 
@@ -102,12 +102,18 @@ for the WORST-covered one, so a freshly-listed instrument cannot hide behind its
 better-observed neighbours.
 
 ```pseudo
-if data_sufficiency_min_coverage is a number > 0:      # absent / null / 0 is OFF
+if data_sufficiency_min_coverage is supplied and is not the number 0:  # absent / null / 0 is OFF
+  # ARMED. Note the arming test is deliberately NOT "is a positive number": a
+  # non-number ('', false, '0.5') arms the gate and fails it closed below, so a
+  # malformed knob can never degrade to no gate at all.
+  assert data_sufficiency_min_coverage is a number, finite, >= 0, and — when
+         positive — does not quantize to 0 at the descriptor's 12 decimals
   descriptor = forecast.dataSufficiency               # own data properties only
+  assert forecast.horizon is readable and a whole, non-negative tick count
   assert descriptor is readable and its counts are whole and non-negative
-  assert descriptor.horizon == forecast.horizon        # and the forecast's own horizon is readable
+  assert descriptor.horizon == forecast.horizon
   assert descriptor.historyReturns <= max(0, descriptor.historyFrames - 1)
-  recomputed = descriptor.historyReturns / descriptor.horizon
+  recomputed = descriptor.historyReturns / descriptor.horizon if horizon > 0 else 0
   assert recomputed == descriptor.coverageRatio        # never read the reported ratio
   assert recomputed >= data_sufficiency_min_coverage
 ```
@@ -122,6 +128,15 @@ Two properties are load-bearing:
   sufficiency, and a gate that rejects absent evidence must reject contradictory
   evidence at least as firmly — only one of the two looks like a measurement.
 
+There is **no unconditional pass**, and in particular no zero-horizon exemption.
+A projection of 0 ticks recomputes to coverage 0 and clears no positive
+requirement. It is true that a zero-tick projection cannot outrun its window, and
+beside the point: the descriptor's horizon and the forecast's horizon are two
+fields of the same self-reported object, so a zero corroborated only by its own
+neighbour is an assertion, not evidence — and a hand-built `{ horizon: 0 }`
+forecast would otherwise clear a demand for full coverage having simulated
+nothing at all.
+
 The gate recomputes coverage from the descriptor's primitive counts rather than
 reading its reported ratio, the same discipline invariant 4 applies to the
 proposal hash. It is a weaker guarantee than invariant 4's, and knowing why
@@ -130,6 +145,10 @@ while these counts remain self-reported by the artifact being gated. The gate
 therefore bounds forgery (an inconsistent descriptor cannot approve itself), not
 provenance (an internally consistent fabrication still clears it). Binding the
 descriptor to an attested `projectionId` is how that gap closes.
+
+Until it does, the operational rule for anyone (or anything) assembling an audit
+input: **the descriptor must come from the projection that was cited, never be
+hand-built.** A descriptor synthesized to satisfy this gate satisfies it.
 
 ## Procedure
 
@@ -154,7 +173,7 @@ emit_journal_result(
 
 ## Configuration
 
-The configured floors and windows live in the project README (canonical), with optional per-dispatch overrides:
+The configured floors and windows are canonical here, with optional per-dispatch overrides:
 
 - `tail_risk_floor_pct`: default 80 (forecast's p05 must clear 80% of entry value).
 - `staleness_window_seconds`: default 300 (5 minutes).

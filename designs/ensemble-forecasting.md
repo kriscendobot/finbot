@@ -870,8 +870,7 @@ paper-wallet/test-net authorization and a selected CapTP transport.
 ## Notes from the field (2026-07-28 — forecast data-sufficiency)
 
 This cut names the data scarcity the open question asked about and substitutes a
-binary pre-execution gate for the graded planner downweight it also asked for;
-`planner.js` is untouched.
+binary pre-execution gate for the graded planner downweight it also asked for.
 
 - **The measurement.** `computeDataSufficiency({ frames, horizon, assets })` is a
   new export of `packages/pipeline/forecaster.js`. It returns
@@ -893,9 +892,20 @@ binary pre-execution gate for the graded planner downweight it also asked for;
   prototype, and one whose price is an accessor rather than a value all read as
   no evidence rather than padding the ratio. Returns need two *adjacent*
   observations, so a gappy or alternating feed carries fewer returns than
-  `historyFrames - 1` — a real frame is not a real return. The window is walked
-  by index rather than through `frames.map`, since an own `map` on a
-  caller-supplied array would fabricate the mask the whole measurement rests on.
+  `historyFrames - 1` — a real frame is not a real return. Both untrusted arrays
+  are walked by index — the frames rather than through `frames.map`, and the
+  projected assets rather than through `assets.filter` — since an own method on a
+  caller-supplied array would fabricate the mask the whole measurement rests on;
+  `Array.isArray` is proxy-transparent and says nothing about which method a
+  `[[Get]]` resolves to. The length is snapshotted once and each element read
+  through a guard, so a growing `length` trap cannot pad the window and a throwing
+  `get` trap yields no-evidence rather than an exception out of `project()`. A
+  *malformed* asset list (supplied, non-empty, carrying no asset name) measures
+  zero rather than falling back to the portfolio-wide count, which is strictly
+  more permissive: a measurement feeding a fail-closed gate degrades toward less
+  coverage, never more. The descriptor is frozen at production, alongside
+  `volFit` and `horizonRegime`, so the hashed artifact and the evidence the gate
+  reads cannot diverge after the id is computed.
 - **An unmeasurable horizon is `null`, not `0`.** A horizon that is not a whole,
   non-negative tick count (a `NaN` from a typo'd flag, a negative, a fraction)
   yields `horizon: null` / `coverageRatio: null`. Clamping it to `0` was the
@@ -930,8 +940,9 @@ binary pre-execution gate for the graded planner downweight it also asked for;
   — and "unusable" is read *strictly*: only a `number` arms the gate, because
   `Number('')`, `Number(false)`, and `Number([])` are all `0`, which is exactly
   the OFF value, so a coercing read would hand an operator who asked for a gate
-  no gate at all. So is a positive threshold below the descriptor's own 1e-12
-  resolution, which no coverage could fail.
+  no gate at all. So is a positive threshold that quantizes to zero at the
+  descriptor's own 12-decimal resolution, which no coverage could fail (that
+  boundary is where `round12` rounds up, just above 5e-13, not 1e-12 itself).
 - **The gate recomputes; it does not read a verdict.** Coverage is recomputed
   from the descriptor's primitive counts (`historyReturns / horizon`), and the
   gate fails closed on a descriptor whose reported `coverageRatio` disagrees with
@@ -945,11 +956,15 @@ binary pre-execution gate for the graded planner downweight it also asked for;
   producer supplied — and the read is guarded, so a hostile descriptor yields a
   *verdict* and never an exception out of `audit()` (the executor's fire-time
   re-audit calls it unwrapped; invariant 3's `p05Equity` formatting is guarded
-  for the same reason). A zero-tick horizon is the one place the gate passes on
-  no evidence — nothing measured is not the same as measured-and-insufficient —
-  and it is reachable only once the forecast's *own* readable horizon corroborates
-  the zero, since a pass-branch guarded by a check that is skipped when the input
-  is malformed is a fail-open wearing a fail-closed comment.
+  for the same reason). There is **no unconditional pass**. A zero-tick horizon
+  briefly had one — nothing measured is not the same as measured-and-insufficient
+  — but `forecast.horizon` and `dataSufficiency.horizon` are two fields of the
+  *same* self-reported object, so a zero corroborated only by its neighbour is an
+  assertion, not evidence: a hand-built `{ horizon: 0, p05Equity: <high> }`
+  forecast through `audit_proposal` cleared a demand for *full* coverage, and
+  cleared `tail-risk-floor` beside it, having simulated nothing. It now
+  recomputes to coverage 0 and clears no positive requirement, like any other
+  thin window.
 - **What the recompute does and does not buy.** It bounds *forgery*, not
   *provenance*: the counts are still self-reported by the artifact being gated,
   so an internally consistent fabrication (1000 returns over a 20-tick horizon)
@@ -975,20 +990,39 @@ binary pre-execution gate for the graded planner downweight it also asked for;
   ticks >= 1. The report's `SCARCE` label is the *auditor's own verdict* on that
   forecast rather than a second comparison that could drift from it, so it can
   never appear beside an approving gate nor stay silent beside a rejecting one.
+  `--fit-window` and `--warmup` are validated on the same footing as `--horizon`,
+  for the mirror reason: they carry the ratio's *numerator*, and an unvalidated
+  `--fit-window=abc` silently collapsed the observed window back to `--warmup`,
+  so an operator who widened the window to reach coverage 1.0 got a rejection
+  naming a gate they believed they had widened past. A flag that arms a safety
+  gate validates every sibling flag the gate's arithmetic reads, not only the one
+  it divides by. Note that the `--horizon`, `--fit-window`, and `--warmup`
+  narrowings are *unconditional*: they fire on runs that never arm the gate, so
+  invocations that previously accepted `--horizon=0` or `--horizon=2.5` now exit
+  2. That is a deliberate tightening of a shared entry point, not a
+  gate-scoped one.
+- **One scrubber, exported.** Every caller-supplied identifier that lands in a
+  record goes through one `sanitizeLabel` (exported from `auditor.js`, imported
+  by `bin/finbot-ooda`), for the reason the quantizer is shared: a value one
+  module sanitizes before recording must be sanitized by every module that
+  records it. It scrubs the whole structural class rather than just `\n` — C0
+  and DEL, the C1 block (U+0085 NEL, U+009B CSI), the Unicode line terminators
+  U+2028/U+2029 (line breaks to any Unicode-aware splitter, and *not* escaped by
+  `JSON.stringify`), and the bidi overrides — and truncates by *code point*
+  rather than by code unit, so an astral name cannot be cut mid-surrogate into a
+  string that the journal's UTF-8 writer and `--json` disagree about. It applies
+  to the concentration-cap `asset` and the `substrate` label too, not only to the
+  descriptor's `worstAsset`.
 - **One quantizer, exported.** The gate's recompute-and-compare is only correct
   while both sides quantize identically, so `round12` is now exported from
   `forecaster.js` and imported by the auditor and the CLI report rather than
   copied under a "mirrors X" comment. A drift there would fail every honest
   forecast closed — an availability failure on a live-execution gate.
-- **Tests.** `packages/pipeline/test/forecaster-data-sufficiency.test.js` and
-  `.../auditor-data-sufficiency.test.js` pin the off-path artifact byte-identity,
-  the fit window as the measured window, per-asset worst-constituent coverage,
-  the padding attacks (empty, foreign-asset, inherited, non-enumerable, accessor,
-  zero-price, non-adjacent, hijacked-`map`), and every fail-closed path — absent,
-  malformed, coercible, self-contradictory, fractional-count, inherited, and
-  hostile descriptors; the zero-tick bypass under an unreadable forecast horizon;
-  unusable thresholds including the coerce-to-zero class and both sides of the
-  1e-12 usability boundary.
+- **Tests.** `packages/pipeline/test/forecaster-data-sufficiency.test.js`,
+  `.../auditor-data-sufficiency.test.js`, and `.../cli-ooda-flags.test.js` are
+  the inventory: the producer's padding and forgery defenses, every fail-closed
+  path on the consumer, and the operator surface's validations and both gate
+  outcomes. They are the enumeration, so this note does not duplicate it.
 
 Reconciled in this change: the invariant now appears in
 `skills/pre-execution-audit/SKILL.md` (the canonical home, § 7 plus its config

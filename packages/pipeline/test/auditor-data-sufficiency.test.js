@@ -110,7 +110,10 @@ test('audit: gate on but the forecast carries no descriptor -> fails CLOSED', ()
   const invariant = sufficiencyOf(verdict);
   assert.equal(invariant.pass, false);
   assert.equal(verdict.verdict, 'rejected');
-  assert.match(invariant.detail, /no measurable data-sufficiency descriptor/);
+  assert.match(invariant.detail, /no measurable data-sufficiency evidence/);
+  // The detail names the FIELD that failed, not merely the artifact that carried
+  // it: this is the one invariant an operator debugs under time pressure.
+  assert.match(invariant.detail, /carries no data-sufficiency descriptor/);
   assert.match(invariant.detail, /fails closed/);
   // Same for a forecast the caller omitted entirely.
   assert.equal(
@@ -220,7 +223,7 @@ test('audit: a hostile descriptor owes a verdict, never a throw', () => {
   const cited = audit(auditInputFor({ ...forecast, dataSufficiency: flapping }), armed);
   assert.equal(sufficiencyOf(cited).pass, false);
   assert.equal(reads, 0, 'the getter never ran');
-  assert.match(sufficiencyOf(cited).detail, /no measurable data-sufficiency descriptor/);
+  assert.match(sufficiencyOf(cited).detail, /counts are not whole, non-negative/);
 
   // A `worstAsset` whose `toString` throws is not a string, so it is simply not
   // a label; a hostile THRESHOLD whose `toString` throws still owes a verdict
@@ -275,10 +278,64 @@ test('audit: an untrusted worstAsset cannot forge lines in the record', () => {
   assert.ok(sufficiencyOf(long).detail.length < 200);
 });
 
-test('audit: a zero-tick projection passes only when the forecast corroborates it', () => {
-  // Nothing measured is not the same as measured-and-insufficient: coverage 0 on
-  // a 0-tick horizon is the descriptor saying "no projection", and the gate must
-  // not read it as scarcity the way it reads 0 coverage on a 20-tick horizon.
+test('audit: line-forging is not just \\n — the whole structural class is scrubbed', () => {
+  // `\n` is the obvious splitter and the only one an ASCII fixture finds. The
+  // record is written line-oriented (`- [FAIL] <name>: <detail>` via auditBody)
+  // and re-read by readers that split on the UNICODE definition of a line break,
+  // so U+2028 / U+2029 forge a line for them exactly as `\n` does for a naive
+  // one — and neither is escaped by JSON.stringify. U+0085 (NEL) and U+009B
+  // (CSI) reach a TTY; the bidi overrides visually reorder a verdict without
+  // changing a byte of it.
+  const forecast = forecastWith(readingsOf(DIP), { horizon: 5 });
+  const armed = { tailFloorPct: 0.5, dataSufficiencyMinCoverage: 1 };
+  const forge = (worstAsset) => sufficiencyOf(audit(
+    auditInputFor({
+      ...forecast,
+      dataSufficiency: { ...forecast.dataSufficiency, worstAsset },
+    }),
+    armed,
+  )).detail;
+
+  for (const code of [0x0a, 0x0d, 0x85, 0x9b, 0x2028, 0x2029, 0x202e, 0x2066]) {
+    const structural = String.fromCodePoint(code);
+    const detail = forge(`ATOM${structural}  - [PASS] reproducibility: forged`);
+    assert.ok(!detail.includes(structural), `U+${code.toString(16)} is scrubbed`);
+    assert.match(detail, /on ATOM\?/);
+  }
+});
+
+test('audit: a label is capped by CODE POINT, so no lone surrogate reaches the record', () => {
+  // The sanitizer iterates by code point and once truncated by code UNIT, so a
+  // label whose cut falls inside an astral pair emitted a lone high surrogate —
+  // a string that is not well-formed UTF-16. The journal's UTF-8 writer degrades
+  // that to U+FFFD while `--json` serializes it as `\ud83d`: two readers,
+  // divergent bytes, on the record that attests why execution was gated.
+  const forecast = forecastWith(readingsOf(DIP), { horizon: 5 });
+  for (const worstAsset of ['A'.repeat(47) + '\u{1F600}', '\u{1D504}'.repeat(30),
+    'A' + '\u{1F680}'.repeat(30)]) {
+    const detail = sufficiencyOf(audit(
+      auditInputFor({
+        ...forecast,
+        dataSufficiency: { ...forecast.dataSufficiency, worstAsset },
+      }),
+      { tailFloorPct: 0.5, dataSufficiencyMinCoverage: 1 },
+    )).detail;
+    assert.ok(detail.isWellFormed(), `well-formed UTF-16 for ${JSON.stringify(worstAsset)}`);
+    // Round-tripping through UTF-8 (what the journal writer does) is lossless.
+    assert.equal(Buffer.from(detail, 'utf8').toString('utf8'), detail);
+  }
+});
+
+test('audit: a zero-tick projection has no exemption — the armed gate has NO unconditional pass', () => {
+  // A zero-tick horizon once passed unconditionally, on the reasoning that a
+  // projection of no ticks cannot outrun its window. True, and beside the point:
+  // `forecast.horizon` and `dataSufficiency.horizon` are two fields of the SAME
+  // caller-supplied object, so a zero corroborated only by its own neighbour is
+  // an assertion, not evidence. A hand-built forecast through audit_proposal /
+  // simulate_execution then cleared a demand for FULL coverage — and cleared
+  // tail-risk-floor beside it, since p05Equity is self-reported too — having
+  // simulated nothing. A zero-tick projection is absence of evidence, and this
+  // gate refuses absent evidence.
   const zeroTick = {
     coverageRatio: 0, historyReturns: 0, historyFrames: 0, horizon: 0, worstAsset: 'ATOM',
   };
@@ -287,14 +344,13 @@ test('audit: a zero-tick projection passes only when the forecast corroborates i
     auditInputFor({ horizon: 0, p05Equity: 1000, dataSufficiency: zeroTick }),
     armed,
   );
-  assert.equal(sufficiencyOf(verdict).pass, true);
-  assert.match(sufficiencyOf(verdict).detail, /projects 0 ticks on ATOM/);
+  assert.equal(sufficiencyOf(verdict).pass, false);
+  assert.equal(verdict.verdict, 'rejected');
+  assert.match(sufficiencyOf(verdict).detail, /coverage 0\.000 on ATOM/);
+  assert.match(sufficiencyOf(verdict).detail, /vs required 1\.000/);
 
-  // This is the gate's ONLY unconditional pass, so an unreadable forecast
-  // horizon must not reach it: a descriptor asserting "0 ticks" beside a
-  // forecast that says nothing about its own horizon is the in-band-marker
-  // bypass — the check that would refute it is skipped exactly when the input
-  // is most malformed. Every one of these once approved; all must fail closed.
+  // A forecast whose own horizon cannot be read is refuted one step earlier, so
+  // the descriptor's self-consistency never gets to speak for it.
   for (const horizon of [undefined, null, '20', NaN, Infinity, 2.5, -0.5]) {
     const bypass = audit(
       auditInputFor({ horizon, p05Equity: 1000, dataSufficiency: zeroTick }),
@@ -310,6 +366,16 @@ test('audit: a zero-tick projection passes only when the forecast corroborates i
   );
   assert.equal(sufficiencyOf(contradicted).pass, false);
   assert.match(sufficiencyOf(contradicted).detail, /contradicts the forecast's own 20-tick horizon/);
+
+  // The exemption is gone only while the gate is ARMED. With the gate off, a
+  // zero-tick forecast is not judged at all — the invariant is not emitted, and
+  // the default verdict path is untouched.
+  const off = audit(auditInputFor({ horizon: 0, p05Equity: 1000, dataSufficiency: zeroTick }), {
+    tailFloorPct: 0.5,
+  });
+  assert.equal(sufficiencyOf(off), undefined);
+  assert.ok(!off.failed_invariants.includes('forecast-data-sufficiency'));
+  assert.equal(off.invariant_results.length, 6);
 });
 
 test('audit: the CLI cannot disarm the gate through a malformed horizon', () => {
@@ -320,7 +386,10 @@ test('audit: the CLI cannot disarm the gate through a malformed horizon', () => 
   assert.equal(forecast.dataSufficiency.horizon, null);
   const verdict = audit(auditInputFor(forecast), { tailFloorPct: 0.5, dataSufficiencyMinCoverage: 1 });
   assert.equal(sufficiencyOf(verdict).pass, false);
-  assert.match(sufficiencyOf(verdict).detail, /no measurable data-sufficiency descriptor/);
+  // The descriptor's counts are sound; it is the FORECAST's horizon that is not
+  // a tick count, and the detail says so rather than blaming the descriptor.
+  assert.match(sufficiencyOf(verdict).detail, /the forecast's own horizon/);
+  assert.match(sufficiencyOf(verdict).detail, /fails closed/);
 });
 
 test('audit: evidence must be OWN evidence, never inherited', () => {
@@ -376,6 +445,7 @@ test('audit: forged coverage is refuted by the descriptor it rides on', () => {
     { coverageRatio: 1.02, historyReturns: 20.4, historyFrames: 21, horizon: 20 },
     // a descriptor missing the frames count carries no measurable evidence
     { coverageRatio: 5, historyReturns: 100, horizon: 20 },
+    { coverageRatio: 5, historyReturns: 0, horizon: 100 },
   ];
   for (const dataSufficiency of forged) {
     const verdict = audit(
@@ -386,6 +456,69 @@ test('audit: forged coverage is refuted by the descriptor it rides on', () => {
     assert.equal(verdict.verdict, 'rejected');
     assert.match(sufficiencyOf(verdict).detail, /fails closed/);
   }
+});
+
+test('audit: a count that is not a whole number is not a count, and only that refutes it', () => {
+  // The integrality requirement is load-bearing on its own, not a spare tyre for
+  // the other two contradiction branches. This descriptor clears every one of
+  // them — it recomputes EXACTLY (10.5 / 20 === 0.525), 10.5 is well under
+  // `historyFrames - 1` (20), and the two horizons agree — so relaxing
+  // `wholeCount` to a mere finiteness check would let an armed 0.5 gate APPROVE
+  // live execution on "10.5 observed returns", which is not a count of anything.
+  const fractional = {
+    coverageRatio: 0.525, historyReturns: 10.5, historyFrames: 21, horizon: 20,
+  };
+  const verdict = audit(
+    auditInputFor({ horizon: 20, p05Equity: 1e9, dataSufficiency: fractional }),
+    { tailFloorPct: 0.5, dataSufficiencyMinCoverage: 0.5 }, // 0.525 would CLEAR this
+  );
+  assert.equal(sufficiencyOf(verdict).pass, false);
+  assert.equal(verdict.verdict, 'rejected');
+  assert.match(sufficiencyOf(verdict).detail, /counts are not whole, non-negative/);
+
+  // The same shape with whole counts is honest evidence and passes, so the
+  // fixture above is pinning integrality and nothing else.
+  const whole = audit(
+    auditInputFor({
+      horizon: 20,
+      p05Equity: 1e9,
+      dataSufficiency: {
+        coverageRatio: 0.5, historyReturns: 10, historyFrames: 21, horizon: 20,
+      },
+    }),
+    { tailFloorPct: 0.5, dataSufficiencyMinCoverage: 0.5 },
+  );
+  assert.equal(sufficiencyOf(whole).pass, true);
+});
+
+test('audit: a hostile PROXY owes a verdict, not an exception', () => {
+  // The accessor tests cover an own getter; a Proxy is a distinct interception
+  // point — `getOwnPropertyDescriptor` and `ownKeys` traps are what the gate's
+  // reads actually go through, and an unguarded one would THROW out of `audit()`
+  // on the executor's unwrapped fire-time re-audit path rather than rejecting.
+  const armed = { tailFloorPct: 0.5, dataSufficiencyMinCoverage: 1 };
+  const honest = {
+    coverageRatio: 3, historyReturns: 15, historyFrames: 16, horizon: 5, worstAsset: 'ATOM',
+  };
+  const trap = () => { throw new Error('boom'); };
+
+  // A hostile descriptor.
+  const hostileDescriptor = new Proxy({ ...honest }, { getOwnPropertyDescriptor: trap });
+  const a = audit(
+    auditInputFor({ horizon: 5, p05Equity: 1e9, dataSufficiency: hostileDescriptor }),
+    armed,
+  );
+  assert.equal(sufficiencyOf(a).pass, false);
+  assert.match(sufficiencyOf(a).detail, /fails closed/);
+
+  // A hostile forecast: even reaching the descriptor throws.
+  const hostileForecast = new Proxy(
+    { horizon: 5, p05Equity: 1e9, dataSufficiency: { ...honest } },
+    { getOwnPropertyDescriptor: trap },
+  );
+  const b = audit(auditInputFor(hostileForecast), armed);
+  assert.equal(b.verdict, 'rejected');
+  assert.equal(sufficiencyOf(b).pass, false);
 });
 
 test('audit: a hostile forecast owes a verdict from EVERY invariant, not just the gate', () => {
@@ -413,8 +546,26 @@ test('audit: the threshold is OFF only when absent, null, or the number 0', () =
   // The usability boundary is the descriptor's own 1e-12 resolution.
   const usable = audit(auditInputFor(forecast), { tailFloorPct: 0.5, dataSufficiencyMinCoverage: 1e-12 });
   assert.equal(sufficiencyOf(usable).pass, true);
-  assert.match(sufficiencyOf(usable).detail, /vs required 0\.000/);
-  for (const unusable of [4e-13, Number.MIN_VALUE]) {
+  // Printed at a resolution that can still be told apart from the OFF value: a
+  // flat toFixed(3) rendered an armed 1e-12 requirement as `required 0.000`,
+  // indistinguishable from the 0 that means no gate at all.
+  assert.match(sufficiencyOf(usable).detail, /vs required 1\.000e-12/);
+  assert.ok(!/vs required 0\.000/.test(sufficiencyOf(usable).detail));
+  // The boundary is where `round12` rounds UP, which is just above 5e-13 — not
+  // 1e-12, the value the prose used to name. Pinned on both sides so the claim
+  // and the arithmetic cannot drift apart again.
+  assert.equal(
+    sufficiencyOf(audit(auditInputFor(forecast), { tailFloorPct: 0.5, dataSufficiencyMinCoverage: 5e-13 })).detail
+      .includes('fails closed'),
+    true,
+    '5e-13 quantizes to 0 and is unusable',
+  );
+  assert.equal(
+    sufficiencyOf(audit(auditInputFor(forecast), { tailFloorPct: 0.5, dataSufficiencyMinCoverage: 6e-13 })).pass,
+    true,
+    '6e-13 quantizes to 1e-12 and is usable',
+  );
+  for (const unusable of [4e-13, 5e-13, Number.MIN_VALUE]) {
     const verdict = audit(auditInputFor(forecast), { tailFloorPct: 0.5, dataSufficiencyMinCoverage: unusable });
     assert.equal(sufficiencyOf(verdict).pass, false, `threshold ${String(unusable)}`);
     assert.match(sufficiencyOf(verdict).detail, /fails closed/);
