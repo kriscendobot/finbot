@@ -161,6 +161,15 @@ export async function runOodaCycle(input) {
   if (forecasterConfig.regimeHorizonStretch === undefined && forecasterConfig.adaptiveVol) {
     forecasterConfig.regimeHorizonStretch = 0.5;
   }
+  // Data-sufficiency gate: the auditor's `dataSufficiencyMinCoverage` can only
+  // bite if the forecaster actually emits the descriptor — auto-enable the
+  // report when the operator set only the auditor threshold, so a lone gate knob
+  // yields a live gate instead of a vacuous pass. An explicit
+  // `forecaster.reportDataSufficiency` still wins; both off → unchanged.
+  if (forecasterConfig.reportDataSufficiency === undefined
+      && auditorConfig.dataSufficiencyMinCoverage > 0) {
+    forecasterConfig.reportDataSufficiency = true;
+  }
   const forecast = project(
     { world, targetWeights: analysis.targetWeights, bounds: config.bounds || {}, readings, fitReadings },
     forecasterConfig,

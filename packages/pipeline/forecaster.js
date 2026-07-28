@@ -195,6 +195,39 @@ export function regimeHorizon({ baseHorizon, volFit, stretch, lo, hi, cap }) {
 }
 
 /**
+ * Name whether a projection outruns its observed evidence: the forecaster
+ * projects `horizon` ticks forward from a window of observed price frames, and a
+ * horizon that exceeds the observed returns is extrapolating past its data — the
+ * ensemble-forecasting design's open question ("a program whose horizon exceeds
+ * the historical window … name the data scarcity in the result and let the
+ * planner downweight"). The `coverageRatio` is the observed returns per projected
+ * tick; `scarce` is true when it falls below `minCoverage` (a full window would
+ * carry at least one observed return per tick projected, i.e. coverageRatio ≥ 1).
+ *
+ * Pure and deterministic (counts + arithmetic, no RNG), so a data-sufficient
+ * projection hashes stably.
+ *
+ * @param {object} args
+ * @param {Array<Record<string, number>>|number} args.frames   the observed price frames used (or their count)
+ * @param {number} args.horizon                                ticks projected forward
+ * @param {number} [args.minCoverage]                          returns-per-tick below which the projection is scarce (default 1)
+ * @returns {{ historyFrames: number, historyReturns: number, horizon: number, minCoverage: number, coverageRatio: number, scarce: boolean }}
+ */
+export function computeDataSufficiency({ frames, horizon, minCoverage = 1 }) {
+  const historyFrames = Array.isArray(frames) ? frames.length : Math.max(0, frames | 0);
+  const historyReturns = Math.max(0, historyFrames - 1);
+  const coverageRatio = horizon > 0 ? historyReturns / horizon : 0;
+  return {
+    historyFrames,
+    historyReturns,
+    horizon,
+    minCoverage,
+    coverageRatio: round12(coverageRatio),
+    scarce: coverageRatio < minCoverage,
+  };
+}
+
+/**
  * @typedef {object} ForecastProjection
  * @property {Record<string, number>} targetWeights
  * @property {number} horizon
@@ -211,6 +244,9 @@ export function regimeHorizon({ baseHorizon, volFit, stretch, lo, hi, cap }) {
  * @property {Array<object>} actionSteps   the steps the projection applied at t=1
  * @property {object} [horizonRegime]      present only when a persistent regime stretched the horizon:
  *   `{ baseHorizon, persistence, worstAsset, stress }` (the citation trail for why `horizon > baseHorizon`)
+ * @property {object} [dataSufficiency]    present only when `config.reportDataSufficiency` is set:
+ *   `{ historyFrames, historyReturns, horizon, minCoverage, coverageRatio, scarce }` — whether the
+ *   projection outruns its observed window, so a downstream gate/planner can downweight a scarce forecast
  * @property {string} [projectionSvg]      deterministic SVG render of the histogram
  */
 
@@ -260,6 +296,10 @@ export function makeRebalanceAction(targetWeights, bounds) {
  * @param {number} [config.regimePersistenceLo]    persistence at/below which the stretch is 0 (default 0.70)
  * @param {number} [config.regimePersistenceHi]    persistence at/above which the stretch is full (default 0.98)
  * @param {number} [config.regimeHorizonCap]       the regime-stretched horizon never exceeds this many ticks (default 60)
+ * @param {boolean} [config.reportDataSufficiency]  attach a `dataSufficiency` descriptor naming whether the
+ *   projection outruns its observed window (default false → no field, projection byte-identical to before)
+ * @param {number} [config.dataSufficiencyMinCoverage]   observed returns per projected tick below which the
+ *   projection is flagged `scarce` (default 1); only consulted when `reportDataSufficiency` is set
  * @returns {ForecastProjection}
  */
 export function project(input, config = {}) {
@@ -305,6 +345,21 @@ export function project(input, config = {}) {
     lo: regimePersistenceLo, hi: regimePersistenceHi, cap: regimeHorizonCap,
   });
 
+  // Data-sufficiency: name whether this projection outruns its observed
+  // evidence. The window measured is the SAME one the adaptive fit draws on
+  // (`fitReadings`, the longer rolling window when supplied), against the
+  // possibly regime-stretched `horizon` — so a regime that stretched the horizon
+  // correctly lowers the coverage it must be justified against. Off by default
+  // (`config.reportDataSufficiency` unset) → no field, so the projection and its
+  // content hash stay byte-identical to before; computed only when asked.
+  const dataSufficiency = config.reportDataSufficiency
+    ? computeDataSufficiency({
+        frames: priceFramesFromReadings(fitReadings),
+        horizon,
+        minCoverage: config.dataSufficiencyMinCoverage != null ? config.dataSufficiencyMinCoverage : 1,
+      })
+    : null;
+
   const action = makeRebalanceAction(input.targetWeights, bounds);
   const result = simForecast({
     from: forecastWorld,
@@ -341,6 +396,7 @@ export function project(input, config = {}) {
     actionSteps,
     volFit,
     horizonRegime,
+    dataSufficiency,
     projectionSvg: result.projectionSvg,
   };
 }
@@ -377,6 +433,9 @@ export function projectionArtifact(projection) {
   // Likewise, only present when the regime actually stretched the horizon, so a
   // projection with the stretch off (or an inert regime) hashes exactly as before.
   if (projection.horizonRegime) artifact.horizonRegime = projection.horizonRegime;
+  // Only present when the data-sufficiency report was requested, so a projection
+  // without it hashes exactly as before.
+  if (projection.dataSufficiency) artifact.dataSufficiency = projection.dataSufficiency;
   return artifact;
 }
 

@@ -33,6 +33,9 @@
  *                    (default: 0.5 when --adaptive-vol is on, else 0); a persistent regime projects longer
  *   --regime-position-shrink=F  max fractional target reduction a fully persistent vol regime applies
  *                    (default: 0.5 when --adaptive-vol is on, else 0); a persistent asset sizes smaller
+ *   --data-sufficiency-min=F  require the forecast's coverage ratio (observed returns per projected
+ *                    tick) to be >= F or the auditor rejects (default: off); names + gates a forecast
+ *                    whose horizon outruns its observed window
  *   --multi          run the multi-instrument world (correlated growth legs + a yield leg)
  *   --adaptive-vol[=mle|auto|auto-egarch|auto-family]  fit a conditional-vol surface from the window; the
  *                    forecaster projects the ensemble under it and the analyzer
@@ -57,7 +60,7 @@ function parseArgs(argv) {
     seed: 7, drift: -0.01, vol: 0.02, warmup: 10, threshold: 30,
     ensemble: 200, horizon: 20, tailFloor: 0.6, journal: null, json: false,
     multi: false, adaptiveVol: null, fitWindow: 0, regimeTailBump: null,
-    regimeHorizonStretch: null, regimePositionShrink: null,
+    regimeHorizonStretch: null, regimePositionShrink: null, dataSufficiencyMin: null,
   };
   for (const arg of argv) {
     const eq = arg.indexOf('=');
@@ -75,6 +78,7 @@ function parseArgs(argv) {
     else if (key === '--regime-tail-bump') args.regimeTailBump = Number(val);
     else if (key === '--regime-horizon-stretch') args.regimeHorizonStretch = Number(val);
     else if (key === '--regime-position-shrink') args.regimePositionShrink = Number(val);
+    else if (key === '--data-sufficiency-min') args.dataSufficiencyMin = Number(val);
     else if (key === '--journal') args.journal = val;
     else if (key === '--json') args.json = true;
     else if (key === '--multi') args.multi = true;
@@ -110,6 +114,7 @@ function printHelp() {
     '  finbot-ooda [--seed=N] [--drift=F] [--vol=F] [--warmup=N] [--fit-window=N]',
     '              [--threshold=BPS] [--ensemble=N] [--horizon=N]',
     '              [--tail-floor=F] [--regime-tail-bump=F] [--regime-horizon-stretch=F] [--regime-position-shrink=F]',
+    '              [--data-sufficiency-min=F]',
     '              [--multi] [--adaptive-vol[=mle|auto|auto-egarch|auto-family]] [--journal=PATH] [--json]',
     '',
     'DRY-RUN ONLY. Never reads a keystore; never constructs a wallet.',
@@ -153,6 +158,9 @@ function buildSingleWorld(args) {
       // Explicit flag pins the horizon stretch; otherwise the ooda-cycle defaults
       // it to 0.5 when --adaptive-vol is on and leaves the horizon fixed when off.
       ...(args.regimeHorizonStretch != null ? { regimeHorizonStretch: args.regimeHorizonStretch } : {}),
+      // --data-sufficiency-min turns the auditor gate on; report the descriptor
+      // so the gate has data to read (and --json surfaces the coverage ratio).
+      ...(args.dataSufficiencyMin != null ? { reportDataSufficiency: true } : {}),
     },
     bounds: { maxStepPct: 0.25, maxDayPct: 0.5, concentrationCapPct: 0.9 },
     auditor: {
@@ -160,6 +168,9 @@ function buildSingleWorld(args) {
       // Explicit flag pins the regime bump; otherwise the ooda-cycle defaults it
       // to 0.1 when --adaptive-vol is on and leaves it 0 (unchanged gate) when off.
       ...(args.regimeTailBump != null ? { regimeTailBump: args.regimeTailBump } : {}),
+      // --data-sufficiency-min=F requires the forecast to clear coverage ratio F
+      // (observed returns per projected tick) or the gate rejects.
+      ...(args.dataSufficiencyMin != null ? { dataSufficiencyMinCoverage: args.dataSufficiencyMin } : {}),
     },
   };
   return { world, config };
@@ -203,6 +214,9 @@ function buildMultiWorld(args) {
       // Explicit flag pins the horizon stretch; otherwise the ooda-cycle defaults
       // it to 0.5 when --adaptive-vol is on and leaves the horizon fixed when off.
       ...(args.regimeHorizonStretch != null ? { regimeHorizonStretch: args.regimeHorizonStretch } : {}),
+      // --data-sufficiency-min turns the auditor gate on; report the descriptor
+      // so the gate has data to read (and --json surfaces the coverage ratio).
+      ...(args.dataSufficiencyMin != null ? { reportDataSufficiency: true } : {}),
     },
     bounds: { maxStepPct: 0.4, maxDayPct: 1.0, concentrationCapPct: 0.9 },
     auditor: {
@@ -210,6 +224,9 @@ function buildMultiWorld(args) {
       // Explicit flag pins the regime bump; otherwise the ooda-cycle defaults it
       // to 0.1 when --adaptive-vol is on and leaves it 0 (unchanged gate) when off.
       ...(args.regimeTailBump != null ? { regimeTailBump: args.regimeTailBump } : {}),
+      // --data-sufficiency-min=F requires the forecast to clear coverage ratio F
+      // (observed returns per projected tick) or the gate rejects.
+      ...(args.dataSufficiencyMin != null ? { dataSufficiencyMinCoverage: args.dataSufficiencyMin } : {}),
     },
   };
   return { world, config };
@@ -274,6 +291,11 @@ function printReport(res, args) {
     log(`  ORIENT   forecaster: N=${f.ensembleSize} horizon=${f.horizon} `
       + `p05/p50/p95=${f.summary.p05.toFixed(2)}/${f.summary.p50.toFixed(2)}/${f.summary.p95.toFixed(2)} `
       + `pProfit=${(f.pProfit * 100).toFixed(1)}%`);
+    if (f.dataSufficiency) {
+      const ds = f.dataSufficiency;
+      log(`           data-sufficiency: coverage=${ds.coverageRatio.toFixed(2)} `
+        + `(${ds.historyReturns} obs return(s) / ${ds.horizon}-tick horizon)${ds.scarce ? ' SCARCE' : ''}`);
+    }
   }
   if (res.proposal) {
     log(`  DECIDE   planner: ${res.proposal.steps.length} step(s) hash=${res.proposal.proposal_hash.slice(0, 16)}…`);

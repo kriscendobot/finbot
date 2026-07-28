@@ -47,6 +47,11 @@ import { worstAssetPersistence, persistenceStress } from './forecaster.js';
  * @param {number} [config.regimePersistenceHi]      persistence at/above which the bump is full (default 0.98)
  * @param {number} [config.regimeTailFloorCap]       the regime-tightened floor never exceeds this * NAV (default 0.98)
  * @param {number} [config.stalenessWindowTicks]     cited readings no older than this (default 5)
+ * @param {number} [config.dataSufficiencyMinCoverage]  minimum forecast coverage ratio (observed returns per
+ *   projected tick) the gate requires (default 0 → OFF: the invariant is not even emitted, so the verdict is
+ *   byte-identical to before). When > 0, a forecast whose `dataSufficiency.coverageRatio` falls below it —
+ *   i.e. it projects further than its observed window justifies — fails the gate. A forecast carrying no
+ *   `dataSufficiency` descriptor (the feature off upstream) passes vacuously.
  * @returns {AuditVerdict}
  */
 export function audit(input, config = {}) {
@@ -59,6 +64,7 @@ export function audit(input, config = {}) {
   const regimePersistenceHi = config.regimePersistenceHi != null ? config.regimePersistenceHi : 0.98;
   const regimeTailFloorCap = config.regimeTailFloorCap != null ? config.regimeTailFloorCap : 0.98;
   const stalenessWindowTicks = config.stalenessWindowTicks != null ? config.stalenessWindowTicks : 5;
+  const dataSufficiencyMinCoverage = config.dataSufficiencyMinCoverage != null ? config.dataSufficiencyMinCoverage : 0;
 
   const { proposal, forecast, prices } = input;
   const nav = navOf(input.portfolio, prices);
@@ -167,6 +173,27 @@ export function audit(input, config = {}) {
       : `${unreachable.length} step(s) have an unresolved place/route (unmapped or unknown venue)`;
   }
   results.push({ name: 'place-route-reachability', pass: routePass, detail: routeDetail });
+
+  // 7. Forecast data-sufficiency (opt-in gate). A projection whose horizon
+  // outruns its observed window is extrapolating past its evidence; when the
+  // operator sets a minimum coverage ratio, the forecast must clear it before
+  // the gate approves live execution — the pre-execution sibling of pricing
+  // freshness (a forecast can be fresh yet thin). Off by default
+  // (`dataSufficiencyMinCoverage` 0) → the invariant is not emitted, so the
+  // verdict is byte-identical to before. A forecast carrying no `dataSufficiency`
+  // descriptor (the forecaster's report off upstream) passes vacuously.
+  if (dataSufficiencyMinCoverage > 0) {
+    const ds = forecast && forecast.dataSufficiency;
+    const sufficiencyPass = !ds || ds.coverageRatio >= dataSufficiencyMinCoverage - 1e-12;
+    results.push({
+      name: 'forecast-data-sufficiency',
+      pass: sufficiencyPass,
+      detail: !ds
+        ? 'no data-sufficiency descriptor on forecast (vacuously sufficient)'
+        : `forecast coverage ${ds.coverageRatio.toFixed(3)} (${ds.historyReturns} obs return(s) / ${ds.horizon}-tick horizon) `
+          + `vs required ${dataSufficiencyMinCoverage.toFixed(3)}${ds.scarce ? '; forecast flags scarce' : ''}`,
+    });
+  }
 
   const failed = results.filter((r) => !r.pass).map((r) => r.name);
   return {
