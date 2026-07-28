@@ -41,10 +41,10 @@ import { compartmentAttenuator, runCompartmentLlm } from './sandbox/permissive.j
 export async function spawn(params, ctx) {
   assertSpawnParams(params);
   const attenuator = params.attenuator || compartmentAttenuator;
-  const llm = params.llm || (params.llmProgram
-    ? makeCompartmentLlm(params.role, params.llmProgram)
-    : stubLlm);
   const timeoutMs = params.timeoutMs || 10 * 60 * 1000;
+  const llm = params.llm || (params.llmProgram
+    ? makeCompartmentLlm(params.role, params.llmProgram, timeoutMs)
+    : stubLlm);
 
   const id = shortId();
   const started = Date.now();
@@ -209,11 +209,15 @@ async function runLoop({ params, ctx, attenuated, roleBrief, events, llm }) {
  * @param {string} source
  * @returns {Function}
  */
-function makeCompartmentLlm(role, source) {
+function makeCompartmentLlm(role, source, timeoutMs) {
   return (args) => runCompartmentLlm({
     role,
     source,
     globals: args.globals,
+    // The role program runs in a worker thread; `timeoutMs` bounds a single
+    // non-yielding turn and terminates the worker on overrun, so a program that
+    // never returns can no longer wedge the spawn loop.
+    timeoutMs,
     input: {
       systemPrompt: args.systemPrompt,
       messages: args.messages,

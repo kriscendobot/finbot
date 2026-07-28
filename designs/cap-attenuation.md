@@ -160,3 +160,47 @@ design decision rather than a mechanical fix): the vended `fetch` is unbounded t
 any origin where the capability map specifies a **pinned** `fetch`, and the
 `bounded` ambient token is currently identical to `full`. Both belong to a
 follow-on that decides the pin set and the concrete `bounded` surface.
+
+## Notes from the field (2026-07-28, the role program is preemptible)
+
+A panel review of PR #4 found the untrusted role program was not preemptible.
+`runCompartmentLlm` ran it as `await program(harden(snapshot))` **on the host
+event-loop thread**, so a non-yielding program — `while (true) {}` or any
+synchronous CPU bomb the LLM might emit — blocked the loop forever. The
+`timeoutMs` deadline in `spawn()` is a `setTimeout`/`Promise.race`, and a blocked
+loop never runs the timer callback, so the deadline could never fire: the whole
+harness wedged. SES isolates *authority*, but it does not make untrusted code
+*interruptible*.
+
+- The role program now runs in a dedicated **worker thread**
+  (`packages/harness/sandbox/role-worker.js`). A non-yielding program blocks only
+  its own thread; the host loop stays free, so the host enforces `timeoutMs` and
+  calls `worker.terminate()` — a preemption that interrupts even a tight
+  synchronous loop, which the host thread could never perform on itself.
+- Transport is **JSON-only in both directions**. The host validates and copies
+  the turn input to JSON before posting (a `BigInt`/cycle/accessor still fails
+  with the same precise host-labeled error); the worker copies the program result
+  to JSON on its side (where accessors, proxies, and symbols are still rejected at
+  the boundary) and the host performs the final, authoritative
+  assistant-message validation on the parsed result. No live object — and no host
+  or worker ambient — ever crosses.
+- Ambient globals cannot be serialized, so the host distills the attenuated
+  `globals` into an explicit descriptor: the `console`/`fetch`/`rng` endowments
+  travel as **tokens** the worker rebuilds from the shared materializers in
+  `sandbox/boundary.js`, while any plain-data global a custom attenuator injects
+  travels verbatim as JSON. The token list is read off the attenuated globals, so
+  the attenuator remains the sole narrowing point; a function-valued global
+  outside the known ambient set is rejected loudly rather than silently dropped.
+  The boundary primitives (JSON copy, message validator, materializers, lockdown
+  guard) live in one module imported by both host and worker, so the two runners
+  cannot drift.
+- `test/spawn.test.js` adds a regression guard: a `while (true) {}` role program
+  with a 250 ms `timeoutMs` rejects with a timeout near the deadline — a test that
+  **hangs forever against the pre-fix in-process path** — plus a worker-isolation
+  assertion that a role program sees neither `process`, `Worker`, nor
+  `parentPort`, only its granted `console`.
+
+This closes the panel's standing must-fix on the harness role-program runner. The
+live executor's *separate CapTP signing worker* (§ Process boundary) is a distinct
+boundary and stays gated as before; this note is about the untrusted **inference**
+program, not the wallet signer.

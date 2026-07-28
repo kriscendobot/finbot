@@ -17,26 +17,21 @@
  * may opt into `permissiveAttenuator` only for legacy or test-double use.
  */
 
-import 'ses';
+import { Worker } from 'node:worker_threads';
 
-// --- lockdown guard (idempotent) ---
+import {
+  buildGlobalsFromTokens,
+  copyJsonData,
+  makeConsole,
+  makeFetch,
+  makeSeededRandom,
+  normalizeAssistantMessage,
+  validateAssistantMessage,
+} from './boundary.js';
 
-function ensureLockdown() {
-  if (Object.isFrozen(Object.prototype)) return;
-  try {
-    // This module also runs host orchestration, which retains diagnostic stacks
-    // on SpawnHandle failures. `safe` clears those stacks process-wide. Role
-    // programs receive only copied protocol data, and host failures are reduced
-    // to a generic tool result before they can re-enter a later role turn.
-    // Keeping SES's causal console would replace and then freeze the host
-    // console. Retain the host console here and vend frozen wrappers below.
-    lockdown({ errorTaming: 'unsafe', consoleTaming: 'unsafe', overrideTaming: 'severe' });
-  } catch (err) {
-    const message = String((err && err.message) || err);
-    if (!/locked down|repairIntrinsics/i.test(message)) throw err;
-  }
-}
-ensureLockdown();
+// Importing ./boundary.js locks down the realm idempotently for the host too.
+
+const ROLE_WORKER_URL = new URL('./role-worker.js', import.meta.url);
 
 // --- capability map (mirrors designs/cap-attenuation.md § Capability map) ---
 
@@ -83,33 +78,40 @@ function buildRolePolicy(role, opts = {}) {
 }
 
 /**
- * Vend wrappers, not the live host console. Hardening an endowment must never
- * freeze or otherwise alter host process state.
+ * Distill the attenuated globals the attenuator produced into a form that can
+ * cross to the worker thread. This is where the attenuator's narrowing decision
+ * becomes shippable data — reading the attenuated globals rather than
+ * re-consulting CAPABILITY_MAP keeps the attenuator the sole narrowing point (a
+ * caller-supplied attenuator that dropped `fetch` yields a descriptor without
+ * it, and the worker then never materializes fetch).
+ *
+ * Two kinds of global cross differently:
+ *   - The ambient capability endowments (`console`/`fetch`/`random`) are
+ *     function-valued and cannot be serialized, so they travel as TOKENS the
+ *     worker rebuilds locally from the same materializers.
+ *   - Any other global a custom attenuator injects (a plain-data marker, config,
+ *     etc.) travels VERBATIM as JSON-copied data.
+ * A function-valued global outside the known ambient set cannot be shipped to a
+ * worker at all, so it is rejected loudly rather than silently dropped.
+ *
+ * @returns {{ tokens: string[], dataGlobals: Record<string, unknown> }}
  */
-function makeConsole() {
-  const attenuated = {};
-  for (const name of ['debug', 'error', 'info', 'log', 'warn']) {
-    if (typeof console[name] === 'function') {
-      attenuated[name] = (...args) => console[name](...args);
+function describeGlobals(globals) {
+  const tokens = [];
+  const dataGlobals = {};
+  for (const [key, value] of Object.entries(globals || {})) {
+    if (key === 'console' && value && typeof value === 'object') { tokens.push('console'); continue; }
+    if (key === 'fetch' && typeof value === 'function') { tokens.push('fetch'); continue; }
+    if (key === 'random' && typeof value === 'function') { tokens.push('rng'); continue; }
+    if (typeof value === 'function') {
+      throw new TypeError(
+        `runCompartmentLlm cannot ship a function-valued global '${key}' to the worker; `
+        + 'only console/fetch/rng ambient endowments and JSON-serializable data globals are supported',
+      );
     }
+    dataGlobals[key] = copyJsonData(value, `runCompartmentLlm.globals.${key}`);
   }
-  return harden(attenuated);
-}
-
-/** Vend a callable capability without hardening the live host fetch function. */
-function makeFetch() {
-  return harden((...args) => fetch(...args));
-}
-
-/** Deterministic, seeded PRNG (mulberry32). */
-function makeSeededRandom(seed = 0x9e3779b9) {
-  let a = seed >>> 0;
-  return function random() {
-    a |= 0; a = a + 0x6d2b79f5 | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = t + Math.imul(t ^ (t >>> 7), 61 | t) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
+  return { tokens, dataGlobals };
 }
 
 // --- v0: explicit opt-out for legacy and test-double use ---
@@ -194,135 +196,97 @@ export function compartmentAttenuator(role, capabilities = null, parentContext =
  * access therefore remain the explicit role-policy question, not an accidental
  * consequence of the LLM adapter being JavaScript.
  *
+ * The program runs in a dedicated worker thread (see `role-worker.js`), so a
+ * non-yielding program blocks only its own thread and the host can terminate it
+ * once `timeoutMs` elapses. Transport is JSON-only in both directions.
+ *
  * @param {object} args
  * @param {string} args.role
  * @param {string} args.source JavaScript expression evaluating to `(input) => message`
  * @param {object} args.input JSON-only data for one LLM turn
  * @param {object} [args.globals] the attenuated ambient-globals policy; when
  *   omitted, the role's default policy is derived for direct-caller convenience
+ * @param {number} [args.timeoutMs] wall-clock bound for the turn; on overrun the
+ *   worker is terminated and the call rejects. Omitted ⇒ no deadline.
+ * @param {number} [args.seed] seed for the role's deterministic RNG endowment
  * @returns {Promise<object>} assistant message produced by the role program
  */
-export async function runCompartmentLlm({ role, source, input, globals }) {
+export async function runCompartmentLlm({ role, source, input, globals, timeoutMs, seed }) {
   if (typeof source !== 'string' || source.trim().length === 0) {
     throw new TypeError('runCompartmentLlm.source must be a non-empty string');
   }
 
-  const snapshot = copyJsonData(input, 'runCompartmentLlm.input');
+  // Validate and copy the input to pure JSON on the HOST, so a non-serializable
+  // input (BigInt, cycle, accessor) fails with a precise host-labeled error and
+  // nothing but JSON is ever shipped to the worker.
+  const inputJson = JSON.stringify(copyJsonData(input, 'runCompartmentLlm.input'));
 
   // The attenuator is the SOLE source of a role program's ambient globals. When
   // spawn() wires this adapter it threads the already-attenuated `globals`
-  // policy through, so a caller-supplied attenuator that narrows globals is
-  // honored here — the compartment must never re-derive authority from
-  // CAPABILITY_MAP behind the attenuator's back (that would make the declared
-  // narrowing point not the only narrowing point). Direct callers that omit
+  // policy through; we distill it to an explicit token list — the only form
+  // that can cross to the worker — so a caller-supplied attenuator that narrows
+  // globals is honored, and the worker never re-derives authority from
+  // CAPABILITY_MAP behind the attenuator's back. Direct callers that omit
   // `globals` fall back to the role's default policy for convenience.
-  const rolePolicy = globals || buildRolePolicy(role, {});
-  const compartment = new Compartment({
-    globals: harden({ ...rolePolicy }),
-    __options__: true,
-    name: `role-program:${role}`,
+  const rolePolicy = globals || buildRolePolicy(role, { seed });
+  const { tokens, dataGlobals } = describeGlobals(rolePolicy);
+  const dataGlobalsJson = JSON.stringify(dataGlobals);
+
+  // Run the untrusted program in a worker THREAD, not on the host event loop.
+  // A non-yielding program blocks its own thread, never the host's, so the host
+  // stays free to enforce `timeoutMs` and terminate the worker — the preemption
+  // an in-process `await program(...)` could never deliver (blocked-loop bug).
+  const resultJson = await runInRoleWorker({
+    role, source, inputJson, tokens, dataGlobalsJson, seed, timeoutMs,
   });
-  let program;
-  try {
-    program = compartment.evaluate(`(${source})`);
-  } catch (err) {
-    throw new TypeError(`runCompartmentLlm.source must be valid JavaScript: ${err.message}`);
-  }
-  if (typeof program !== 'function') {
-    throw new TypeError('runCompartmentLlm.source must evaluate to a function');
-  }
-  // A compartment object is not safe for the host to consume directly. Copy
-  // it to host-owned JSON data, then validate the message before spawn.js sees
-  // its content, tool names, or tool arguments.
-  const result = await program(harden(snapshot));
-  return harden(normalizeAssistantMessage(
-    validateAssistantMessage(copyJsonData(result, 'runCompartmentLlm.result')),
-  ));
+
+  // The worker already copied the program result to pure JSON (rejecting
+  // accessors/proxies/symbols on its side, where the live object existed). The
+  // host performs the final, authoritative protocol validation before spawn.js
+  // sees any content, tool name, or tool argument.
+  const result = JSON.parse(resultJson);
+  return harden(normalizeAssistantMessage(validateAssistantMessage(result)));
 }
 
 /**
- * Copy a JSON data graph across the host/compartment boundary. Accessors and
- * symbols are rejected rather than invoked or silently dropped. BigInt is not
- * part of the wire format, so amount-bearing messages fail explicitly instead
- * of relying on engine-specific JSON.stringify wording.
+ * Run one role-program turn in a dedicated worker thread and resolve to the
+ * worker's JSON result string. Rejects — after terminating the worker — if the
+ * program throws, the worker dies, or `timeoutMs` elapses. Terminating a worker
+ * stuck in a synchronous loop is the one preemption the host thread cannot
+ * perform on itself.
+ *
+ * @param {object} job
+ * @returns {Promise<string>} the worker's `resultJson`
  */
-function copyJsonData(value, label) {
-  try {
-    assertJsonData(value, label);
-    const encoded = JSON.stringify(value, (_key, item) => {
-      if (typeof item === 'bigint') {
-        throw new TypeError('BigInt is not supported by the JSON boundary');
-      }
-      return item;
+function runInRoleWorker({ role, source, inputJson, tokens, dataGlobalsJson, seed, timeoutMs }) {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(ROLE_WORKER_URL);
+    let settled = false;
+    let timer;
+    const finish = (fn, arg) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      // Fire-and-forget: reclaim the thread whether it finished, failed, or is
+      // still spinning. terminate() interrupts even a tight synchronous loop.
+      worker.terminate();
+      fn(arg);
+    };
+    if (timeoutMs && timeoutMs > 0) {
+      timer = setTimeout(
+        () => finish(reject, new Error(`role program timed out after ${timeoutMs}ms`)),
+        timeoutMs,
+      );
+      if (timer.unref) timer.unref();
+    }
+    worker.once('message', (msg) => {
+      if (msg && msg.ok) finish(resolve, msg.resultJson);
+      else finish(reject, new TypeError((msg && msg.error) || 'role worker failed without a message'));
     });
-    if (typeof encoded !== 'string') throw new TypeError('value does not encode as JSON');
-    return JSON.parse(encoded);
-  } catch (err) {
-    const message = String((err && err.message) || err);
-    throw new TypeError(`${label} must be JSON-serializable: ${message}`);
-  }
-}
-
-/** Reject accessor, proxy-shaped, and symbol-bearing values before copying. */
-function assertJsonData(value, label, seen = new WeakSet()) {
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value)) throw new TypeError(`${label} must contain finite numbers`);
-    return;
-  }
-  if (typeof value === 'bigint') {
-    throw new TypeError('BigInt is not supported by the JSON boundary');
-  }
-  if (typeof value !== 'object') {
-    throw new TypeError(`${label} must contain JSON values`);
-  }
-  if (seen.has(value)) return;
-  seen.add(value);
-  if (Object.getOwnPropertySymbols(value).length > 0) {
-    throw new TypeError(`${label} must not contain symbol properties`);
-  }
-  for (const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(value))) {
-    if (!Object.hasOwn(descriptor, 'value')) {
-      throw new TypeError(`${label}.${key} must not be an accessor property`);
-    }
-    assertJsonData(descriptor.value, `${label}.${key}`, seen);
-  }
-}
-
-/** Validate the data-only assistant-message protocol at the host boundary. */
-function validateAssistantMessage(message) {
-  if (message === null || typeof message !== 'object' || Array.isArray(message)) {
-    throw new TypeError('runCompartmentLlm.result must be an assistant message object');
-  }
-  if (message.role !== 'assistant') {
-    throw new TypeError('runCompartmentLlm.result.role must be "assistant"');
-  }
-  if (!Array.isArray(message.content)) {
-    throw new TypeError('runCompartmentLlm.result.content must be an array');
-  }
-  for (const [index, item] of message.content.entries()) {
-    if (item === null || typeof item !== 'object' || Array.isArray(item) || typeof item.type !== 'string') {
-      throw new TypeError(`runCompartmentLlm.result.content[${index}] must be a typed object`);
-    }
-    if (item.type === 'text' && typeof item.text !== 'string') {
-      throw new TypeError(`runCompartmentLlm.result.content[${index}].text must be a string`);
-    }
-    if (item.type === 'toolCall') {
-      if (typeof item.id !== 'string' || typeof item.name !== 'string') {
-        throw new TypeError(`runCompartmentLlm.result.content[${index}] must name a tool and id`);
-      }
-      if (item.arguments !== undefined && (item.arguments === null || typeof item.arguments !== 'object' || Array.isArray(item.arguments))) {
-        throw new TypeError(`runCompartmentLlm.result.content[${index}].arguments must be an object`);
-      }
-    }
-  }
-  if (message.stopReason !== undefined && typeof message.stopReason !== 'string') {
-    throw new TypeError('runCompartmentLlm.result.stopReason must be a string when provided');
-  }
-  return message;
-}
-
-/** Add host-owned transcript fields before the message is hardened. */
-function normalizeAssistantMessage(message) {
-  return { ...message, timestamp: Date.now() };
+    worker.once('error', (err) => finish(reject, err instanceof Error ? err : new Error(String(err))));
+    worker.once('exit', (code) => {
+      if (code !== 0) finish(reject, new Error(`role worker exited with code ${code}`));
+    });
+    worker.postMessage({ role, source, inputJson, tokens, dataGlobalsJson, seed });
+  });
 }

@@ -305,6 +305,38 @@ test('runCompartmentLlm: rejects malformed and accessor-shaped returns at the bo
   );
 });
 
+test('runCompartmentLlm: terminates a non-yielding role program at the timeout', async () => {
+  // Regression: a synchronous, non-yielding role program used to run on the
+  // host event-loop thread via `await program(...)`, so it blocked the loop and
+  // no `timeoutMs`/`Promise.race` deadline could ever fire — the call hung
+  // forever. With the worker-thread runner the host stays free to terminate it.
+  const started = Date.now();
+  await assert.rejects(
+    runCompartmentLlm({
+      role: 'planner',
+      source: '() => { while (true) {} }',
+      input: {},
+      timeoutMs: 250,
+    }),
+    /role program timed out after 250ms/,
+  );
+  // Preemption proof: we regained control near the deadline, nowhere near the
+  // 10-minute default a blocked loop would have imposed.
+  assert.ok(Date.now() - started < 8000, `expected prompt termination, took ${Date.now() - started}ms`);
+});
+
+test('runCompartmentLlm: a role program runs in an isolated worker realm', async () => {
+  // The program cannot see host thread-locals; worker_threads gives it a fresh
+  // V8 isolate, and the compartment inside it exposes only the role's globals.
+  const message = await runCompartmentLlm({
+    role: 'planner',
+    source: '(input) => ({ role: "assistant", content: [{ type: "text", text: [typeof process, typeof Worker, typeof globalThis.parentPort, typeof console.log, typeof fetch].join("|") }], stopReason: "end_turn" })',
+    input: {},
+  });
+  // planner policy grants console but not fetch; no worker/host ambient leaks in.
+  assert.equal(message.content[0].text, 'undefined|undefined|undefined|function|undefined');
+});
+
 test('spawn: llmProgram runs inside a compartment and can request only vended tools', async () => {
   const tmp = await mkdtemp(path.join(tmpdir(), 'finbot-spawn-'));
   try {
