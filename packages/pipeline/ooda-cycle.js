@@ -162,12 +162,15 @@ export async function runOodaCycle(input) {
     forecasterConfig.regimeHorizonStretch = 0.5;
   }
   // Data-sufficiency gate: the auditor's `dataSufficiencyMinCoverage` can only
-  // bite if the forecaster actually emits the descriptor — auto-enable the
-  // report when the operator set only the auditor threshold, so a lone gate knob
-  // yields a live gate instead of a vacuous pass. An explicit
-  // `forecaster.reportDataSufficiency` still wins; both off → unchanged.
+  // bite on evidence the forecaster actually emits — auto-enable the report when
+  // the operator set only the auditor threshold, so a lone gate knob yields a
+  // live gate. An explicit `forecaster.reportDataSufficiency` still wins, but it
+  // can no longer disarm the gate: an explicit `false` under an armed threshold
+  // leaves the auditor with no evidence, which now FAILS the invariant closed
+  // rather than passing it vacuously. Both off -> unchanged.
+  const gateMinCoverage = auditorConfig.dataSufficiencyMinCoverage;
   if (forecasterConfig.reportDataSufficiency === undefined
-      && auditorConfig.dataSufficiencyMinCoverage > 0) {
+      && gateMinCoverage != null && Number(gateMinCoverage) !== 0) {
     forecasterConfig.reportDataSufficiency = true;
   }
   const forecast = project(

@@ -1,6 +1,6 @@
 ---
 created: 2026-06-17
-updated: 2026-07-20
+updated: 2026-07-28
 author: architect
 status: stub
 ---
@@ -64,7 +64,7 @@ A 10,000-simulation ensemble on a non-trivial program takes minutes. The orchest
 ## Open questions
 
 - What is the right N for routine forecasts vs. high-confidence pre-rebalance forecasts? N=10,000 is the default; tail risk at p01 / p99 is noisy there.
-- ~~How does the forecaster handle programs whose horizon exceeds the historical window? (A 30-day forecast of a 3-month-old instrument has thin data.) Probably name the data scarcity in the result and let the planner downweight.~~ **Resolved.** The forecaster names it: `project(..., { reportDataSufficiency: true })` attaches a `dataSufficiency` descriptor (`historyReturns` observed / `horizon` projected → `coverageRatio`, `scarce`) measured against the same window the adaptive vol fit draws on and the possibly regime-stretched horizon (`packages/pipeline/forecaster.js`, `computeDataSufficiency`). Off by default → the projection stays byte-identical. The auditor turns it into a pre-execution gate: `dataSufficiencyMinCoverage` (default 0 = off, invariant not even emitted) rejects a forecast whose coverage falls below the required returns-per-tick — the sibling of pricing-freshness (a forecast can be fresh yet thin). The OODA cycle auto-enables the forecaster report when only the auditor knob is set, and `finbot-ooda --data-sufficiency-min=F` demonstrates it end-to-end.
+- How does the forecaster handle programs whose horizon exceeds the historical window? (A 30-day forecast of a 3-month-old instrument has thin data.) **Naming it: resolved** — see *Notes from the field (2026-07-28 — forecast data-sufficiency)*. The downweighting half is still open: what landed is a binary auditor gate, not the graded planner downweight this question originally proposed.
 - Does the forecaster vend its output as a Far ref to the analyzer (per `skills/far-exo-vending`) or as a journal-entry path the analyzer reads? The latter is simpler at bootstrap; the former is the right shape if forecasts get large enough that we want to lazy-load.
 
 ## Implementation pointers
@@ -866,3 +866,78 @@ fixtures and read the selection deltas." Making `significanceAlpha` the live
 default remains a maintainer call (it would change proposal hashes and needs a
 re-baselined fixture); live execution remains separately blocked on explicit
 paper-wallet/test-net authorization and a selected CapTP transport.
+
+## Notes from the field (2026-07-28 — forecast data-sufficiency)
+
+The open question "how does the forecaster handle programs whose horizon exceeds
+the historical window?" asked for two things: *name* the data scarcity, and let
+the planner *downweight* it. This cut delivers the naming and substitutes a
+binary pre-execution gate for the graded downweight; `planner.js` is untouched,
+and graded downweighting stays live residue in Open questions.
+
+- **The measurement.** `computeDataSufficiency({ frames, horizon, assets })` is a
+  new export of `packages/pipeline/forecaster.js`. It returns
+  `{ historyFrames, historyReturns, worstAsset, horizon, coverageRatio }` —
+  observed returns per projected tick, where 1.0 means the window carries one
+  observed return for every tick projected. Pure counts and arithmetic, no RNG,
+  so a projection carrying the descriptor still hashes stably.
+- **Worst-constituent, not portfolio-wide.** Coverage is measured per asset over
+  the assets actually projected and reported for the worst-covered one — the same
+  worst-asset convention `worstAssetPersistence` uses for the regime read. This
+  is what makes the descriptor answer the question that motivated it: a
+  freshly-listed instrument inside a long window reads as thin instead of hiding
+  behind its better-observed neighbours. A frame carrying no finite price for an
+  asset is no evidence about it, so a stalled feed emitting `{ t, prices: {} }`
+  cannot pad the ratio.
+- **Measurement, not policy.** The descriptor carries no threshold and no
+  verdict. That is deliberate: a threshold in the descriptor would ride into
+  `projectionArtifact` and give two byte-identical ensembles two different
+  `projectionId`s purely from a reporting knob, breaking the
+  "same forecast -> same id" contract the auditor's recompute-and-compare rests
+  on. The consumer owns the comparison.
+- **What is byte-identical when off.** `project()` returns `dataSufficiency:
+  null` by default and `projectionArtifact` omits a null descriptor, so the
+  **hashed artifact and its `projectionId`** are byte-identical to before. The
+  returned projection object (and `finbot-ooda --json`) does carry the key as
+  `null`, exactly as `horizonRegime` and `volFit` do — the invariance claim is
+  about the artifact, not the object.
+- **The gate.** The auditor gains a seventh invariant,
+  `forecast-data-sufficiency`, armed by `dataSufficiencyMinCoverage` (default 0 =
+  off, and the invariant is then not even emitted, so the verdict is
+  byte-identical to before). It is the pre-execution sibling of
+  pricing-freshness: a forecast can be fresh yet thin.
+- **Armed, it fails CLOSED.** A forecast with no measurable descriptor — the
+  report left off upstream, or a malformed one from a caller-supplied forecast
+  (`audit_proposal`, the executor's fire-time re-audit) — *fails* rather than
+  passing vacuously. Absence of evidence is not evidence of sufficiency, and this
+  verdict is a precondition for irreversible action; the sibling tail-risk floor
+  already fails closed on a missing forecast. An unusable threshold (non-finite
+  or negative) fails closed on the same reasoning, so a malformed knob can never
+  degrade to no gate at all. The comparison reads the descriptor's own
+  `coverageRatio` against the *auditor's* threshold, never a producer-chosen
+  verdict — the gate must not trust a judgement made by the thing it gates.
+- **Wiring.** `runOodaCycle` auto-enables the forecaster report when only the
+  auditor knob is set, so a lone gate knob yields a live gate. An explicit
+  `forecaster.reportDataSufficiency: false` still wins, but no longer disarms the
+  gate: it now leaves the armed invariant failing closed.
+- **The CLI.** `finbot-ooda --data-sufficiency-min=F` demonstrates it end to end.
+  `F=0` (or omitted) is off on both halves. A non-finite or negative `F` exits 2
+  rather than silently disarming the gate — `Number('abc')` is `NaN` and
+  `NaN > 0` is false, so an unvalidated value would print a coverage line while
+  emitting no invariant, the worst false-assurance shape for a safety knob. The
+  report's `SCARCE` label is computed against the same threshold the auditor
+  gates on, so it can never appear beside an approving gate.
+- **Tests.** 18 across `packages/pipeline/test/forecaster-data-sufficiency.test.js`
+  and `.../auditor-data-sufficiency.test.js`, pinning: the off-path artifact
+  byte-identity, the fit-window (not the shorter cited window) as the measured
+  window, per-asset worst-constituent coverage, the padding attack, the guarded
+  bare-count coercion, both fail-closed paths, malformed descriptors, and the
+  exact-threshold boundary the comparison's 1e-12 slack exists for. `npm test`
+  green; `finbot-ooda --seed=7` unchanged on the default path.
+
+Still outstanding: the invariant is not yet reflected in
+`skills/pre-execution-audit/SKILL.md`, `roles/auditor/AGENT.md`, or
+`packages/pipeline/README.md`, all of which enumerate the invariant set (and had
+already drifted before this cut — their #6 reads "on-chain verifiability" where
+the code's is `place-route-reachability`). Reconciling that enumeration is its
+own change.

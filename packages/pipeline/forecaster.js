@@ -195,35 +195,105 @@ export function regimeHorizon({ baseHorizon, volFit, stretch, lo, hi, cap }) {
 }
 
 /**
+ * Count the observed frames that actually carry evidence about the projected
+ * assets, and name the worst-covered one. A frame with no finite price for an
+ * asset says nothing about that asset, so an empty or partial frame cannot pad
+ * the count — the failure mode a bare `frames.length` has, where a stalled feed
+ * emitting `{ t, prices: {} }` reads as a full window.
+ *
+ * With no assets named, a frame counts when it carries at least one finite
+ * price. The bare-count overload trusts a caller that already counted its own
+ * window; its coercion is guarded (`Number.isFinite` + `Math.trunc`, never
+ * `| 0`, which is ToInt32 and wraps a large count around 2^31).
+ *
+ * @param {Array<Record<string, number>>|number} frames
+ * @param {string[]|undefined} assets
+ * @returns {{ historyFrames: number, worstAsset: string|null }}
+ */
+function countObservedFrames(frames, assets) {
+  if (!Array.isArray(frames)) {
+    const count = Number(frames);
+    return {
+      historyFrames: Number.isFinite(count) ? Math.max(0, Math.trunc(count)) : 0,
+      worstAsset: null,
+    };
+  }
+  const hasFinitePrice = (frame, asset) => {
+    if (!frame || typeof frame !== 'object') return false;
+    const price = frame[asset];
+    return typeof price === 'number' && Number.isFinite(price);
+  };
+  const named = (Array.isArray(assets) ? assets : []).filter((a) => typeof a === 'string');
+  if (named.length === 0) {
+    let count = 0;
+    for (const frame of frames) {
+      if (frame && typeof frame === 'object'
+          && Object.keys(frame).some((asset) => hasFinitePrice(frame, asset))) count += 1;
+    }
+    return { historyFrames: count, worstAsset: null };
+  }
+  let worstAsset = null;
+  let worstCount = Infinity;
+  for (const asset of named) {
+    let count = 0;
+    for (const frame of frames) if (hasFinitePrice(frame, asset)) count += 1;
+    if (count < worstCount) { worstCount = count; worstAsset = asset; }
+  }
+  return { historyFrames: Number.isFinite(worstCount) ? worstCount : 0, worstAsset };
+}
+
+/**
+ * @typedef {object} DataSufficiency
+ * @property {number} historyFrames    observed frames carrying a finite price for the worst-covered asset
+ * @property {number} historyReturns   the returns those frames yield (`historyFrames - 1`, floored at 0)
+ * @property {string|null} worstAsset  the asset the coverage was measured on (null when none were named)
+ * @property {number} horizon          ticks projected forward
+ * @property {number} coverageRatio    observed returns per projected tick (0 when the horizon is 0)
+ */
+
+/**
  * Name whether a projection outruns its observed evidence: the forecaster
  * projects `horizon` ticks forward from a window of observed price frames, and a
- * horizon that exceeds the observed returns is extrapolating past its data — the
- * ensemble-forecasting design's open question ("a program whose horizon exceeds
- * the historical window … name the data scarcity in the result and let the
- * planner downweight"). The `coverageRatio` is the observed returns per projected
- * tick; `scarce` is true when it falls below `minCoverage` (a full window would
- * carry at least one observed return per tick projected, i.e. coverageRatio ≥ 1).
+ * horizon that exceeds the observed returns is extrapolating past its data (the
+ * ensemble-forecasting design's open question about a horizon that exceeds the
+ * historical window; see designs/ensemble-forecasting.md). The `coverageRatio`
+ * is the observed returns per projected tick: 1.0 means the window carries one
+ * observed return per tick projected.
  *
- * Pure and deterministic (counts + arithmetic, no RNG), so a data-sufficient
- * projection hashes stably.
+ * Coverage is measured PER ASSET and reported for the WORST-covered one, the
+ * same worst-constituent convention `worstAssetPersistence` uses: a portfolio is
+ * only as well-evidenced as its thinnest instrument, so a freshly-listed asset
+ * inside a long window cannot hide behind its better-observed neighbours.
+ *
+ * Measurement only, no policy. The descriptor carries counts and the ratio; the
+ * consumer (the auditor's gate, the CLI report) owns the threshold it is judged
+ * against. Keeping the operator's threshold out of the descriptor keeps it out
+ * of the hashed artifact, so two otherwise byte-identical ensembles cannot get
+ * two different `projectionId`s from a reporting knob alone.
+ *
+ * Pure and deterministic (counts + arithmetic, no RNG), so a projection that
+ * carries the descriptor still hashes stably.
  *
  * @param {object} args
  * @param {Array<Record<string, number>>|number} args.frames   the observed price frames used (or their count)
  * @param {number} args.horizon                                ticks projected forward
- * @param {number} [args.minCoverage]                          returns-per-tick below which the projection is scarce (default 1)
- * @returns {{ historyFrames: number, historyReturns: number, horizon: number, minCoverage: number, coverageRatio: number, scarce: boolean }}
+ * @param {string[]} [args.assets]   the assets projected; coverage is the worst of these (default: a frame
+ *   counts when it carries at least one finite price)
+ * @returns {DataSufficiency}
  */
-export function computeDataSufficiency({ frames, horizon, minCoverage = 1 }) {
-  const historyFrames = Array.isArray(frames) ? frames.length : Math.max(0, frames | 0);
+export function computeDataSufficiency({ frames, horizon, assets }) {
+  const { historyFrames, worstAsset } = countObservedFrames(frames, assets);
   const historyReturns = Math.max(0, historyFrames - 1);
-  const coverageRatio = horizon > 0 ? historyReturns / horizon : 0;
+  // Normalize the horizon before it lands in a hashed artifact: a non-finite
+  // horizon would serialize to null and desync the content hash from the value.
+  const projectedTicks = Number.isFinite(horizon) ? Math.max(0, horizon) : 0;
+  const coverageRatio = projectedTicks > 0 ? historyReturns / projectedTicks : 0;
   return {
     historyFrames,
     historyReturns,
-    horizon,
-    minCoverage,
+    worstAsset,
+    horizon: projectedTicks,
     coverageRatio: round12(coverageRatio),
-    scarce: coverageRatio < minCoverage,
   };
 }
 
@@ -242,11 +312,11 @@ export function computeDataSufficiency({ frames, horizon, minCoverage = 1 }) {
  * @property {number} p50Equity
  * @property {number} pProfit
  * @property {Array<object>} actionSteps   the steps the projection applied at t=1
- * @property {object} [horizonRegime]      present only when a persistent regime stretched the horizon:
- *   `{ baseHorizon, persistence, worstAsset, stress }` (the citation trail for why `horizon > baseHorizon`)
- * @property {object} [dataSufficiency]    present only when `config.reportDataSufficiency` is set:
- *   `{ historyFrames, historyReturns, horizon, minCoverage, coverageRatio, scarce }` — whether the
- *   projection outruns its observed window, so a downstream gate/planner can downweight a scarce forecast
+ * @property {object|null} horizonRegime   the citation trail for why `horizon > baseHorizon`
+ *   (`{ baseHorizon, persistence, worstAsset, stress }`); null when no persistent regime stretched it
+ * @property {DataSufficiency|null} dataSufficiency   whether the projection outruns its observed window,
+ *   so a downstream gate can refuse a thin forecast; null unless `config.reportDataSufficiency` is set,
+ *   and omitted from `projectionArtifact` when null (so the content hash is unaffected)
  * @property {string} [projectionSvg]      deterministic SVG render of the histogram
  */
 
@@ -297,9 +367,11 @@ export function makeRebalanceAction(targetWeights, bounds) {
  * @param {number} [config.regimePersistenceHi]    persistence at/above which the stretch is full (default 0.98)
  * @param {number} [config.regimeHorizonCap]       the regime-stretched horizon never exceeds this many ticks (default 60)
  * @param {boolean} [config.reportDataSufficiency]  attach a `dataSufficiency` descriptor naming whether the
- *   projection outruns its observed window (default false → no field, projection byte-identical to before)
- * @param {number} [config.dataSufficiencyMinCoverage]   observed returns per projected tick below which the
- *   projection is flagged `scarce` (default 1); only consulted when `reportDataSufficiency` is set
+ *   projection outruns its observed window (default false -> the descriptor is `null` and
+ *   `projectionArtifact` omits it, so the hashed artifact and its `projectionId` stay byte-identical to
+ *   before; the returned projection object carries the key either way, as it does for `horizonRegime`).
+ *   The descriptor is pure measurement — the threshold it is judged against belongs to the consumer
+ *   (the auditor's `dataSufficiencyMinCoverage` gate), never to the forecaster.
  * @returns {ForecastProjection}
  */
 export function project(input, config = {}) {
@@ -349,14 +421,17 @@ export function project(input, config = {}) {
   // evidence. The window measured is the SAME one the adaptive fit draws on
   // (`fitReadings`, the longer rolling window when supplied), against the
   // possibly regime-stretched `horizon` — so a regime that stretched the horizon
-  // correctly lowers the coverage it must be justified against. Off by default
-  // (`config.reportDataSufficiency` unset) → no field, so the projection and its
+  // correctly lowers the coverage it must be justified against. Coverage is
+  // measured on the assets actually projected and reported for the worst-covered
+  // one, so a thin newcomer in a well-observed portfolio still reads as thin.
+  // Off by default (`config.reportDataSufficiency` unset) -> the descriptor is
+  // null and `projectionArtifact` omits it, so the hashed artifact and its
   // content hash stay byte-identical to before; computed only when asked.
   const dataSufficiency = config.reportDataSufficiency
     ? computeDataSufficiency({
         frames: priceFramesFromReadings(fitReadings),
         horizon,
-        minCoverage: config.dataSufficiencyMinCoverage != null ? config.dataSufficiencyMinCoverage : 1,
+        assets: Object.keys(input.targetWeights || {}),
       })
     : null;
 

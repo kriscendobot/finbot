@@ -48,10 +48,12 @@ import { worstAssetPersistence, persistenceStress } from './forecaster.js';
  * @param {number} [config.regimeTailFloorCap]       the regime-tightened floor never exceeds this * NAV (default 0.98)
  * @param {number} [config.stalenessWindowTicks]     cited readings no older than this (default 5)
  * @param {number} [config.dataSufficiencyMinCoverage]  minimum forecast coverage ratio (observed returns per
- *   projected tick) the gate requires (default 0 → OFF: the invariant is not even emitted, so the verdict is
- *   byte-identical to before). When > 0, a forecast whose `dataSufficiency.coverageRatio` falls below it —
- *   i.e. it projects further than its observed window justifies — fails the gate. A forecast carrying no
- *   `dataSufficiency` descriptor (the feature off upstream) passes vacuously.
+ *   projected tick) the gate requires (default 0 -> OFF: the invariant is not even emitted, so the verdict
+ *   is byte-identical to before). When armed, a forecast whose `dataSufficiency.coverageRatio` falls below
+ *   it — that is, it projects further than its observed window justifies — fails the gate, and so does a
+ *   forecast carrying no measurable descriptor: an armed gate with no evidence fails CLOSED rather than
+ *   approving vacuously. An unusable threshold (non-finite or negative) arms the gate and fails it closed
+ *   too, so a malformed knob can never silently degrade to no gate at all.
  * @returns {AuditVerdict}
  */
 export function audit(input, config = {}) {
@@ -64,7 +66,8 @@ export function audit(input, config = {}) {
   const regimePersistenceHi = config.regimePersistenceHi != null ? config.regimePersistenceHi : 0.98;
   const regimeTailFloorCap = config.regimeTailFloorCap != null ? config.regimeTailFloorCap : 0.98;
   const stalenessWindowTicks = config.stalenessWindowTicks != null ? config.stalenessWindowTicks : 5;
-  const dataSufficiencyMinCoverage = config.dataSufficiencyMinCoverage != null ? config.dataSufficiencyMinCoverage : 0;
+  const dataSufficiencyMinCoverage = config.dataSufficiencyMinCoverage != null
+    ? Number(config.dataSufficiencyMinCoverage) : 0;
 
   const { proposal, forecast, prices } = input;
   const nav = navOf(input.portfolio, prices);
@@ -179,20 +182,47 @@ export function audit(input, config = {}) {
   // operator sets a minimum coverage ratio, the forecast must clear it before
   // the gate approves live execution — the pre-execution sibling of pricing
   // freshness (a forecast can be fresh yet thin). Off by default
-  // (`dataSufficiencyMinCoverage` 0) → the invariant is not emitted, so the
-  // verdict is byte-identical to before. A forecast carrying no `dataSufficiency`
-  // descriptor (the forecaster's report off upstream) passes vacuously.
-  if (dataSufficiencyMinCoverage > 0) {
-    const ds = forecast && forecast.dataSufficiency;
-    const sufficiencyPass = !ds || ds.coverageRatio >= dataSufficiencyMinCoverage - 1e-12;
-    results.push({
-      name: 'forecast-data-sufficiency',
-      pass: sufficiencyPass,
-      detail: !ds
-        ? 'no data-sufficiency descriptor on forecast (vacuously sufficient)'
-        : `forecast coverage ${ds.coverageRatio.toFixed(3)} (${ds.historyReturns} obs return(s) / ${ds.horizon}-tick horizon) `
-          + `vs required ${dataSufficiencyMinCoverage.toFixed(3)}${ds.scarce ? '; forecast flags scarce' : ''}`,
-    });
+  // (`dataSufficiencyMinCoverage` 0) -> the invariant is not emitted, so the
+  // verdict is byte-identical to before.
+  //
+  // Armed, the gate fails CLOSED. A forecast carrying no measurable
+  // `dataSufficiency` descriptor — the forecaster's report left off upstream, or
+  // a malformed descriptor from a foreign producer (the LLM-facing
+  // `audit_proposal` tool and the executor's fire-time re-audit both pass a
+  // caller-supplied forecast) — cannot be SHOWN to clear the requirement, so it
+  // fails rather than passing vacuously: absence of evidence is not evidence of
+  // sufficiency, and this verdict is a precondition for irreversible action.
+  // The sibling tail-risk floor already fails closed on a missing forecast.
+  // An unusable threshold fails closed on the same reasoning, so an operator who
+  // asked for a gate never silently gets none.
+  //
+  // The threshold is compared against the descriptor's own `coverageRatio`,
+  // never against a producer-chosen verdict — the gate must not trust a
+  // judgement made by the thing it gates. The 1e-12 slack absorbs the
+  // descriptor's `round12` quantization, so a coverage that exactly meets the
+  // requirement is not rejected by a trailing-digit artifact.
+  const minCoverageUsable = Number.isFinite(dataSufficiencyMinCoverage) && dataSufficiencyMinCoverage >= 0;
+  if (!minCoverageUsable || dataSufficiencyMinCoverage > 0) {
+    const dataSufficiency = forecast && forecast.dataSufficiency;
+    const coverageRatio = dataSufficiency ? Number(dataSufficiency.coverageRatio) : NaN;
+    let sufficiencyPass = false;
+    let sufficiencyDetail;
+    if (!minCoverageUsable) {
+      sufficiencyDetail = `required coverage ${String(config.dataSufficiencyMinCoverage)} is not a finite `
+        + 'non-negative number; the gate cannot be evaluated (fails closed)';
+    } else if (!Number.isFinite(coverageRatio)) {
+      sufficiencyDetail = 'forecast carries no measurable data-sufficiency descriptor vs required '
+        + `${dataSufficiencyMinCoverage.toFixed(3)}; the gate cannot be evaluated (fails closed)`;
+    } else {
+      sufficiencyPass = coverageRatio >= dataSufficiencyMinCoverage - 1e-12;
+      const observedReturns = Number.isFinite(dataSufficiency.historyReturns) ? dataSufficiency.historyReturns : '?';
+      const projectedTicks = Number.isFinite(dataSufficiency.horizon) ? dataSufficiency.horizon : '?';
+      const onAsset = typeof dataSufficiency.worstAsset === 'string' ? ` on ${dataSufficiency.worstAsset}` : '';
+      sufficiencyDetail = `forecast coverage ${coverageRatio.toFixed(3)}${onAsset} `
+        + `(${observedReturns} observed return(s) / ${projectedTicks}-tick horizon) `
+        + `vs required ${dataSufficiencyMinCoverage.toFixed(3)}`;
+    }
+    results.push({ name: 'forecast-data-sufficiency', pass: sufficiencyPass, detail: sufficiencyDetail });
   }
 
   const failed = results.filter((r) => !r.pass).map((r) => r.name);

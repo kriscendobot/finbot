@@ -34,8 +34,9 @@
  *   --regime-position-shrink=F  max fractional target reduction a fully persistent vol regime applies
  *                    (default: 0.5 when --adaptive-vol is on, else 0); a persistent asset sizes smaller
  *   --data-sufficiency-min=F  require the forecast's coverage ratio (observed returns per projected
- *                    tick) to be >= F or the auditor rejects (default: off); names + gates a forecast
- *                    whose horizon outruns its observed window
+ *                    tick) to be >= F or the auditor rejects (default: off; F=0 is also off); names +
+ *                    gates a forecast whose horizon outruns its observed window. A non-finite or
+ *                    negative F is rejected (exit 2) rather than silently disarming the gate
  *   --multi          run the multi-instrument world (correlated growth legs + a yield leg)
  *   --adaptive-vol[=mle|auto|auto-egarch|auto-family]  fit a conditional-vol surface from the window; the
  *                    forecaster projects the ensemble under it and the analyzer
@@ -78,7 +79,9 @@ function parseArgs(argv) {
     else if (key === '--regime-tail-bump') args.regimeTailBump = Number(val);
     else if (key === '--regime-horizon-stretch') args.regimeHorizonStretch = Number(val);
     else if (key === '--regime-position-shrink') args.regimePositionShrink = Number(val);
-    else if (key === '--data-sufficiency-min') args.dataSufficiencyMin = Number(val);
+    // A bare `--data-sufficiency-min` carries no value; NaN routes it to the
+    // validation below rather than to `Number(null)`, which is 0 (silently off).
+    else if (key === '--data-sufficiency-min') args.dataSufficiencyMin = val === null ? NaN : Number(val);
     else if (key === '--journal') args.journal = val;
     else if (key === '--json') args.json = true;
     else if (key === '--multi') args.multi = true;
@@ -101,6 +104,16 @@ function parseArgs(argv) {
     }
     else if (key === '--help' || key === '-h') { printHelp(); process.exit(0); }
     else { console.error(`finbot-ooda: unknown flag ${arg}`); process.exit(2); }
+  }
+  // A flag that ARMS a safety gate must never disarm it on a typo: `Number('abc')`
+  // is NaN and `NaN > 0` is false, so an unvalidated value would wire the knob,
+  // print the coverage line, and emit no invariant at all — a gate the operator
+  // believes is armed and is not. Fail fast instead, as finbot-eval does for
+  // --significance-alpha.
+  if (args.dataSufficiencyMin != null
+      && !(Number.isFinite(args.dataSufficiencyMin) && args.dataSufficiencyMin >= 0)) {
+    console.error('finbot-ooda: --data-sufficiency-min must be a finite number >= 0 (e.g. --data-sufficiency-min=1)');
+    process.exit(2);
   }
   return args;
 }
@@ -160,7 +173,8 @@ function buildSingleWorld(args) {
       ...(args.regimeHorizonStretch != null ? { regimeHorizonStretch: args.regimeHorizonStretch } : {}),
       // --data-sufficiency-min turns the auditor gate on; report the descriptor
       // so the gate has data to read (and --json surfaces the coverage ratio).
-      ...(args.dataSufficiencyMin != null ? { reportDataSufficiency: true } : {}),
+      // F=0 is off on both halves, so an explicit 0 runs exactly the default.
+      ...(args.dataSufficiencyMin > 0 ? { reportDataSufficiency: true } : {}),
     },
     bounds: { maxStepPct: 0.25, maxDayPct: 0.5, concentrationCapPct: 0.9 },
     auditor: {
@@ -170,7 +184,7 @@ function buildSingleWorld(args) {
       ...(args.regimeTailBump != null ? { regimeTailBump: args.regimeTailBump } : {}),
       // --data-sufficiency-min=F requires the forecast to clear coverage ratio F
       // (observed returns per projected tick) or the gate rejects.
-      ...(args.dataSufficiencyMin != null ? { dataSufficiencyMinCoverage: args.dataSufficiencyMin } : {}),
+      ...(args.dataSufficiencyMin > 0 ? { dataSufficiencyMinCoverage: args.dataSufficiencyMin } : {}),
     },
   };
   return { world, config };
@@ -216,7 +230,8 @@ function buildMultiWorld(args) {
       ...(args.regimeHorizonStretch != null ? { regimeHorizonStretch: args.regimeHorizonStretch } : {}),
       // --data-sufficiency-min turns the auditor gate on; report the descriptor
       // so the gate has data to read (and --json surfaces the coverage ratio).
-      ...(args.dataSufficiencyMin != null ? { reportDataSufficiency: true } : {}),
+      // F=0 is off on both halves, so an explicit 0 runs exactly the default.
+      ...(args.dataSufficiencyMin > 0 ? { reportDataSufficiency: true } : {}),
     },
     bounds: { maxStepPct: 0.4, maxDayPct: 1.0, concentrationCapPct: 0.9 },
     auditor: {
@@ -226,7 +241,7 @@ function buildMultiWorld(args) {
       ...(args.regimeTailBump != null ? { regimeTailBump: args.regimeTailBump } : {}),
       // --data-sufficiency-min=F requires the forecast to clear coverage ratio F
       // (observed returns per projected tick) or the gate rejects.
-      ...(args.dataSufficiencyMin != null ? { dataSufficiencyMinCoverage: args.dataSufficiencyMin } : {}),
+      ...(args.dataSufficiencyMin > 0 ? { dataSufficiencyMinCoverage: args.dataSufficiencyMin } : {}),
     },
   };
   return { world, config };
@@ -292,9 +307,15 @@ function printReport(res, args) {
       + `p05/p50/p95=${f.summary.p05.toFixed(2)}/${f.summary.p50.toFixed(2)}/${f.summary.p95.toFixed(2)} `
       + `pProfit=${(f.pProfit * 100).toFixed(1)}%`);
     if (f.dataSufficiency) {
-      const ds = f.dataSufficiency;
-      log(`           data-sufficiency: coverage=${ds.coverageRatio.toFixed(2)} `
-        + `(${ds.historyReturns} obs return(s) / ${ds.horizon}-tick horizon)${ds.scarce ? ' SCARCE' : ''}`);
+      const dataSufficiency = f.dataSufficiency;
+      // SCARCE is labelled against the SAME threshold the auditor gates on, so
+      // the report can never flag scarcity beside an approving gate.
+      const scarce = args.dataSufficiencyMin > 0
+        && dataSufficiency.coverageRatio < args.dataSufficiencyMin - 1e-12;
+      const onAsset = dataSufficiency.worstAsset ? ` on ${dataSufficiency.worstAsset}` : '';
+      log(`           data-sufficiency: coverage=${dataSufficiency.coverageRatio.toFixed(2)}${onAsset} `
+        + `(${dataSufficiency.historyReturns} observed return(s) / ${dataSufficiency.horizon}-tick horizon)`
+        + `${scarce ? ' SCARCE' : ''}`);
     }
   }
   if (res.proposal) {
