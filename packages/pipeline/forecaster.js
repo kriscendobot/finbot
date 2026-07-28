@@ -195,58 +195,105 @@ export function regimeHorizon({ baseHorizon, volFit, stretch, lo, hi, cap }) {
 }
 
 /**
- * Count the observed frames that actually carry evidence about the projected
- * assets, and name the worst-covered one. A frame with no finite price for an
- * asset says nothing about that asset, so an empty or partial frame cannot pad
- * the count — the failure mode a bare `frames.length` has, where a stalled feed
- * emitting `{ t, prices: {} }` reads as a full window.
+ * Does this frame carry an OWN observation of `asset`?
  *
- * With no assets named, a frame counts when it carries at least one finite
- * price. The bare-count overload trusts a caller that already counted its own
- * window; its coercion is guarded (`Number.isFinite` + `Math.trunc`, never
- * `| 0`, which is ToInt32 and wraps a large count around 2^31).
+ * Own-property only: an inherited price is not an observation the feed made, and
+ * a prototype-chain read would let frames with no own properties at all pad the
+ * count — the very padding this helper exists to reject. A non-positive or
+ * non-finite price is a stalled/absent sentinel rather than an observation (no
+ * return can be computed across a zero), so it is not evidence either.
  *
- * @param {Array<Record<string, number>>|number} frames
- * @param {string[]|undefined} assets
- * @returns {{ historyFrames: number, worstAsset: string|null }}
+ * @param {unknown} frame
+ * @param {string} asset
+ * @returns {boolean}
  */
-function countObservedFrames(frames, assets) {
-  if (!Array.isArray(frames)) {
-    const count = Number(frames);
-    return {
-      historyFrames: Number.isFinite(count) ? Math.max(0, Math.trunc(count)) : 0,
-      worstAsset: null,
-    };
+function hasOwnFinitePrice(frame, asset) {
+  if (!frame || typeof frame !== 'object') return false;
+  if (!Object.hasOwn(frame, asset)) return false;
+  const price = frame[asset];
+  return typeof price === 'number' && Number.isFinite(price) && price > 0;
+}
+
+/**
+ * Frames and RETURNS from a per-frame observed/not-observed mask. A return needs
+ * two ADJACENT observations, so returns accumulate only inside a maximal run:
+ * a feed that alternates observed/missing carries many frames and no returns,
+ * and counting `frames - 1` would credit it with returns it never observed.
+ *
+ * @param {boolean[]} observed
+ * @returns {{ historyFrames: number, historyReturns: number }}
+ */
+function contiguousCounts(observed) {
+  let historyFrames = 0;
+  let historyReturns = 0;
+  let run = 0;
+  for (const seen of observed) {
+    if (!seen) { run = 0; continue; }
+    run += 1;
+    historyFrames += 1;
+    if (run > 1) historyReturns += 1;
   }
-  const hasFinitePrice = (frame, asset) => {
-    if (!frame || typeof frame !== 'object') return false;
-    const price = frame[asset];
-    return typeof price === 'number' && Number.isFinite(price);
-  };
+  return { historyFrames, historyReturns };
+}
+
+/**
+ * Count the observed frames and returns that actually carry evidence about the
+ * projected assets, and name the worst-covered one. A frame with no own finite
+ * price for an asset says nothing about that asset, so an empty or partial frame
+ * cannot pad the count — the failure mode a bare `frames.length` has, where a
+ * stalled feed emitting `{ t, prices: {} }` reads as a full window.
+ *
+ * With no assets named (omitted OR an empty array), a frame counts when it
+ * carries at least one own finite price, and no per-asset worst constituent can
+ * be named. The bare-count overload trusts a caller that already counted its own
+ * window: only a `number` is honored (never `Number('8')`), its coercion is
+ * guarded (`Number.isFinite` + `Math.trunc`, never `| 0`, which is ToInt32 and
+ * wraps a large count around 2^31), and it too names no worst asset.
+ *
+ * The worst constituent is the fewest observed returns, tie-broken on frames and
+ * then LEXICOGRAPHICALLY — never on the caller's key order, which would make the
+ * descriptor (and the artifact hashing it) depend on how `targetWeights` was
+ * built.
+ *
+ * @param {Array<Record<string, unknown>>|number} frames
+ * @param {string[]|undefined} assets
+ * @returns {{ historyFrames: number, historyReturns: number, worstAsset: string|null }}
+ */
+function countHistoryFrames(frames, assets) {
+  if (!Array.isArray(frames)) {
+    const count = typeof frames === 'number' && Number.isFinite(frames)
+      ? Math.max(0, Math.trunc(frames)) : 0;
+    return { historyFrames: count, historyReturns: Math.max(0, count - 1), worstAsset: null };
+  }
   const named = (Array.isArray(assets) ? assets : []).filter((a) => typeof a === 'string');
   if (named.length === 0) {
-    let count = 0;
-    for (const frame of frames) {
-      if (frame && typeof frame === 'object'
-          && Object.keys(frame).some((asset) => hasFinitePrice(frame, asset))) count += 1;
-    }
-    return { historyFrames: count, worstAsset: null };
+    const observed = frames.map((frame) => frame != null && typeof frame === 'object'
+      && Object.keys(frame).some((asset) => hasOwnFinitePrice(frame, asset)));
+    return { ...contiguousCounts(observed), worstAsset: null };
   }
-  let worstAsset = null;
-  let worstCount = Infinity;
+  let worst = null;
   for (const asset of named) {
-    let count = 0;
-    for (const frame of frames) if (hasFinitePrice(frame, asset)) count += 1;
-    if (count < worstCount) { worstCount = count; worstAsset = asset; }
+    const counts = contiguousCounts(frames.map((frame) => hasOwnFinitePrice(frame, asset)));
+    if (worst == null
+        || counts.historyReturns < worst.historyReturns
+        || (counts.historyReturns === worst.historyReturns
+            && (counts.historyFrames < worst.historyFrames
+                || (counts.historyFrames === worst.historyFrames && asset < worst.worstAsset)))) {
+      worst = { ...counts, worstAsset: asset };
+    }
   }
-  return { historyFrames: Number.isFinite(worstCount) ? worstCount : 0, worstAsset };
+  return worst;
 }
 
 /**
  * @typedef {object} DataSufficiency
- * @property {number} historyFrames    observed frames carrying a finite price for the worst-covered asset
- * @property {number} historyReturns   the returns those frames yield (`historyFrames - 1`, floored at 0)
- * @property {string|null} worstAsset  the asset the coverage was measured on (null when none were named)
+ * @property {number} historyFrames    observed frames carrying an own finite price for the worst-covered
+ *   asset (with no assets named: frames carrying at least one own finite price; on the bare-count
+ *   overload: the count the caller supplied)
+ * @property {number} historyReturns   the returns those frames yield — only ADJACENT observed frames
+ *   yield a return, so a gappy window carries fewer returns than `historyFrames - 1`
+ * @property {string|null} worstAsset  the asset the coverage was measured on (null when none were
+ *   named, and on the bare-count overload, which has no frames to measure per asset)
  * @property {number} horizon          ticks projected forward
  * @property {number} coverageRatio    observed returns per projected tick (0 when the horizon is 0)
  */
@@ -275,15 +322,16 @@ function countObservedFrames(frames, assets) {
  * carries the descriptor still hashes stably.
  *
  * @param {object} args
- * @param {Array<Record<string, number>>|number} args.frames   the observed price frames used (or their count)
+ * @param {Array<Record<string, unknown>>|number} args.frames   the observed price frames used (or their
+ *   count; the frames are untrusted shapes, so each price is type-checked rather than assumed)
  * @param {number} args.horizon                                ticks projected forward
- * @param {string[]} [args.assets]   the assets projected; coverage is the worst of these (default: a frame
- *   counts when it carries at least one finite price)
+ * @param {string[]} [args.assets]   the assets projected; coverage is the worst-covered of these. Omitted
+ *   OR EMPTY (as `project()` passes when `targetWeights` is empty) falls back to portfolio-wide counting —
+ *   a frame counts when it carries at least one own finite price — and reports `worstAsset: null`
  * @returns {DataSufficiency}
  */
 export function computeDataSufficiency({ frames, horizon, assets }) {
-  const { historyFrames, worstAsset } = countObservedFrames(frames, assets);
-  const historyReturns = Math.max(0, historyFrames - 1);
+  const { historyFrames, historyReturns, worstAsset } = countHistoryFrames(frames, assets);
   // Normalize the horizon before it lands in a hashed artifact: a non-finite
   // horizon would serialize to null and desync the content hash from the value.
   const projectedTicks = Number.isFinite(horizon) ? Math.max(0, horizon) : 0;

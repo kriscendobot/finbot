@@ -168,9 +168,13 @@ export async function runOodaCycle(input) {
   // can no longer disarm the gate: an explicit `false` under an armed threshold
   // leaves the auditor with no evidence, which now FAILS the invariant closed
   // rather than passing it vacuously. Both off -> unchanged.
+  // The predicate MIRRORS the auditor's arming test exactly — supplied, and not
+  // the number 0 — read strictly rather than through `Number()`, so a malformed
+  // threshold (which arms the gate there) also enables the evidence here instead
+  // of coercing onto the OFF value.
   const gateMinCoverage = auditorConfig.dataSufficiencyMinCoverage;
   if (forecasterConfig.reportDataSufficiency === undefined
-      && gateMinCoverage != null && Number(gateMinCoverage) !== 0) {
+      && gateMinCoverage != null && gateMinCoverage !== 0) {
     forecasterConfig.reportDataSufficiency = true;
   }
   const forecast = project(

@@ -45,7 +45,7 @@ function forecastWith(window, config) {
 const PROPOSAL = {
   steps: [], proposal_hash: hashProposal([]), cited_forecasts: ['f'], cited_analyses: ['a'],
 };
-const AUDIT_INPUT = (forecast) => ({
+const auditInputFor = (forecast) => ({
   proposal: PROPOSAL, forecast,
   portfolio: { cash: 1000, balances: { ATOM: 0 } }, prices: { ATOM: 10 }, currentTick: 0,
 });
@@ -54,8 +54,8 @@ const sufficiencyOf = (verdict) =>
 
 test('audit: default (min 0) does not emit the invariant — verdict byte-identical', () => {
   const forecast = forecastWith(readingsOf(DIP), { horizon: 5 });
-  const off = audit(AUDIT_INPUT(forecast), { tailFloorPct: 0.5 });
-  const explicitZero = audit(AUDIT_INPUT(forecast), { tailFloorPct: 0.5, dataSufficiencyMinCoverage: 0 });
+  const off = audit(auditInputFor(forecast), { tailFloorPct: 0.5 });
+  const explicitZero = audit(auditInputFor(forecast), { tailFloorPct: 0.5, dataSufficiencyMinCoverage: 0 });
   assert.deepEqual(off, explicitZero);
   assert.equal(sufficiencyOf(off), undefined);
 });
@@ -63,7 +63,7 @@ test('audit: default (min 0) does not emit the invariant — verdict byte-identi
 test('audit: gate on, forecast clears coverage -> passes', () => {
   // 16-frame window (15 returns) / 5-tick horizon -> coverage 3.0, well above 1.0.
   const forecast = forecastWith(readingsOf(DIP), { horizon: 5 });
-  const verdict = audit(AUDIT_INPUT(forecast), { tailFloorPct: 0.5, dataSufficiencyMinCoverage: 1 });
+  const verdict = audit(auditInputFor(forecast), { tailFloorPct: 0.5, dataSufficiencyMinCoverage: 1 });
   const invariant = sufficiencyOf(verdict);
   assert.ok(invariant);
   assert.equal(invariant.pass, true);
@@ -76,7 +76,7 @@ test('audit: gate on, forecast clears coverage -> passes', () => {
 test('audit: gate on, forecast below coverage -> rejected', () => {
   // 4-frame window (3 returns) / 20-tick horizon -> coverage 0.15, below 1.0.
   const forecast = forecastWith(readingsOf(DIP.slice(0, 4)), { horizon: 20 });
-  const verdict = audit(AUDIT_INPUT(forecast), { tailFloorPct: 0.5, dataSufficiencyMinCoverage: 1 });
+  const verdict = audit(auditInputFor(forecast), { tailFloorPct: 0.5, dataSufficiencyMinCoverage: 1 });
   const invariant = sufficiencyOf(verdict);
   assert.equal(invariant.pass, false);
   assert.equal(verdict.verdict, 'rejected');
@@ -87,16 +87,16 @@ test('audit: gate on, forecast below coverage -> rejected', () => {
 test('audit: coverage that exactly meets the requirement passes', () => {
   // 4-frame window (3 returns) / 9-tick horizon -> the descriptor reports
   // round12(1/3) = 0.333333333333, which is STRICTLY below the exact 1/3 the
-  // operator asked for. The comparison's 1e-12 slack exists precisely to absorb
-  // that quantization; without it the gate would reject a forecast that meets
-  // its requirement exactly.
+  // operator asked for. Both sides are quantized to the descriptor's own 12
+  // decimals precisely to absorb that; without it the gate would reject a
+  // forecast that meets its requirement exactly.
   const forecast = forecastWith(readingsOf(DIP.slice(0, 4)), { horizon: 9 });
   assert.equal(forecast.dataSufficiency.coverageRatio, 0.333333333333);
   assert.ok(forecast.dataSufficiency.coverageRatio < 1 / 3);
-  const met = audit(AUDIT_INPUT(forecast), { tailFloorPct: 0.5, dataSufficiencyMinCoverage: 1 / 3 });
+  const met = audit(auditInputFor(forecast), { tailFloorPct: 0.5, dataSufficiencyMinCoverage: 1 / 3 });
   assert.equal(sufficiencyOf(met).pass, true);
   // A genuinely higher requirement still bites.
-  const missed = audit(AUDIT_INPUT(forecast), { tailFloorPct: 0.5, dataSufficiencyMinCoverage: 0.34 });
+  const missed = audit(auditInputFor(forecast), { tailFloorPct: 0.5, dataSufficiencyMinCoverage: 0.34 });
   assert.equal(sufficiencyOf(missed).pass, false);
 });
 
@@ -106,7 +106,7 @@ test('audit: gate on but the forecast carries no descriptor -> fails CLOSED', ()
   // evidence of sufficiency.
   const forecast = forecastWith(readingsOf(DIP), { horizon: 5, reportDataSufficiency: false });
   assert.equal(forecast.dataSufficiency, null);
-  const verdict = audit(AUDIT_INPUT(forecast), { tailFloorPct: 0.5, dataSufficiencyMinCoverage: 1 });
+  const verdict = audit(auditInputFor(forecast), { tailFloorPct: 0.5, dataSufficiencyMinCoverage: 1 });
   const invariant = sufficiencyOf(verdict);
   assert.equal(invariant.pass, false);
   assert.equal(verdict.verdict, 'rejected');
@@ -114,7 +114,7 @@ test('audit: gate on but the forecast carries no descriptor -> fails CLOSED', ()
   assert.match(invariant.detail, /fails closed/);
   // Same for a forecast the caller omitted entirely.
   assert.equal(
-    sufficiencyOf(audit(AUDIT_INPUT(null), { tailFloorPct: 0.5, dataSufficiencyMinCoverage: 1 })).pass,
+    sufficiencyOf(audit(auditInputFor(null), { tailFloorPct: 0.5, dataSufficiencyMinCoverage: 1 })).pass,
     false,
   );
 });
@@ -126,25 +126,124 @@ test('audit: a malformed descriptor fails the gate instead of throwing', () => {
   const forecast = forecastWith(readingsOf(DIP), { horizon: 5 });
   for (const malformed of [{}, true, { coverageRatio: 'lots' }, { coverageRatio: NaN }]) {
     const verdict = audit(
-      AUDIT_INPUT({ ...forecast, dataSufficiency: malformed }),
+      auditInputFor({ ...forecast, dataSufficiency: malformed }),
       { tailFloorPct: 0.5, dataSufficiencyMinCoverage: 1 },
     );
     assert.equal(sufficiencyOf(verdict).pass, false, `descriptor ${JSON.stringify(malformed)}`);
   }
   // An Infinity coverage is not finite evidence either.
   const wild = audit(
-    AUDIT_INPUT({ ...forecast, dataSufficiency: { coverageRatio: Infinity, historyReturns: 0, horizon: 20 } }),
+    auditInputFor({ ...forecast, dataSufficiency: { coverageRatio: Infinity, historyReturns: 0, horizon: 20 } }),
     { tailFloorPct: 0.5, dataSufficiencyMinCoverage: 1 },
   );
   assert.equal(sufficiencyOf(wild).pass, false);
 });
 
+test('audit: a coercible non-number is not coverage evidence', () => {
+  // `Number('3')`, `Number([3])`, `Number(true)`, and a `valueOf` hook all yield
+  // a number that would clear the requirement, so a coercing read lets a foreign
+  // producer forge coverage out of a value that is not a measurement at all. The
+  // descriptor is untrusted input; the gate type-checks it, exactly as the
+  // forecaster's own price reads do.
+  const forecast = forecastWith(readingsOf(DIP), { horizon: 5 });
+  for (const ratio of ['3', [3], true, { valueOf: () => 3 }, 3n]) {
+    const verdict = audit(
+      auditInputFor({ ...forecast, dataSufficiency: { ...forecast.dataSufficiency, coverageRatio: ratio } }),
+      { tailFloorPct: 0.5, dataSufficiencyMinCoverage: 1 },
+    );
+    assert.equal(sufficiencyOf(verdict).pass, false, `coverageRatio ${String(ratio)}`);
+    assert.match(sufficiencyOf(verdict).detail, /fails closed/);
+  }
+});
+
+test('audit: a descriptor that contradicts its own evidence fails CLOSED', () => {
+  // The gate decides on coverage it RECOMPUTES from the descriptor's primitive
+  // counts, so a producer cannot approve itself by reporting a ratio its own
+  // evidence refutes — the sibling discipline invariant 4 applies to the
+  // proposal hash. A record that prints its own refutation must never approve.
+  const forecast = forecastWith(readingsOf(DIP), { horizon: 5 }); // 15 returns / 5 ticks
+  const forged = audit(
+    auditInputFor({
+      ...forecast,
+      dataSufficiency: { ...forecast.dataSufficiency, coverageRatio: 99, historyReturns: 0 },
+    }),
+    { tailFloorPct: 0.5, dataSufficiencyMinCoverage: 1 },
+  );
+  assert.equal(sufficiencyOf(forged).pass, false);
+  assert.equal(forged.verdict, 'rejected');
+  assert.match(sufficiencyOf(forged).detail, /recompute to 0\.000/);
+  assert.match(sufficiencyOf(forged).detail, /fails closed/);
+
+  // Internally consistent counts that describe a DIFFERENT projection than the
+  // forecast carrying them (a stale pre-stretch descriptor riding a longer
+  // horizon) are refuted by the forecast's own horizon — a non-adversarial
+  // variant of the same hole: 15/5 would clear a 2.0 gate that the real 15/60
+  // fails.
+  const stale = audit(
+    auditInputFor({ ...forecast, horizon: 60 }),
+    { tailFloorPct: 0.5, dataSufficiencyMinCoverage: 2 },
+  );
+  assert.equal(sufficiencyOf(stale).pass, false);
+  assert.match(sufficiencyOf(stale).detail, /contradicts the forecast's own 60-tick horizon/);
+});
+
+test('audit: a hostile descriptor owes a verdict, never a throw', () => {
+  const forecast = forecastWith(readingsOf(DIP), { horizon: 5 });
+  const armed = { tailFloorPct: 0.5, dataSufficiencyMinCoverage: 1 };
+
+  // A getter that throws is still untrusted input; `audit()` returns a rejecting
+  // verdict rather than aborting the executor's fire-time drift guard by
+  // exception (`runAudit` is called unwrapped there).
+  const throwing = audit(
+    auditInputFor({ ...forecast, dataSufficiency: { get coverageRatio() { throw new Error('boom'); } } }),
+    armed,
+  );
+  assert.equal(sufficiencyOf(throwing).pass, false);
+  assert.match(sufficiencyOf(throwing).detail, /fails closed/);
+
+  // A Symbol threshold would throw inside `Number()`; it is simply unusable.
+  const symbolThreshold = audit(
+    auditInputFor(forecast),
+    { tailFloorPct: 0.5, dataSufficiencyMinCoverage: Symbol('nope') },
+  );
+  assert.equal(sufficiencyOf(symbolThreshold).pass, false);
+
+  // Each field is read ONCE: a getter that answers differently on a second read
+  // cannot make the detail line cite evidence the gate never saw.
+  let reads = 0;
+  const flapping = {
+    coverageRatio: 3, horizon: 5, worstAsset: 'ATOM',
+    get historyReturns() { reads += 1; return reads === 1 ? 15 : 999999; },
+  };
+  const cited = audit(auditInputFor({ ...forecast, dataSufficiency: flapping }), armed);
+  assert.equal(sufficiencyOf(cited).pass, true);
+  assert.match(sufficiencyOf(cited).detail, /\(15 observed return\(s\) \/ 5-tick horizon\)/);
+});
+
+test('audit: a zero-tick projection cannot outrun its window', () => {
+  // Nothing measured is not the same as measured-and-insufficient: coverage 0 on
+  // a 0-tick horizon is the descriptor saying "no projection", and the gate must
+  // not read it as scarcity the way it reads 0 coverage on a 20-tick horizon.
+  const forecast = {
+    horizon: 0, p05Equity: 1000,
+    dataSufficiency: { coverageRatio: 0, historyReturns: 0, horizon: 0, worstAsset: 'ATOM' },
+  };
+  const verdict = audit(auditInputFor(forecast), { tailFloorPct: 0.5, dataSufficiencyMinCoverage: 1 });
+  assert.equal(sufficiencyOf(verdict).pass, true);
+  assert.match(sufficiencyOf(verdict).detail, /projects 0 ticks on ATOM/);
+});
+
 test('audit: an unusable threshold arms the gate and fails it closed', () => {
-  // A non-finite or negative requirement must not degrade to "no gate at all";
-  // an operator who asked for a gate never silently gets none.
+  // A requirement that is non-finite, negative, or not a number at all must not
+  // degrade to "no gate at all"; an operator who asked for a gate never silently
+  // gets none. `''`, `'  '`, `[]`, and `false` are the dangerous class: every one
+  // of them coerces to 0, which is exactly the OFF value, so a coercing read
+  // would leave the operator believing in a gate that was never emitted. A
+  // positive threshold below the descriptor's own 1e-12 resolution is unusable
+  // for the mirror-image reason: no coverage could ever fail it.
   const forecast = forecastWith(readingsOf(DIP), { horizon: 5 }); // coverage 3.0
-  for (const bad of [NaN, 'abc', -1, Infinity]) {
-    const verdict = audit(AUDIT_INPUT(forecast), { tailFloorPct: 0.5, dataSufficiencyMinCoverage: bad });
+  for (const bad of [NaN, 'abc', -1, Infinity, '', '   ', [], false, '1', 1e-13]) {
+    const verdict = audit(auditInputFor(forecast), { tailFloorPct: 0.5, dataSufficiencyMinCoverage: bad });
     const invariant = sufficiencyOf(verdict);
     assert.ok(invariant, `threshold ${String(bad)} still emits the invariant`);
     assert.equal(invariant.pass, false, `threshold ${String(bad)} fails closed`);

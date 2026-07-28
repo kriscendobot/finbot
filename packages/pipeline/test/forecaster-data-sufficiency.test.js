@@ -99,12 +99,63 @@ test('computeDataSufficiency: coverage is the WORST-covered projected asset', ()
   assert.equal(computeDataSufficiency({ frames, horizon: 20, assets: ['ATOM'] }).coverageRatio, 0.75);
 });
 
+test('computeDataSufficiency: only an OWN, positive price is evidence', () => {
+  // An INHERITED price is not an observation this feed made. A prototype-chain
+  // read would let frames with zero own properties report full coverage — the
+  // same padding `{ prices: {} }` attempts, one lookup deeper.
+  const inherited = Array.from({ length: 6 }, () => Object.create({ ATOM: 100 }));
+  assert.equal(computeDataSufficiency({ frames: inherited, horizon: 5, assets: ['ATOM'] }).historyFrames, 0);
+  assert.equal(computeDataSufficiency({ frames: inherited, horizon: 5 }).historyFrames, 0);
+
+  // A zero (or negative) price is a stalled-feed sentinel, not an observation:
+  // no return can be computed across it.
+  const stalled = Array.from({ length: 21 }, () => ({ ATOM: 0 }));
+  assert.equal(computeDataSufficiency({ frames: stalled, horizon: 20, assets: ['ATOM'] }).coverageRatio, 0);
+  assert.equal(computeDataSufficiency({ frames: [{ ATOM: -1 }, { ATOM: 10 }], horizon: 1 }).historyFrames, 1);
+});
+
+test('computeDataSufficiency: a return needs two ADJACENT observations', () => {
+  // A feed that alternates between assets carries many frames and no returns;
+  // counting `historyFrames - 1` would credit it with returns it never observed
+  // — the padding defense at one remove, since the frames themselves are real.
+  const flapping = Array.from({ length: 42 }, (_, i) => (i % 2 ? { OTHER: 1 } : { ATOM: 1 }));
+  const alternating = computeDataSufficiency({ frames: flapping, horizon: 20, assets: ['ATOM'] });
+  assert.equal(alternating.historyFrames, 21);
+  assert.equal(alternating.historyReturns, 0);
+  assert.equal(alternating.coverageRatio, 0);
+
+  // A gap splits the window into runs; only within-run pairs are returns.
+  const gappy = computeDataSufficiency({
+    frames: [{ ATOM: 10 }, {}, {}, { ATOM: 11 }, { ATOM: 12 }, { ATOM: 13 }], horizon: 4, assets: ['ATOM'],
+  });
+  assert.equal(gappy.historyFrames, 4);
+  assert.equal(gappy.historyReturns, 2); // the 3-frame run, not 4 - 1
+  assert.equal(gappy.coverageRatio, 0.5);
+});
+
+test('computeDataSufficiency: the worst asset does not depend on the caller key order', () => {
+  // `worstAsset` rides into the hashed artifact, so an insertion-order tie-break
+  // would make `projectionId` depend on how `targetWeights` happened to be
+  // built. Ties break lexicographically instead.
+  const frames = [{ A: 1, B: 1 }, { A: 1, B: 1 }];
+  assert.equal(computeDataSufficiency({ frames, horizon: 4, assets: ['A', 'B'] }).worstAsset, 'A');
+  assert.equal(computeDataSufficiency({ frames, horizon: 4, assets: ['B', 'A'] }).worstAsset, 'A');
+  // A genuine difference still wins over the tie-break.
+  const thin = [{ A: 1, B: 1 }, { A: 1 }];
+  assert.equal(computeDataSufficiency({ frames: thin, horizon: 4, assets: ['A', 'B'] }).worstAsset, 'B');
+});
+
 test('computeDataSufficiency: a bare count is guarded, never ToInt32-wrapped', () => {
   // `frames | 0` wraps mod 2^32, so a huge count would read as maximal scarcity.
   assert.equal(computeDataSufficiency({ frames: 2 ** 31, horizon: 10 }).historyFrames, 2 ** 31);
   assert.equal(computeDataSufficiency({ frames: 8.9, horizon: 10 }).historyFrames, 8);
   assert.equal(computeDataSufficiency({ frames: NaN, horizon: 10 }).historyFrames, 0);
   assert.equal(computeDataSufficiency({ frames: -5, horizon: 10 }).historyFrames, 0);
+  // Only a number counts as a count; `'8'` is a foreign producer, not a window.
+  assert.equal(computeDataSufficiency({ frames: '8', horizon: 10 }).historyFrames, 0);
+  // The overload has no frames to measure per asset, so it names none — even
+  // when the caller passed assets it cannot honor.
+  assert.equal(computeDataSufficiency({ frames: 8, horizon: 10, assets: ['ATOM'] }).worstAsset, null);
   // A non-finite horizon is normalized rather than hashed as a JSON null.
   const wild = computeDataSufficiency({ frames: 8, horizon: NaN });
   assert.equal(wild.horizon, 0);

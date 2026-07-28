@@ -869,11 +869,9 @@ paper-wallet/test-net authorization and a selected CapTP transport.
 
 ## Notes from the field (2026-07-28 — forecast data-sufficiency)
 
-The open question "how does the forecaster handle programs whose horizon exceeds
-the historical window?" asked for two things: *name* the data scarcity, and let
-the planner *downweight* it. This cut delivers the naming and substitutes a
-binary pre-execution gate for the graded downweight; `planner.js` is untouched,
-and graded downweighting stays live residue in Open questions.
+This cut names the data scarcity the open question asked about and substitutes a
+binary pre-execution gate for the graded planner downweight it also asked for;
+`planner.js` is untouched.
 
 - **The measurement.** `computeDataSufficiency({ frames, horizon, assets })` is a
   new export of `packages/pipeline/forecaster.js`. It returns
@@ -886,9 +884,15 @@ and graded downweighting stays live residue in Open questions.
   worst-asset convention `worstAssetPersistence` uses for the regime read. This
   is what makes the descriptor answer the question that motivated it: a
   freshly-listed instrument inside a long window reads as thin instead of hiding
-  behind its better-observed neighbours. A frame carrying no finite price for an
-  asset is no evidence about it, so a stalled feed emitting `{ t, prices: {} }`
-  cannot pad the ratio.
+  behind its better-observed neighbours. Ties break lexicographically, never on
+  the caller's key order, since `worstAsset` rides into the hashed artifact.
+- **What counts as evidence.** A frame carrying no *own*, finite, positive price
+  for an asset says nothing about it, so a stalled feed emitting
+  `{ t, prices: {} }`, one emitting a `0` sentinel, and one whose frames inherit
+  their prices from a prototype all read as no evidence rather than padding the
+  ratio. Returns need two *adjacent* observations, so a gappy or alternating feed
+  carries fewer returns than `historyFrames - 1` — a real frame is not a real
+  return.
 - **Measurement, not policy.** The descriptor carries no threshold and no
   verdict. That is deliberate: a threshold in the descriptor would ride into
   `projectionArtifact` and give two byte-identical ensembles two different
@@ -911,33 +915,54 @@ and graded downweighting stays live residue in Open questions.
   (`audit_proposal`, the executor's fire-time re-audit) — *fails* rather than
   passing vacuously. Absence of evidence is not evidence of sufficiency, and this
   verdict is a precondition for irreversible action; the sibling tail-risk floor
-  already fails closed on a missing forecast. An unusable threshold (non-finite
-  or negative) fails closed on the same reasoning, so a malformed knob can never
-  degrade to no gate at all. The comparison reads the descriptor's own
-  `coverageRatio` against the *auditor's* threshold, never a producer-chosen
-  verdict — the gate must not trust a judgement made by the thing it gates.
+  already fails closed on a missing forecast. An unusable threshold fails closed
+  on the same reasoning, so a malformed knob can never degrade to no gate at all
+  — and "unusable" is read *strictly*: only a `number` arms the gate, because
+  `Number('')`, `Number(false)`, and `Number([])` are all `0`, which is exactly
+  the OFF value, so a coercing read would hand an operator who asked for a gate
+  no gate at all. So is a positive threshold below the descriptor's own 1e-12
+  resolution, which no coverage could fail.
+- **The gate recomputes; it does not read a verdict.** Coverage is recomputed
+  from the descriptor's primitive counts (`historyReturns / horizon`), and a
+  descriptor whose reported `coverageRatio` disagrees with its own counts — or
+  whose `horizon` disagrees with the forecast carrying it — fails closed rather
+  than approving. A ratio is a judgement made by the thing being gated; the
+  counts are the evidence, and invariant 4 already sets the precedent by
+  recomputing `proposal_hash` instead of reading it. Every field is read once,
+  type-checked rather than coerced, and guarded against a getter that throws, so
+  a hostile descriptor yields a *verdict* and never an exception out of `audit()`
+  (the executor's fire-time re-audit calls it unwrapped). A zero-tick horizon is
+  the one place the gate passes on no evidence: nothing measured is not the same
+  as measured-and-insufficient.
 - **Wiring.** `runOodaCycle` auto-enables the forecaster report when only the
   auditor knob is set, so a lone gate knob yields a live gate. An explicit
   `forecaster.reportDataSufficiency: false` still wins, but no longer disarms the
   gate: it now leaves the armed invariant failing closed.
 - **The CLI.** `finbot-ooda --data-sufficiency-min=F` demonstrates it end to end.
-  `F=0` (or omitted) is off on both halves. A non-finite or negative `F` exits 2
-  rather than silently disarming the gate — `Number('abc')` is `NaN` and
-  `NaN > 0` is false, so an unvalidated value would print a coverage line while
-  emitting no invariant, the worst false-assurance shape for a safety knob. The
-  report's `SCARCE` label is computed against the same threshold the auditor
-  gates on, so it can never appear beside an approving gate.
-- **Tests.** 18 across `packages/pipeline/test/forecaster-data-sufficiency.test.js`
-  and `.../auditor-data-sufficiency.test.js`, pinning: the off-path artifact
-  byte-identity, the fit-window (not the shorter cited window) as the measured
-  window, per-asset worst-constituent coverage, the padding attack, the guarded
-  bare-count coercion, both fail-closed paths, malformed descriptors, and the
-  exact-threshold boundary the comparison's 1e-12 slack exists for. `npm test`
-  green; `finbot-ooda --seed=7` unchanged on the default path.
+  `F=0` (or omitted) is off on both halves. An `F` the gate could not evaluate —
+  non-finite, negative, empty/whitespace, or positive-but-sub-resolution — exits
+  2 rather than silently disarming the gate, applying the auditor's own usability
+  test so a value the CLI accepts is a value the gate can evaluate. (`Number('abc')`
+  is `NaN` and `Number('')` is `0`; an unvalidated value would print a coverage
+  line while emitting no invariant, the worst false-assurance shape for a safety
+  knob.) The report's `SCARCE` label is the *auditor's own verdict* on that
+  forecast rather than a second comparison that could drift from it, so it can
+  never appear beside an approving gate nor stay silent beside a rejecting one.
+- **Tests.** `packages/pipeline/test/forecaster-data-sufficiency.test.js` and
+  `.../auditor-data-sufficiency.test.js` pin the off-path artifact byte-identity,
+  the fit-window (not the shorter cited window) as the measured window, per-asset
+  worst-constituent coverage, the padding attacks (empty, foreign-asset,
+  inherited, zero-price, non-adjacent), the guarded bare-count coercion, every
+  fail-closed path (absent, malformed, coercible, self-contradictory, hostile
+  descriptors; unusable thresholds including the coerce-to-zero class), and the
+  exact-threshold boundary the shared quantization exists for.
 
-Still outstanding: the invariant is not yet reflected in
-`skills/pre-execution-audit/SKILL.md`, `roles/auditor/AGENT.md`, or
-`packages/pipeline/README.md`, all of which enumerate the invariant set (and had
-already drifted before this cut — their #6 reads "on-chain verifiability" where
-the code's is `place-route-reachability`). Reconciling that enumeration is its
-own change.
+Still outstanding: the invariant is not yet reflected in the three surfaces that
+enumerate the invariant set — `skills/pre-execution-audit/SKILL.md` (§§ 1-6,
+whose #6 "On-chain verifiability" had already drifted from the code's
+`place-route-reachability`), `roles/auditor/AGENT.md` (six, its #6 phrased "No
+off-chain dependencies in the on-chain steps"), and `packages/pipeline/README.md`
+(five; it has no sixth entry at all). The skill is the canonical home, so
+reconciling that enumeration — and the `agent-tools.js` tool schemas, which
+enumerate both the returned invariant set and the auditor's config knobs for the
+LLM-facing `audit_proposal` and `simulate_execution` paths — is its own change.
