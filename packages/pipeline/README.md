@@ -26,7 +26,7 @@ in-process for a dry-run cycle with **no LLM required**.
 | `analyzer.js`        | risk-adjusted scoring (price edge + APR carry, less a correlated-cluster penalty); single- or multi-leg target allocation; no-action is valid |
 | `forecaster.js`      | Monte Carlo via the simulator's nested-fork `forecast()`; deterministic    |
 | `planner.js`         | ymax-shaped proposal: hashed steps + forecast/analysis citations           |
-| `auditor.js`         | the invariant set (citation, risk-bound, tail-risk, reproducibility, freshness) |
+| `auditor.js`         | the invariant set: citation-completeness, risk-bound-compliance, tail-risk-floor, reproducibility, pricing-freshness, place-route-reachability, and the opt-in forecast-data-sufficiency gate (emitted only when `dataSufficiencyMinCoverage` is set) |
 | `executor.js`        | dry-run simulation on a clone; refuses live without authorization          |
 | `rebalance.js`       | ymax-shaped `computeTargetBalances` + `deriveSteps` solver                  |
 | `cap-attenuation.js` | the wallet boundary: capability map, interface-guarded revocable wallet     |

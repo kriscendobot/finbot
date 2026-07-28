@@ -86,6 +86,51 @@ for step in proposal.steps:
     assert precondition.kind in { 'chain_balance', 'chain_state', 'oracle_reading' }
 ```
 
+The deterministic implementation names this invariant `place-route-reachability`
+and verifies the same property from the step's resolved place/route: a step whose
+venue mapping is unresolved (or names an unknown place) is not reachable from
+chain state alone.
+
+### 7. Forecast data-sufficiency (opt-in)
+
+A projection whose horizon outruns its observed window is extrapolating past its
+evidence. The pre-execution sibling of pricing freshness: a forecast can be
+perfectly fresh and still be thin. The forecast carries a measured descriptor
+(`{ historyFrames, historyReturns, worstAsset, horizon, coverageRatio }`);
+coverage is observed returns per projected tick, measured PER ASSET and reported
+for the WORST-covered one, so a freshly-listed instrument cannot hide behind its
+better-observed neighbours.
+
+```pseudo
+if data_sufficiency_min_coverage is a number > 0:      # absent / null / 0 is OFF
+  descriptor = forecast.dataSufficiency               # own data properties only
+  assert descriptor is readable and its counts are whole and non-negative
+  assert descriptor.horizon == forecast.horizon        # and the forecast's own horizon is readable
+  assert descriptor.historyReturns <= max(0, descriptor.historyFrames - 1)
+  recomputed = descriptor.historyReturns / descriptor.horizon
+  assert recomputed == descriptor.coverageRatio        # never read the reported ratio
+  assert recomputed >= data_sufficiency_min_coverage
+```
+
+Two properties are load-bearing:
+
+- **Off by default.** Absent, `null`, or the number `0` is OFF, and the invariant
+  is not emitted at all, so every verdict predating the knob is unchanged.
+- **Armed, it fails CLOSED.** An unusable threshold, an unreadable descriptor, an
+  unreadable forecast horizon, counts that refute each other, or a reported ratio
+  its own counts refute all REJECT. Absence of evidence is not evidence of
+  sufficiency, and a gate that rejects absent evidence must reject contradictory
+  evidence at least as firmly — only one of the two looks like a measurement.
+
+The gate recomputes coverage from the descriptor's primitive counts rather than
+reading its reported ratio, the same discipline invariant 4 applies to the
+proposal hash. It is a weaker guarantee than invariant 4's, and knowing why
+matters: invariant 4 recomputes from evidence the auditor independently holds,
+while these counts remain self-reported by the artifact being gated. The gate
+therefore bounds forgery (an inconsistent descriptor cannot approve itself), not
+provenance (an internally consistent fabrication still clears it). Binding the
+descriptor to an attested `projectionId` is how that gap closes.
+
 ## Procedure
 
 ```pseudo
@@ -116,6 +161,11 @@ The configured floors and windows live in the project README (canonical), with o
 - `per_step_max_pct_nav`: default 5.
 - `per_day_max_pct_nav`: default 20.
 - `per_instrument_concentration_cap_pct`: default 40.
+- `data_sufficiency_min_coverage`: default 0 (OFF; invariant 7 is not emitted).
+  When set to a positive number, the forecast's recomputed coverage ratio must
+  clear it. A value the gate cannot evaluate (any non-number, a non-finite or
+  negative number, or a positive one below the descriptor's 1e-12 resolution)
+  ARMS the gate and fails it closed rather than degrading to no gate at all.
 
 The maintainer adjusts these via a journal `message: liaison → *` entry; the auditor reads the most recent setting from the journal.
 

@@ -99,8 +99,21 @@ export function fitForecastWorld(world, readings, adaptiveVol) {
   return { world: fitWorld, fit };
 }
 
-/** Round to 12 significant decimals so the fit summary hashes stably. */
-function round12(x) {
+/**
+ * Round to 12 significant decimals so the fit summary hashes stably.
+ *
+ * Exported because it is a CROSS-MODULE contract, not a local convenience: the
+ * auditor's data-sufficiency gate recomputes a coverage ratio this module
+ * quantized and compares the two for equality, and the CLI report labels
+ * scarcity off the same comparison. A second copy anywhere would let the two
+ * sides drift silently — the gate would then reject every honest forecast — so
+ * there is exactly one quantizer and both consumers import it.
+ *
+ * @param {unknown} x
+ * @returns {unknown}  the quantized number, or `x` unchanged when it is not a
+ *   finite number (the callers that need a number check first)
+ */
+export function round12(x) {
   return typeof x === 'number' && Number.isFinite(x) ? Number(x.toFixed(12)) : x;
 }
 
@@ -195,40 +208,80 @@ export function regimeHorizon({ baseHorizon, volFit, stretch, lo, hi, cap }) {
 }
 
 /**
- * Does this frame carry an OWN observation of `asset`?
+ * Does this frame carry an OWN, POSITIVE observation of `asset`?
  *
  * Own-property only: an inherited price is not an observation the feed made, and
  * a prototype-chain read would let frames with no own properties at all pad the
  * count — the very padding this helper exists to reject. A non-positive or
  * non-finite price is a stalled/absent sentinel rather than an observation (no
- * return can be computed across a zero), so it is not evidence either.
+ * return can be computed across a zero), so it is not evidence either — hence
+ * POSITIVE in the name: a finite `0` or `-1` is not an observation here.
+ *
+ * The property is read through its own DESCRIPTOR rather than by `frame[asset]`:
+ * `Object.hasOwn` proves the property exists, not that it is a data property, so
+ * a plain read would invoke an own accessor — and a frame is untrusted input, so
+ * a hostile getter would throw out of `project()` instead of counting as no
+ * evidence. An accessor carries no `value`, so it reads as absent, which is the
+ * fail-closed answer on the producing side too.
  *
  * @param {unknown} frame
  * @param {string} asset
  * @returns {boolean}
  */
-function hasOwnFinitePrice(frame, asset) {
+function hasOwnPositivePrice(frame, asset) {
   if (!frame || typeof frame !== 'object') return false;
-  if (!Object.hasOwn(frame, asset)) return false;
-  const price = frame[asset];
+  let descriptor;
+  try {
+    descriptor = Object.getOwnPropertyDescriptor(frame, asset);
+  } catch (_err) {
+    return false; // a hostile proxy trap is not evidence either
+  }
+  if (!descriptor || !('value' in descriptor)) return false;
+  const price = descriptor.value;
   return typeof price === 'number' && Number.isFinite(price) && price > 0;
 }
 
 /**
- * Frames and RETURNS from a per-frame observed/not-observed mask. A return needs
- * two ADJACENT observations, so returns accumulate only inside a maximal run:
- * a feed that alternates observed/missing carries many frames and no returns,
- * and counting `frames - 1` would credit it with returns it never observed.
+ * The own data-property names of an untrusted frame, or an empty list. Own, and
+ * NOT enumerable-only: `Object.keys` would disagree with `hasOwnPositivePrice`
+ * on a non-enumerable own price, so the same frame would count as observed when
+ * an asset is named and unobserved when it is not.
  *
- * @param {boolean[]} observed
+ * @param {unknown} frame
+ * @returns {string[]}
+ */
+function ownPropertyNames(frame) {
+  if (!frame || typeof frame !== 'object') return [];
+  try {
+    return Object.getOwnPropertyNames(frame);
+  } catch (_err) {
+    return [];
+  }
+}
+
+/**
+ * Frames and RETURNS from a per-frame observed/not-observed predicate. A return
+ * needs two ADJACENT observations, so returns accumulate only inside a maximal
+ * run: a feed that alternates observed/missing carries many frames and no
+ * returns, and counting `frames - 1` would credit it with returns it never
+ * observed. (Note that `historyFrames` is a plain total, contiguity-aware only
+ * in `historyReturns`.)
+ *
+ * The frames are walked by INDEX rather than through `frames.map`: `frames` is
+ * caller-supplied, `Array.isArray` says nothing about which `map` a [[Get]]
+ * resolves to, and an own `map` that fabricates a longer mask would forge the
+ * very coverage this measurement exists to bound.
+ *
+ * @param {ArrayLike<unknown>} frames
+ * @param {(frame: unknown) => boolean} observed
  * @returns {{ historyFrames: number, historyReturns: number }}
  */
-function contiguousCounts(observed) {
+function countContiguousObservations(frames, observed) {
   let historyFrames = 0;
   let historyReturns = 0;
   let run = 0;
-  for (const seen of observed) {
-    if (!seen) { run = 0; continue; }
+  for (let i = 0; i < frames.length; i += 1) {
+    if (!observed(frames[i])) { run = 0; continue; }
     run += 1;
     historyFrames += 1;
     if (run > 1) historyReturns += 1;
@@ -237,29 +290,32 @@ function contiguousCounts(observed) {
 }
 
 /**
- * Count the observed frames and returns that actually carry evidence about the
- * projected assets, and name the worst-covered one. A frame with no own finite
+ * Measure the observed frames and returns that actually carry evidence about the
+ * projected assets, and name the worst-covered one. A frame with no own positive
  * price for an asset says nothing about that asset, so an empty or partial frame
  * cannot pad the count — the failure mode a bare `frames.length` has, where a
- * stalled feed emitting `{ t, prices: {} }` reads as a full window.
+ * stalled feed emitting empty price maps (`{}`, once the reading's `prices` is
+ * unwrapped) reads as a full window.
  *
  * With no assets named (omitted OR an empty array), a frame counts when it
- * carries at least one own finite price, and no per-asset worst constituent can
- * be named. The bare-count overload trusts a caller that already counted its own
- * window: only a `number` is honored (never `Number('8')`), its coercion is
+ * carries at least one own positive price, and no per-asset worst constituent
+ * can be named. The bare-count overload trusts a caller that already counted its
+ * own window: only a `number` is honored (never `Number('8')`), its coercion is
  * guarded (`Number.isFinite` + `Math.trunc`, never `| 0`, which is ToInt32 and
  * wraps a large count around 2^31), and it too names no worst asset.
  *
  * The worst constituent is the fewest observed returns, tie-broken on frames and
- * then LEXICOGRAPHICALLY — never on the caller's key order, which would make the
- * descriptor (and the artifact hashing it) depend on how `targetWeights` was
- * built.
+ * then LEXICOGRAPHICALLY (UTF-16 code-unit order, which is spec-fixed and so
+ * hash-stable across engines; never `localeCompare`) — and never on the caller's
+ * key order, which would make the descriptor (and the artifact hashing it)
+ * depend on how `targetWeights` was built.
  *
- * @param {Array<Record<string, unknown>>|number} frames
- * @param {string[]|undefined} assets
+ * @param {unknown} frames   an array of untrusted per-tick price maps
+ *   (`{ ASSET: price }`, as `priceFramesFromReadings` returns), or a bare count
+ * @param {unknown} assets   the asset names to measure, when known
  * @returns {{ historyFrames: number, historyReturns: number, worstAsset: string|null }}
  */
-function countHistoryFrames(frames, assets) {
+function measureHistoryCoverage(frames, assets) {
   if (!Array.isArray(frames)) {
     const count = typeof frames === 'number' && Number.isFinite(frames)
       ? Math.max(0, Math.trunc(frames)) : 0;
@@ -267,22 +323,25 @@ function countHistoryFrames(frames, assets) {
   }
   const named = (Array.isArray(assets) ? assets : []).filter((a) => typeof a === 'string');
   if (named.length === 0) {
-    const observed = frames.map((frame) => frame != null && typeof frame === 'object'
-      && Object.keys(frame).some((asset) => hasOwnFinitePrice(frame, asset)));
-    return { ...contiguousCounts(observed), worstAsset: null };
+    const counts = countContiguousObservations(
+      frames,
+      (frame) => ownPropertyNames(frame).some((asset) => hasOwnPositivePrice(frame, asset)),
+    );
+    return { ...counts, worstAsset: null };
   }
-  let worst = null;
+  let worstCoverage = null;
   for (const asset of named) {
-    const counts = contiguousCounts(frames.map((frame) => hasOwnFinitePrice(frame, asset)));
-    if (worst == null
-        || counts.historyReturns < worst.historyReturns
-        || (counts.historyReturns === worst.historyReturns
-            && (counts.historyFrames < worst.historyFrames
-                || (counts.historyFrames === worst.historyFrames && asset < worst.worstAsset)))) {
-      worst = { ...counts, worstAsset: asset };
+    const counts = countContiguousObservations(frames, (frame) => hasOwnPositivePrice(frame, asset));
+    if (worstCoverage == null
+        || counts.historyReturns < worstCoverage.historyReturns
+        || (counts.historyReturns === worstCoverage.historyReturns
+            && (counts.historyFrames < worstCoverage.historyFrames
+                || (counts.historyFrames === worstCoverage.historyFrames
+                    && asset < worstCoverage.worstAsset)))) {
+      worstCoverage = { ...counts, worstAsset: asset };
     }
   }
-  return worst;
+  return worstCoverage;
 }
 
 /**
@@ -294,8 +353,13 @@ function countHistoryFrames(frames, assets) {
  *   yield a return, so a gappy window carries fewer returns than `historyFrames - 1`
  * @property {string|null} worstAsset  the asset the coverage was measured on (null when none were
  *   named, and on the bare-count overload, which has no frames to measure per asset)
- * @property {number} horizon          ticks projected forward
- * @property {number} coverageRatio    observed returns per projected tick (0 when the horizon is 0)
+ * @property {number|null} horizon     the ticks projected forward, NORMALIZED to a whole tick count:
+ *   the projection's own `horizon` when that is a non-negative integer, else `null` for UNMEASURABLE.
+ *   A non-finite, negative, or fractional horizon is not a tick count, and normalizing it to a clean
+ *   `0` would mint the one descriptor a consumer may read as "projects nothing, so it cannot outrun
+ *   its window" out of the input that most outruns it
+ * @property {number|null} coverageRatio   observed returns per projected tick (0 when the horizon is
+ *   0, and null when the horizon is unmeasurable — there is no ratio to report)
  */
 
 /**
@@ -321,27 +385,37 @@ function countHistoryFrames(frames, assets) {
  * Pure and deterministic (counts + arithmetic, no RNG), so a projection that
  * carries the descriptor still hashes stably.
  *
- * @param {object} args
- * @param {Array<Record<string, unknown>>|number} args.frames   the observed price frames used (or their
- *   count; the frames are untrusted shapes, so each price is type-checked rather than assumed)
- * @param {number} args.horizon                                ticks projected forward
- * @param {string[]} [args.assets]   the assets projected; coverage is the worst-covered of these. Omitted
+ * @param {unknown} args.frames   the observed price frames used — an array of per-tick price maps
+ *   (`{ ASSET: price }`, what `priceFramesFromReadings` returns), or a bare count. The frames are
+ *   untrusted shapes, so each price is read from its own descriptor and type-checked rather than assumed
+ * @param {unknown} args.horizon   ticks projected forward; anything that is not a non-negative integer
+ *   tick count is reported as UNMEASURABLE (`horizon: null`) rather than normalized to a number
+ * @param {unknown} [args.assets]   the assets projected; coverage is the worst-covered of these. Omitted
  *   OR EMPTY (as `project()` passes when `targetWeights` is empty) falls back to portfolio-wide counting —
- *   a frame counts when it carries at least one own finite price — and reports `worstAsset: null`
+ *   a frame counts when it carries at least one own positive price — and reports `worstAsset: null`
  * @returns {DataSufficiency}
  */
 export function computeDataSufficiency({ frames, horizon, assets }) {
-  const { historyFrames, historyReturns, worstAsset } = countHistoryFrames(frames, assets);
-  // Normalize the horizon before it lands in a hashed artifact: a non-finite
-  // horizon would serialize to null and desync the content hash from the value.
-  const projectedTicks = Number.isFinite(horizon) ? Math.max(0, horizon) : 0;
-  const coverageRatio = projectedTicks > 0 ? historyReturns / projectedTicks : 0;
+  const { historyFrames, historyReturns, worstAsset } = measureHistoryCoverage(frames, assets);
+  // A horizon that is not a whole, non-negative tick count is UNMEASURABLE, not
+  // zero. Clamping it to 0 would be worse than useless here: 0 is the one
+  // horizon a consumer may legitimately read as "this projection cannot outrun
+  // its window", so the most extreme input (a NaN horizon from a typo'd flag)
+  // would mint the cleanest-looking descriptor. `null` says what is true — the
+  // measurement could not be made — and serializes stably into the artifact, so
+  // a consumer gating on this evidence fails closed instead of open.
+  const projectedTicks = typeof horizon === 'number' && Number.isInteger(horizon) && horizon >= 0
+    ? horizon
+    : null;
+  const coverageRatio = projectedTicks == null
+    ? null
+    : round12(projectedTicks > 0 ? historyReturns / projectedTicks : 0);
   return {
     historyFrames,
     historyReturns,
     worstAsset,
     horizon: projectedTicks,
-    coverageRatio: round12(coverageRatio),
+    coverageRatio,
   };
 }
 
@@ -360,11 +434,17 @@ export function computeDataSufficiency({ frames, horizon, assets }) {
  * @property {number} p50Equity
  * @property {number} pProfit
  * @property {Array<object>} actionSteps   the steps the projection applied at t=1
- * @property {object|null} horizonRegime   the citation trail for why `horizon > baseHorizon`
+ * @property {object|null} [horizonRegime]   the citation trail for why `horizon > baseHorizon`
  *   (`{ baseHorizon, persistence, worstAsset, stress }`); null when no persistent regime stretched it
- * @property {DataSufficiency|null} dataSufficiency   whether the projection outruns its observed window,
- *   so a downstream gate can refuse a thin forecast; null unless `config.reportDataSufficiency` is set,
- *   and omitted from `projectionArtifact` when null (so the content hash is unaffected)
+ * @property {DataSufficiency|null} [dataSufficiency]   whether the projection outruns its observed
+ *   window, so a downstream gate can refuse a thin forecast; null unless `config.reportDataSufficiency`
+ *   is set, and omitted from `projectionArtifact` when null (so the content hash is unaffected)
+ *
+ * Both of the last two are marked OPTIONAL rather than required because this typedef stands in
+ * PARAMETER position too (`audit()`, `execute()`, and through them the LLM-facing `audit_proposal` /
+ * `simulate_execution` tools, which hand-build a forecast object). `project()` always sets both keys;
+ * a caller-supplied forecast routinely carries neither, and the consumers are written for that
+ * absence — declaring them required would tell a checker the opposite of what the readers expect.
  * @property {string} [projectionSvg]      deterministic SVG render of the histogram
  */
 

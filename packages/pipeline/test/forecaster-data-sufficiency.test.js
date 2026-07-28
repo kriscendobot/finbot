@@ -156,10 +156,56 @@ test('computeDataSufficiency: a bare count is guarded, never ToInt32-wrapped', (
   // The overload has no frames to measure per asset, so it names none — even
   // when the caller passed assets it cannot honor.
   assert.equal(computeDataSufficiency({ frames: 8, horizon: 10, assets: ['ATOM'] }).worstAsset, null);
-  // A non-finite horizon is normalized rather than hashed as a JSON null.
-  const wild = computeDataSufficiency({ frames: 8, horizon: NaN });
-  assert.equal(wild.horizon, 0);
-  assert.equal(wild.coverageRatio, 0);
+});
+
+test('computeDataSufficiency: a horizon that is not a tick count is UNMEASURABLE, not zero', () => {
+  // Clamping a non-finite horizon to 0 would mint the one descriptor a consumer
+  // reads as "projects nothing, so it cannot outrun its window" out of the input
+  // that most outruns it — a NaN horizon from a typo'd flag. `null` says what is
+  // true, so a gate reading this evidence fails closed instead of open.
+  for (const horizon of [NaN, Infinity, -Infinity, -5, 2.5, '20', null, undefined, {}]) {
+    const wild = computeDataSufficiency({ frames: 8, horizon });
+    assert.equal(wild.horizon, null, `horizon ${String(horizon)}`);
+    assert.equal(wild.coverageRatio, null, `horizon ${String(horizon)}`);
+    // The counts are still measured; only the ratio is unavailable.
+    assert.equal(wild.historyFrames, 8);
+  }
+  // A whole, non-negative horizon is measurable, zero included.
+  assert.equal(computeDataSufficiency({ frames: 8, horizon: 0 }).horizon, 0);
+  assert.equal(computeDataSufficiency({ frames: 8, horizon: 0 }).coverageRatio, 0);
+});
+
+test('computeDataSufficiency: untrusted frames cannot forge or abort the measurement', () => {
+  // `Array.isArray` says nothing about which `map` a [[Get]] resolves to, and an
+  // OWN `map` shadows the primordial even under lockdown. The measurement walks
+  // by index instead, so a hijacked method cannot fabricate the coverage mask.
+  const forged = [{ ATOM: 1 }, { ATOM: 1 }, { ATOM: 1 }];
+  forged.map = () => Array.from({ length: 40 }, () => true);
+  const measured = computeDataSufficiency({ frames: forged, horizon: 20, assets: ['ATOM'] });
+  assert.equal(measured.historyFrames, 3);
+  assert.equal(measured.historyReturns, 2);
+
+  // An own ACCESSOR is not a data property: `Object.hasOwn` would pass and the
+  // read would run the getter, so a hostile frame could throw out of project().
+  // Read from the descriptor instead — an accessor simply carries no evidence.
+  const hostile = { get ATOM() { throw new Error('boom'); } };
+  const guarded = computeDataSufficiency({
+    frames: [{ ATOM: 1 }, hostile, { ATOM: 2 }], horizon: 4, assets: ['ATOM'],
+  });
+  assert.equal(guarded.historyFrames, 2);
+  assert.equal(guarded.historyReturns, 0); // the accessor frame splits the run
+  // Same on the no-assets-named path, which enumerates the frame's own names.
+  assert.equal(computeDataSufficiency({ frames: [hostile], horizon: 4 }).historyFrames, 0);
+});
+
+test('computeDataSufficiency: a non-enumerable own price counts on BOTH paths', () => {
+  // `Object.keys` is enumerable-only while the per-asset read is not, so the two
+  // paths would otherwise disagree about the same frame: observed when the asset
+  // is named, unobserved when it is not.
+  const frame = () => Object.defineProperty({}, 'ATOM', { value: 10, enumerable: false });
+  const frames = [frame(), frame()];
+  assert.equal(computeDataSufficiency({ frames, horizon: 4, assets: ['ATOM'] }).historyFrames, 2);
+  assert.equal(computeDataSufficiency({ frames, horizon: 4 }).historyFrames, 2);
 });
 
 test('project: off by default — the descriptor is null and the hashed artifact is byte-identical', () => {

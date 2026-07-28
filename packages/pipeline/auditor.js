@@ -15,7 +15,7 @@
 import { hashProposal } from './planner.js';
 import { navOf } from './rebalance.js';
 import { stepHasRealRoute } from './substrates.js';
-import { worstAssetPersistence, persistenceStress } from './forecaster.js';
+import { worstAssetPersistence, persistenceStress, round12 } from './forecaster.js';
 
 /** @import { ForecastProjection } from './forecaster.js' */
 
@@ -52,12 +52,14 @@ import { worstAssetPersistence, persistenceStress } from './forecaster.js';
  * @param {number} [config.regimePersistenceHi]      persistence at/above which the bump is full (default 0.98)
  * @param {number} [config.regimeTailFloorCap]       the regime-tightened floor never exceeds this * NAV (default 0.98)
  * @param {number} [config.stalenessWindowTicks]     cited readings no older than this (default 5)
- * @param {number} [config.dataSufficiencyMinCoverage]  minimum forecast coverage ratio (observed returns per
- *   projected tick) the gate requires. Absent, or the number 0, is OFF: the invariant is not even emitted,
+ * @param {unknown} [config.dataSufficiencyMinCoverage]  minimum forecast coverage ratio (observed returns per
+ *   projected tick) the gate requires. Declared `unknown` because it is caller-supplied and every branch
+ *   below reads it as such. Absent, `null`, or the number 0 is OFF: the invariant is not even emitted,
  *   so the verdict is byte-identical to before. When armed, a forecast whose coverage — RECOMPUTED from the
  *   descriptor's own counts, never read off its reported ratio — falls below the requirement fails the gate,
- *   and so does a forecast carrying no measurable descriptor: an armed gate with no evidence fails CLOSED
- *   rather than approving vacuously. Only a `number` is honored: any other type (`''`, `false`, `[]`, `'1'`,
+ *   and so does a forecast carrying no measurable descriptor, one whose counts refute each other, and one
+ *   whose own `horizon` is absent or unreadable: an armed gate with no evidence, or contradictory evidence,
+ *   fails CLOSED rather than approving vacuously. Only a `number` is honored: any other type (`''`, `false`, `[]`, `'1'`,
  *   a Symbol) is an unusable threshold, as is a non-finite or negative number or a positive one below the
  *   descriptor's own 1e-12 resolution (which no coverage could fail), and an unusable threshold
  *   arms the gate and fails it closed rather than coercing onto the OFF value — a malformed knob can never
@@ -148,14 +150,22 @@ export function audit(input, config = {}) {
     regimePersistenceLo, regimePersistenceHi, regimeTailFloorCap,
   });
   const floor = regime.floorPct * nav;
-  const tailPass = forecast != null && forecast.p05Equity >= floor - 1e-6;
+  // The p05 anchor is read as untrusted input like every other field of a
+  // caller-supplied forecast: a forecast whose `p05Equity` is absent or not a
+  // finite number owes the caller a REJECTING verdict, not a `TypeError` thrown
+  // out of `audit()` while formatting the detail line — this same call is the
+  // executor's unwrapped fire-time drift guard.
+  const p05Equity = readOwnFiniteNumber(forecast, 'p05Equity');
+  const tailPass = p05Equity != null && p05Equity >= floor - 1e-6;
   results.push({
     name: 'tail-risk-floor',
     pass: tailPass,
     detail: forecast == null
       ? 'no forecast supplied'
-      : `forecast p05 terminal equity ${forecast.p05Equity.toFixed(2)} vs floor ${floor.toFixed(2)} (${(regime.floorPct * 100).toFixed(1)}% of NAV${regime.tightened
-          ? `; regime-tightened from ${(tailFloorPct * 100).toFixed(1)}% on persistence ${regime.persistence.toFixed(3)} of ${regime.worstAsset}`
+      : p05Equity == null
+        ? `forecast carries no finite p05 terminal equity vs floor ${floor.toFixed(2)}`
+        : `forecast p05 terminal equity ${p05Equity.toFixed(2)} vs floor ${floor.toFixed(2)} (${(regime.floorPct * 100).toFixed(1)}% of NAV${regime.tightened
+          ? `; regime-tightened from ${(tailFloorPct * 100).toFixed(1)}% on persistence ${regime.persistence.toFixed(3)} of ${safeLabel(regime.worstAsset)}`
           : ''})`,
   });
 
@@ -210,12 +220,13 @@ export function audit(input, config = {}) {
   //
   // Armed, the gate fails CLOSED (see the `@param` above for each unevaluable
   // case): absence of evidence is not evidence of sufficiency, and this verdict
-  // is a precondition for irreversible action. What is worth stating beside the
-  // call rather than in the signature is WHOSE arithmetic decides: the gate
-  // recomputes coverage from the descriptor's primitive counts and refuses a
-  // descriptor whose reported ratio — or horizon — contradicts them, exactly as
-  // invariant 4 recomputes `proposal_hash` instead of reading it. A ratio is a
-  // judgement made by the thing being gated; the counts are the evidence.
+  // is a precondition for irreversible action. WHOSE arithmetic decides is the
+  // gate's: it recomputes coverage from the descriptor's primitive counts and
+  // refuses a descriptor whose reported ratio — or horizon, or count of returns
+  // against frames — contradicts them. A ratio is a judgement made by the thing
+  // being gated; the counts are the evidence. Weaker than invariant 4 all the
+  // same: that one recomputes from evidence the auditor independently holds,
+  // while these counts remain self-reported (see `dataSufficiencyGate`).
   if (dataSufficiencyArmed) {
     results.push({
       name: 'forecast-data-sufficiency',
@@ -234,53 +245,145 @@ export function audit(input, config = {}) {
   };
 }
 
-/** A finite `number`, or null. Type-checked, never coerced. */
+/**
+ * A finite `number`, or null. Type-checked, never coerced.
+ *
+ * @param {unknown} value
+ * @returns {number|null}
+ */
 function finiteNumber(value) {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
-/** The descriptor's own quantization (mirrors forecaster.js `round12`), so the
- *  gate's recompute compares like with like on both sides. */
-function round12(x) {
-  return Number.isFinite(x) ? Number(x.toFixed(12)) : x;
+/**
+ * A whole, non-negative count, or null. A tick or observation count that is
+ * fractional (`1e-13` returns over a `1e-13`-tick horizon recomputes to a clean
+ * 1.0) is not a count at all, so it is not evidence.
+ *
+ * @param {unknown} value
+ * @returns {number|null}
+ */
+function wholeCount(value) {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : null;
 }
 
-/** Name an unusable threshold in the verdict without letting a hostile
- *  `toString` throw out of the auditor. */
+/**
+ * Read one OWN DATA property of an untrusted object, or `undefined`.
+ *
+ * Own-only, because an inherited value is not evidence the producer supplied: a
+ * single polluted `Object.prototype.dataSufficiency` would otherwise turn "this
+ * forecast carries no descriptor, so fail closed" into "this forecast inherits a
+ * passing one, so approve" — precisely the substitution a fail-closed gate
+ * exists to refuse, and the same own-property discipline the forecaster applies
+ * on the producing side. Data-property-only (via the descriptor, never a plain
+ * `[[Get]]`), because an own accessor on untrusted input would otherwise run
+ * inside `audit()`.
+ *
+ * @param {unknown} object
+ * @param {string} key
+ * @returns {unknown}
+ */
+function readOwn(object, key) {
+  if (object == null || typeof object !== 'object') return undefined;
+  let descriptor;
+  try {
+    descriptor = Object.getOwnPropertyDescriptor(object, key);
+  } catch (_err) {
+    return undefined; // a hostile proxy trap owes a verdict, not an exception
+  }
+  return descriptor && 'value' in descriptor ? descriptor.value : undefined;
+}
+
+/**
+ * `readOwn` narrowed to a finite number.
+ *
+ * @param {unknown} object
+ * @param {string} key
+ * @returns {number|null}
+ */
+function readOwnFiniteNumber(object, key) {
+  return finiteNumber(readOwn(object, key));
+}
+
+/**
+ * Name an unusable threshold in the verdict without letting a hostile
+ * `toString` throw out of the auditor, and without letting an unbounded string
+ * ride into a verdict another reader parses.
+ *
+ * @param {unknown} value
+ * @returns {string}
+ */
 function describeThreshold(value) {
   try {
-    return typeof value === 'string' ? JSON.stringify(value) : String(value);
+    return clampLabel(typeof value === 'string' ? JSON.stringify(value) : String(value));
   } catch (_err) {
     return '(unprintable)';
   }
 }
 
 /**
- * Snapshot the untrusted data-sufficiency descriptor into plain finite numbers,
- * reading each field EXACTLY ONCE so the verdict and the detail line that cites
- * it can never quote different values (a getter that answers differently on a
- * second read would otherwise produce an audit record citing evidence the gate
- * never saw). A hostile getter that throws owes the caller a verdict, not an
- * exception out of `audit()`, so the whole read is guarded.
+ * Make an untrusted, caller-supplied identifier safe to interpolate into a
+ * verdict detail line. The verdict is recorded into the journal and re-read
+ * (the CLI report, `auditBody`), so an asset name carrying a newline could
+ * forge invariant lines the auditor never emitted. Control characters become
+ * `?` and the label is capped.
  *
- * @param {ForecastProjection|null|undefined} forecast
- * @returns {{ coverageRatio: number, historyReturns: number, horizon: number,
- *   worstAsset: string|null, forecastHorizon: number|null } | null}  null when the descriptor is
- *   absent, not an object, or missing any of the three numbers the gate needs.
+ * @param {unknown} value
+ * @returns {string|null}  null when the value is not a string at all
+ */
+function safeLabel(value) {
+  if (typeof value !== 'string') return null;
+  return clampLabel(value);
+}
+
+/**
+ * @param {string} text
+ * @returns {string}
+ */
+function clampLabel(text) {
+  let printable = '';
+  for (const ch of text) {
+    const code = ch.codePointAt(0);
+    printable += code < 0x20 || code === 0x7f ? '?' : ch;
+  }
+  return printable.length > 48 ? `${printable.slice(0, 48)}…` : printable;
+}
+
+/**
+ * Snapshot the untrusted data-sufficiency descriptor into plain numbers,
+ * reading each field EXACTLY ONCE, own-data-property only (see `readOwn`), so
+ * the verdict and the detail line that cites it can never quote different
+ * values and no inherited or computed field can stand in for evidence the
+ * producer never supplied.
+ *
+ * Every count must be a WHOLE, non-negative number: the descriptor's counts are
+ * frames and returns, and a fractional pair (`1e-13` returns over a `1e-13`-tick
+ * horizon) recomputes to a clean 1.0 while measuring nothing at all. The
+ * forecast's OWN horizon is required too, not merely cross-checked when present:
+ * an unreadable `forecast.horizon` leaves the gate unable to tell a genuine
+ * zero-tick projection from a descriptor asserting one, and that ambiguity must
+ * not resolve in the applicant's favour.
+ *
+ * @param {unknown} forecast   untrusted, caller-supplied
+ * @returns {{ coverageRatio: number, historyReturns: number, historyFrames: number,
+ *   horizon: number, worstAsset: string|null, forecastHorizon: number } | null}  null when the
+ *   descriptor (or the forecast's own horizon) is absent, not an object, or not the whole-count
+ *   evidence the gate needs.
  */
 function readDataSufficiency(forecast) {
   try {
-    if (forecast == null || typeof forecast !== 'object') return null;
-    const raw = forecast.dataSufficiency;
-    const forecastHorizon = finiteNumber(forecast.horizon);
+    const raw = readOwn(forecast, 'dataSufficiency');
+    const forecastHorizon = wholeCount(readOwn(forecast, 'horizon'));
     if (raw == null || typeof raw !== 'object') return null;
-    const coverageRatio = finiteNumber(raw.coverageRatio);
-    const historyReturns = finiteNumber(raw.historyReturns);
-    const horizon = finiteNumber(raw.horizon);
-    const worstAsset = typeof raw.worstAsset === 'string' ? raw.worstAsset : null;
-    if (coverageRatio == null || historyReturns == null || horizon == null) return null;
-    if (historyReturns < 0 || horizon < 0) return null;
-    return { coverageRatio, historyReturns, horizon, worstAsset, forecastHorizon };
+    const coverageRatio = finiteNumber(readOwn(raw, 'coverageRatio'));
+    const historyReturns = wholeCount(readOwn(raw, 'historyReturns'));
+    const historyFrames = wholeCount(readOwn(raw, 'historyFrames'));
+    const horizon = wholeCount(readOwn(raw, 'horizon'));
+    const worstAsset = safeLabel(readOwn(raw, 'worstAsset'));
+    if (coverageRatio == null || coverageRatio < 0) return null;
+    if (historyReturns == null || historyFrames == null || horizon == null) return null;
+    if (forecastHorizon == null) return null;
+    return { coverageRatio, historyReturns, historyFrames, horizon, worstAsset, forecastHorizon };
   } catch (_err) {
     return null;
   }
@@ -292,15 +395,30 @@ function readDataSufficiency(forecast) {
  *
  * Every branch but the last two fails closed, because each names a state in
  * which the gate cannot SHOW the forecast clears the requirement: an unusable
- * threshold, no readable descriptor, a descriptor whose horizon contradicts the
- * forecast carrying it, or a descriptor whose reported ratio contradicts its own
- * counts. Both comparisons are quantized to the descriptor's 12 decimals so a
- * coverage that exactly meets its requirement is not rejected by a trailing-digit
- * artifact, and so a threshold below the descriptor's own resolution cannot be
- * cleared by a coverage that rounds to zero.
+ * threshold, no readable descriptor (which now includes a forecast whose own
+ * horizon is unreadable), a descriptor whose horizon contradicts the forecast
+ * carrying it, a descriptor whose counts refute each other, or one whose
+ * reported ratio contradicts those counts. A gate that refuses ABSENT evidence
+ * must refuse CONTRADICTORY evidence at least as firmly; the two are the same
+ * state — the gate cannot show the requirement is met — and only one of them
+ * looks like a measurement. Both comparisons are quantized to the descriptor's
+ * 12 decimals so a coverage that exactly meets its requirement is not rejected
+ * by a trailing-digit artifact, and so a threshold below the descriptor's own
+ * resolution cannot be cleared by a coverage that rounds to zero.
+ *
+ * The recompute bounds FORGERY, not competence: the counts are still
+ * self-reported by the artifact being gated, so an internally consistent
+ * fabrication (`1000` returns over a `20`-tick horizon) clears the gate. That is
+ * a weaker guarantee than invariant 4's, which recomputes `proposal_hash` from
+ * the proposal's own steps — independent evidence the auditor already holds.
+ * Here the auditor holds no price window to recount against, so what it can
+ * enforce is that the ratio it judges is the ratio the descriptor's own evidence
+ * supports. Binding the descriptor to an attested `projectionId` is the way to
+ * close the remaining gap; until then, treat this invariant as measuring
+ * self-consistency, not provenance.
  *
  * @param {object} args
- * @param {ForecastProjection|null|undefined} args.forecast   untrusted, caller-supplied
+ * @param {unknown} args.forecast          untrusted, caller-supplied
  * @param {number} args.minCoverage        the threshold, NaN when unusable
  * @param {boolean} args.minCoverageUsable
  * @param {unknown} args.rawMinCoverage    as supplied, for the unusable-threshold detail
@@ -324,14 +442,28 @@ function dataSufficiencyGate({ forecast, minCoverage, minCoverageUsable, rawMinC
         + `${required}; the gate cannot be evaluated (fails closed)`,
     };
   }
-  const { coverageRatio, historyReturns, horizon, worstAsset, forecastHorizon } = descriptor;
+  const {
+    coverageRatio, historyReturns, historyFrames, horizon, worstAsset, forecastHorizon,
+  } = descriptor;
   const onAsset = worstAsset != null ? ` on ${worstAsset}` : '';
   const evidence = `(${historyReturns} observed return(s) / ${horizon}-tick horizon)`;
-  if (forecastHorizon != null && forecastHorizon !== horizon) {
+  if (forecastHorizon !== horizon) {
     return {
       pass: false,
       detail: `data-sufficiency descriptor ${evidence} contradicts the forecast's own `
         + `${forecastHorizon}-tick horizon; the gate cannot be evaluated (fails closed)`,
+    };
+  }
+  // The producer's own contiguity rule: a return needs two ADJACENT observed
+  // frames, so a window of N frames yields at most N-1 returns. A descriptor
+  // claiming more returns than its frames can yield refutes itself one field
+  // deeper than the ratio does, and the recompute alone would not catch it.
+  if (historyReturns > Math.max(0, historyFrames - 1)) {
+    return {
+      pass: false,
+      detail: `data-sufficiency descriptor claims ${historyReturns} observed return(s) from `
+        + `${historyFrames} observed frame(s), which cannot yield more than `
+        + `${Math.max(0, historyFrames - 1)}; the gate cannot be evaluated (fails closed)`,
     };
   }
   const recomputed = horizon > 0 ? round12(historyReturns / horizon) : 0;
@@ -345,7 +477,11 @@ function dataSufficiencyGate({ forecast, minCoverage, minCoverageUsable, rawMinC
   }
   if (horizon === 0) {
     // Nothing measured is not the same as measured-and-insufficient: a projection
-    // of zero ticks cannot outrun its window, however thin the window is.
+    // of zero ticks cannot outrun its window, however thin the window is. This is
+    // the gate's only unconditional pass, so it is reachable ONLY once the
+    // forecast's own horizon has corroborated the zero above — a descriptor
+    // asserting "0 ticks" beside a forecast that projects 20 (or beside a
+    // forecast whose horizon cannot be read at all) is refuted, never honored.
     return {
       pass: true,
       detail: `forecast projects 0 ticks${onAsset} ${evidence}, so it cannot outrun its observed `

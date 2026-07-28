@@ -886,13 +886,23 @@ binary pre-execution gate for the graded planner downweight it also asked for;
   freshly-listed instrument inside a long window reads as thin instead of hiding
   behind its better-observed neighbours. Ties break lexicographically, never on
   the caller's key order, since `worstAsset` rides into the hashed artifact.
-- **What counts as evidence.** A frame carrying no *own*, finite, positive price
-  for an asset says nothing about it, so a stalled feed emitting
-  `{ t, prices: {} }`, one emitting a `0` sentinel, and one whose frames inherit
-  their prices from a prototype all read as no evidence rather than padding the
-  ratio. Returns need two *adjacent* observations, so a gappy or alternating feed
-  carries fewer returns than `historyFrames - 1` — a real frame is not a real
-  return.
+- **What counts as evidence.** A frame carrying no *own data property* holding a
+  finite positive price for an asset says nothing about it, so a stalled feed
+  emitting empty price maps (`{}`, once the reading's `prices` is unwrapped), one
+  emitting a `0` sentinel, one whose frames inherit their prices from a
+  prototype, and one whose price is an accessor rather than a value all read as
+  no evidence rather than padding the ratio. Returns need two *adjacent*
+  observations, so a gappy or alternating feed carries fewer returns than
+  `historyFrames - 1` — a real frame is not a real return. The window is walked
+  by index rather than through `frames.map`, since an own `map` on a
+  caller-supplied array would fabricate the mask the whole measurement rests on.
+- **An unmeasurable horizon is `null`, not `0`.** A horizon that is not a whole,
+  non-negative tick count (a `NaN` from a typo'd flag, a negative, a fraction)
+  yields `horizon: null` / `coverageRatio: null`. Clamping it to `0` was the
+  earlier behavior and was the wrong shape: `0` is the one horizon a consumer may
+  read as "projects nothing, so it cannot outrun its window", so the most extreme
+  input minted the cleanest-looking descriptor and disarmed the gate through the
+  sibling flag.
 - **Measurement, not policy.** The descriptor carries no threshold and no
   verdict. That is deliberate: a threshold in the descriptor would ride into
   `projectionArtifact` and give two byte-identical ensembles two different
@@ -923,17 +933,31 @@ binary pre-execution gate for the graded planner downweight it also asked for;
   no gate at all. So is a positive threshold below the descriptor's own 1e-12
   resolution, which no coverage could fail.
 - **The gate recomputes; it does not read a verdict.** Coverage is recomputed
-  from the descriptor's primitive counts (`historyReturns / horizon`), and a
-  descriptor whose reported `coverageRatio` disagrees with its own counts — or
-  whose `horizon` disagrees with the forecast carrying it — fails closed rather
-  than approving. A ratio is a judgement made by the thing being gated; the
-  counts are the evidence, and invariant 4 already sets the precedent by
-  recomputing `proposal_hash` instead of reading it. Every field is read once,
-  type-checked rather than coerced, and guarded against a getter that throws, so
-  a hostile descriptor yields a *verdict* and never an exception out of `audit()`
-  (the executor's fire-time re-audit calls it unwrapped). A zero-tick horizon is
-  the one place the gate passes on no evidence: nothing measured is not the same
-  as measured-and-insufficient.
+  from the descriptor's primitive counts (`historyReturns / horizon`), and the
+  gate fails closed on a descriptor whose reported `coverageRatio` disagrees with
+  those counts, whose counts disagree with *each other* (`historyReturns` cannot
+  exceed `historyFrames - 1`, the producer's own contiguity rule), whose counts
+  are not whole numbers (`1e-13` returns over a `1e-13`-tick horizon recomputes
+  to a clean 1.0 while measuring nothing), or whose `horizon` disagrees with the
+  forecast carrying it. A ratio is a judgement made by the thing being gated; the
+  counts are the evidence. Every field is read *once* and *own-data-property
+  only* — an inherited descriptor, or one behind an accessor, is not evidence the
+  producer supplied — and the read is guarded, so a hostile descriptor yields a
+  *verdict* and never an exception out of `audit()` (the executor's fire-time
+  re-audit calls it unwrapped; invariant 3's `p05Equity` formatting is guarded
+  for the same reason). A zero-tick horizon is the one place the gate passes on
+  no evidence — nothing measured is not the same as measured-and-insufficient —
+  and it is reachable only once the forecast's *own* readable horizon corroborates
+  the zero, since a pass-branch guarded by a check that is skipped when the input
+  is malformed is a fail-open wearing a fail-closed comment.
+- **What the recompute does and does not buy.** It bounds *forgery*, not
+  *provenance*: the counts are still self-reported by the artifact being gated,
+  so an internally consistent fabrication (1000 returns over a 20-tick horizon)
+  clears the gate. That makes it strictly weaker than invariant 4, which
+  recomputes `proposal_hash` from evidence the auditor independently holds; the
+  auditor holds no price window to recount coverage against. Binding the
+  descriptor to an attested `projectionId` is how that gap closes, and until then
+  this invariant should be read as measuring self-consistency.
 - **Wiring.** `runOodaCycle` auto-enables the forecaster report when only the
   auditor knob is set, so a lone gate knob yields a live gate. An explicit
   `forecaster.reportDataSufficiency: false` still wins, but no longer disarms the
@@ -945,24 +969,38 @@ binary pre-execution gate for the graded planner downweight it also asked for;
   test so a value the CLI accepts is a value the gate can evaluate. (`Number('abc')`
   is `NaN` and `Number('')` is `0`; an unvalidated value would print a coverage
   line while emitting no invariant, the worst false-assurance shape for a safety
-  knob.) The report's `SCARCE` label is the *auditor's own verdict* on that
+  knob.) `--horizon` is validated on the same footing — it is the *denominator*
+  of the ratio the gate reads, so an unvalidated `--horizon=abc` disarmed the
+  gate that `--data-sufficiency-min` armed; it must now be a whole number of
+  ticks >= 1. The report's `SCARCE` label is the *auditor's own verdict* on that
   forecast rather than a second comparison that could drift from it, so it can
   never appear beside an approving gate nor stay silent beside a rejecting one.
+- **One quantizer, exported.** The gate's recompute-and-compare is only correct
+  while both sides quantize identically, so `round12` is now exported from
+  `forecaster.js` and imported by the auditor and the CLI report rather than
+  copied under a "mirrors X" comment. A drift there would fail every honest
+  forecast closed — an availability failure on a live-execution gate.
 - **Tests.** `packages/pipeline/test/forecaster-data-sufficiency.test.js` and
   `.../auditor-data-sufficiency.test.js` pin the off-path artifact byte-identity,
-  the fit-window (not the shorter cited window) as the measured window, per-asset
-  worst-constituent coverage, the padding attacks (empty, foreign-asset,
-  inherited, zero-price, non-adjacent), the guarded bare-count coercion, every
-  fail-closed path (absent, malformed, coercible, self-contradictory, hostile
-  descriptors; unusable thresholds including the coerce-to-zero class), and the
-  exact-threshold boundary the shared quantization exists for.
+  the fit window as the measured window, per-asset worst-constituent coverage,
+  the padding attacks (empty, foreign-asset, inherited, non-enumerable, accessor,
+  zero-price, non-adjacent, hijacked-`map`), and every fail-closed path — absent,
+  malformed, coercible, self-contradictory, fractional-count, inherited, and
+  hostile descriptors; the zero-tick bypass under an unreadable forecast horizon;
+  unusable thresholds including the coerce-to-zero class and both sides of the
+  1e-12 usability boundary.
 
-Still outstanding: the invariant is not yet reflected in the three surfaces that
-enumerate the invariant set — `skills/pre-execution-audit/SKILL.md` (§§ 1-6,
-whose #6 "On-chain verifiability" had already drifted from the code's
-`place-route-reachability`), `roles/auditor/AGENT.md` (six, its #6 phrased "No
-off-chain dependencies in the on-chain steps"), and `packages/pipeline/README.md`
-(five; it has no sixth entry at all). The skill is the canonical home, so
-reconciling that enumeration — and the `agent-tools.js` tool schemas, which
-enumerate both the returned invariant set and the auditor's config knobs for the
-LLM-facing `audit_proposal` and `simulate_execution` paths — is its own change.
+Reconciled in this change: the invariant now appears in
+`skills/pre-execution-audit/SKILL.md` (the canonical home, § 7 plus its config
+knob, and #6 there now names the code's `place-route-reachability`),
+`roles/auditor/AGENT.md`, `packages/pipeline/README.md`, and the `agent-tools.js`
+schemas for `audit_proposal` and `simulate_execution` — the last of these being
+the surface an LLM caller actually reads at run time, where an under-reported
+config bag means a gate the caller cannot arm and a rejection naming an invariant
+its own tool contract denied existed.
+
+Still outstanding: the descriptor is not bound to the projection the proposal
+cites (`projectionId` covers `dataSufficiency`, but invariant 1 only counts
+citations), which is what would turn this gate from self-consistency into
+provenance. The graded planner downweight the open question also asked about
+remains unbuilt; `planner.js` is untouched.
