@@ -61,6 +61,16 @@ test('observerBrief: embeds the window and instructs detector use', () => {
   assert.match(brief, /never score, propose, or trade/);
 });
 
+test('makeScriptedObserverLlm: emits a deterministic assistant tool call', async () => {
+  const scripted = makeScriptedObserverLlm(observeInput());
+  const context = { turn: 0, tools: { observe_opportunities: {} } };
+  const first = await scripted(context);
+  const second = await scripted(context);
+  assert.deepEqual(first, second, 'the scripted assistant emission is reproducible');
+  assert.equal(first.timestamp, 0, 'the scripted assistant uses a fixed timestamp');
+  assert.equal(first.content[1].id, 'observe-opportunities-0', 'the tool call has a fixed id');
+});
+
 test('observe stage exposes exactly the read-only detector — no wallet-reaching tool', () => {
   // Pins the no-wallet invariant the PR emphasizes: the observe-phase capability
   // subset is exactly the deviation detector. Reddens if a future edit widens
@@ -86,7 +96,7 @@ test('dispatchObserver (scripted LLM): drives the observe stage end-to-end via t
     assert.ok(dispatch.toolCalls.includes('observe_opportunities'),
       'observer called the deterministic detector');
     assert.equal(dispatch.observed, true);
-    assert.ok(dispatch.observation, 'an observation was extracted');
+    assert.ok(dispatch.reportedObservation, 'an observation was extracted');
     assert.equal(dispatch.reportedCrossings.length, 1);
     assert.equal(dispatch.reportedCrossings[0].asset, 'ATOM');
     assert.equal(dispatch.reportedCrossings[0].direction, 'down');
@@ -102,7 +112,7 @@ test('dispatchObserver: the inference-driven crossings reproduce the headless ob
     const dispatch = await dispatchObserver(input, {
       spawn, finbotRoot, llm: makeScriptedObserverLlm(input),
     });
-    assert.deepEqual(dispatch.observation, headless,
+    assert.deepEqual(dispatch.reportedObservation, headless,
       'the inference path and the headless path agree on the full observation');
   });
 });
@@ -115,7 +125,7 @@ test('dispatchObserver: a faithful dispatch reconciles against the deterministic
     });
     assert.equal(dispatch.reconciled, true,
       'the extracted observation matches the recompute over the trusted window');
-    assert.deepEqual(dispatch.observation, dispatch.canonical);
+    assert.deepEqual(dispatch.reportedObservation, dispatch.canonical);
   });
 });
 
@@ -145,21 +155,21 @@ function makeDivergentObserverLlm(input, tamperedThresholdBps) {
   };
 }
 
-test('dispatchObserver: non-canonical tool arguments fail reconciliation', async () => {
+test('dispatchObserver: dispatch-bound inputs ignore model-supplied tool arguments', async () => {
   await withFinbotRoot(async (finbotRoot) => {
     const input = observeInput(50); // trusted: 1 crossing (ATOM down ~150bps)
-    // The subagent instead passes 300bps, which detects zero crossings.
+    // The subagent instead passes 300bps. The bound detector must ignore it.
     const dispatch = await dispatchObserver(input, {
       spawn, finbotRoot, llm: makeDivergentObserverLlm(input, 300),
     });
     assert.equal(dispatch.status, 'completed');
     assert.ok(dispatch.toolCalls.includes('observe_opportunities'),
       'the tool was still called — the loose "was it called" gate would pass');
-    assert.equal(dispatch.observed, true, 'a (divergent) observation was extracted');
-    assert.equal(dispatch.reportedCrossings.length, 0, 'the tampered threshold surfaced zero crossings');
+    assert.equal(dispatch.observed, true, 'a reported observation was extracted');
+    assert.equal(dispatch.reportedCrossings.length, 1, 'the bound threshold produced the trusted crossing');
     assert.equal(dispatch.canonical.crossings.length, 1, 'the trusted recompute surfaces one');
-    assert.equal(dispatch.reconciled, false,
-      'divergent crossings do not reconcile with the recompute — the loop must refuse them');
+    assert.equal(dispatch.reconciled, true,
+      'the bound detector and recompute use the same trusted input');
   });
 });
 
@@ -184,48 +194,44 @@ function makeTamperedObserverLlm(toolArguments) {
   };
 }
 
-test('dispatchObserver: a tampered readings window fails reconciliation', async () => {
+test('dispatchObserver: a tampered readings window is ignored by the bound tool', async () => {
   await withFinbotRoot(async (finbotRoot) => {
     const input = observeInput(50); // trusted: 1 crossing over the full 3-tick window
-    // The subagent narrows the window to just the reference tick — no move, zero
-    // crossings — diverging from the recompute over the trusted window.
+    // The subagent narrows the window to one tick, but the bound tool keeps the
+    // complete trusted window.
     const dispatch = await dispatchObserver(input, {
       spawn, finbotRoot, llm: makeTamperedObserverLlm({ readings: input.readings.slice(0, 1), thresholdBps: 50 }),
     });
-    assert.equal(dispatch.reportedCrossings.length, 0, 'the tampered single-tick window surfaced zero crossings');
+    assert.equal(dispatch.reportedCrossings.length, 1, 'the trusted complete window surfaces one crossing');
     assert.equal(dispatch.canonical.crossings.length, 1, 'the trusted recompute over the full window surfaces one');
-    assert.equal(dispatch.reconciled, false,
-      'a hallucinated readings window does not reconcile — the loop must refuse it');
+    assert.equal(dispatch.reconciled, true, 'the bound tool reconciles with the trusted recompute');
   });
 });
 
-test('dispatchObserver: a below-trusted threshold (extra crossings) fails reconciliation', async () => {
+test('dispatchObserver: a model-supplied threshold cannot widen the bound detector', async () => {
   await withFinbotRoot(async (finbotRoot) => {
     const input = observeInput(50); // trusted: 1 crossing (ATOM ~150bps; flat OSMO at 0bps is below 50)
-    // 0bps is BELOW the trusted 50bps, so the flat OSMO also crosses — a SUPERSET
-    // of the trusted crossings. Reconciliation must reject extra crossings too,
-    // not only missing ones.
+    // 0bps would add the flat OSMO crossing if the model controlled the tool.
     const dispatch = await dispatchObserver(input, {
       spawn, finbotRoot, llm: makeTamperedObserverLlm({ readings: input.readings, thresholdBps: 0 }),
     });
-    assert.equal(dispatch.reportedCrossings.length, 2, 'the below-trusted threshold surfaced an extra crossing');
+    assert.equal(dispatch.reportedCrossings.length, 1, 'the bound threshold prevents an extra crossing');
     assert.equal(dispatch.canonical.crossings.length, 1, 'the trusted recompute surfaces one');
-    assert.equal(dispatch.reconciled, false, 'reconciliation rejects a superset, not only a subset');
+    assert.equal(dispatch.reconciled, true, 'the bound tool reconciles with the trusted recompute');
   });
 });
 
-test('dispatchObserver: a tampered asset allowlist fails reconciliation', async () => {
+test('dispatchObserver: a model-supplied allowlist cannot narrow the bound detector', async () => {
   await withFinbotRoot(async (finbotRoot) => {
     const input = observeInput(0); // trusted: 2 crossings (ATOM + flat OSMO at threshold 0, no allowlist)
-    // The subagent restricts detection to OSMO only, dropping the ATOM crossing
-    // the trusted (unrestricted) recompute surfaces.
+    // The subagent restricts detection to OSMO only, but the bound tool keeps
+    // the trusted unrestricted input.
     const dispatch = await dispatchObserver(input, {
       spawn, finbotRoot, llm: makeTamperedObserverLlm({ readings: input.readings, thresholdBps: 0, assets: ['OSMO'] }),
     });
-    assert.equal(dispatch.reportedCrossings.length, 1, 'the tampered allowlist restricted detection to OSMO');
+    assert.equal(dispatch.reportedCrossings.length, 2, 'the bound detector preserves both trusted crossings');
     assert.equal(dispatch.canonical.crossings.length, 2, 'the trusted recompute over all assets surfaces both');
-    assert.equal(dispatch.reconciled, false,
-      'a hallucinated asset allowlist does not reconcile — the loop must refuse it');
+    assert.equal(dispatch.reconciled, true, 'the bound tool reconciles with the trusted recompute');
   });
 });
 
@@ -240,7 +246,7 @@ test('dispatchObserver: a faithful dispatch honoring an asset allowlist reconcil
       spawn, finbotRoot, llm: makeScriptedObserverLlm(input),
     });
     assert.equal(dispatch.reconciled, true, 'the allowlist is forwarded to both the tool and the recompute');
-    assert.deepEqual(dispatch.observation, headless);
+    assert.deepEqual(dispatch.reportedObservation, headless);
     assert.equal(dispatch.reportedCrossings.length, 1, 'only ATOM is in the allowlist');
     assert.equal(dispatch.reportedCrossings[0].asset, 'ATOM');
   });
@@ -276,8 +282,8 @@ test('dispatchObserver: an absent threshold reconciles against the tool default'
     });
     assert.equal(dispatch.reconciled, true,
       'the absent-threshold dispatch reconciles with the default-threshold recompute');
-    assert.deepEqual(dispatch.observation, headless);
-    assert.deepEqual(dispatch.observation, dispatch.canonical);
+    assert.deepEqual(dispatch.reportedObservation, headless);
+    assert.deepEqual(dispatch.reportedObservation, dispatch.canonical);
     assert.equal(dispatch.reportedCrossings.length, 1, 'ATOM crosses the default 50bps; flat OSMO does not');
   });
 });
@@ -292,7 +298,7 @@ test('dispatchObserver: honors a zero threshold rather than defaulting it', asyn
       spawn, finbotRoot, llm: makeScriptedObserverLlm(input),
     });
     assert.equal(dispatch.reconciled, true);
-    assert.deepEqual(dispatch.observation, headless);
+    assert.deepEqual(dispatch.reportedObservation, headless);
     assert.equal(dispatch.reportedCrossings.length, 2, 'ATOM and the flat OSMO both cross at threshold 0');
   });
 });
@@ -482,18 +488,17 @@ test('dispatchObserver: requires the harness spawn function', async () => {
 // downstream. Pinning it here means a regression that stopped acting on
 // `reconciled` (or fed `observation`/`reportedCrossings` instead of `canonical`)
 // reddens the suite rather than silently re-narrowing the trust boundary.
-test('guardedObservation: refuses a non-reconciling dispatch and hands nothing downstream', async () => {
-  await withFinbotRoot(async (finbotRoot) => {
-    const input = observeInput(50); // trusted: 1 crossing; the subagent passes 300bps -> 0
-    const divergent = await dispatchObserver(input, {
-      spawn, finbotRoot, llm: makeDivergentObserverLlm(input, 300),
-    });
-    assert.equal(divergent.reconciled, false, 'precondition: the dispatch did not reconcile');
-    const guard = guardedObservation(divergent);
-    assert.equal(guard.ok, false, 'a divergent observe dispatch is refused');
-    assert.match(guard.reason, /SAFETY/);
-    assert.equal(guard.observation, undefined, 'no observation is handed downstream on refusal');
+test('guardedObservation: refuses a broken bound detector and hands nothing downstream', () => {
+  const guard = guardedObservation({
+    status: 'completed',
+    toolCalls: ['observe_opportunities'],
+    observed: true,
+    reconciled: false,
+    canonical: {},
   });
+  assert.equal(guard.ok, false, 'a non-reconciling bound detector is refused');
+  assert.match(guard.reason, /SAFETY/);
+  assert.equal(guard.observation, undefined, 'no observation is handed downstream on refusal');
 });
 
 test('guardedObservation: feeds the TRUSTED canonical recompute, never the surfaced observation', async () => {
@@ -506,10 +511,10 @@ test('guardedObservation: feeds the TRUSTED canonical recompute, never the surfa
     assert.equal(guard.ok, true);
     // Reference identity, not deep-equality: the value fed downstream is
     // `canonical` itself. `observation` is a distinct (boundary-crossed) object
-    // even when reconciled, so a regression to `dispatch.observation` would
+    // even when reconciled, so a regression to `dispatch.reportedObservation` would
     // redden the notEqual below.
     assert.equal(guard.observation, dispatch.canonical, 'the fed value is the canonical recompute');
-    assert.notEqual(guard.observation, dispatch.observation, 'it is NOT the boundary-crossed observation');
+    assert.notEqual(guard.observation, dispatch.reportedObservation, 'it is NOT the boundary-crossed observation');
   });
 });
 

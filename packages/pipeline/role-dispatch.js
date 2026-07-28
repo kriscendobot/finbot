@@ -3,27 +3,21 @@
  *
  * `runOodaCycle` (this package's `ooda-cycle.js`) runs every stage as a
  * deterministic function call — pure automation, no LLM. This module is the
- * other half the design asks for: drive an OODA stage by **inference**, with
- * the deterministic pipeline functions available to the reasoning subagent as
- * tools. Concretely, `dispatchAnalyzer` spawns the analyzer (ORIENT) as an
- * LLM-shaped subagent (via `@finbot/harness`'s `spawn`), hands it the
- * oracle-watcher output in its brief plus the orient-phase pipeline tools, and
- * lets it reason over the opportunities and CALL `score_opportunities` (the
- * deterministic `analyze`) as a tool. `dispatchPlanner` is the DECIDE-stage
- * counterpart: it hands the planner subagent the analyzer's target weights and
- * a forecast, plus the decide-phase tools, and lets it reason then CALL
- * `propose_rebalance` (the deterministic `plan`) to emit the ymax-shaped
- * proposal. Each stage's product — the scored AnalyzerResult, the hashed
- * Proposal — is extracted from the tool-execution events, so the
- * inference-driven path and the headless path yield the same structured output.
+ * corresponding inference-driven form for every OODA stage: OBSERVE dispatches
+ * the oracle-watcher, ORIENT dispatches the analyzer, DECIDE dispatches the
+ * planner, AUDIT dispatches the auditor, and ACT dispatches the dry-run
+ * executor. Each LLM-shaped subagent (via `@finbot/harness`'s `spawn`) chooses
+ * whether to call its narrowly scoped deterministic tool; the tool produces the
+ * structured stage product.
  *
  * The LLM is injected. With no `llm`, `spawn` uses its deterministic stub, so
  * tests stay offline; pass `harness.providers.makeAnthropicLlm()` for real
- * inference, or `makeScriptedAnalyzerLlm(input)` for a faithful offline double
- * that calls the scoring tool with the real opportunity data.
+ * inference, or a stage's `makeScripted*Llm(input)` helper for a faithful
+ * offline double that calls its deterministic tool.
  *
- * DRY-RUN by construction: this drives every OODA stage — ORIENT (analyzer),
- * DECIDE (planner), and ACT's two halves, the auditor gate and the executor —
+ * DRY-RUN by construction: this drives every OODA stage — OBSERVE
+ * (oracle-watcher), ORIENT (analyzer), DECIDE (planner), AUDIT (auditor), and
+ * ACT (executor) —
  * with no wallet capability reachable from any stage's tool subset. The
  * analyzer scores, the planner proposes, the auditor adjudicates, and the
  * executor SIMULATES against a clone of the portfolio: none trades. The
@@ -57,7 +51,7 @@ import {
 export function observerBrief(input) {
   const payload = {
     readings: input.readings || [],
-    thresholdBps: input.thresholdBps != null ? input.thresholdBps : null,
+    thresholdBps: input.thresholdBps != null ? input.thresholdBps : 50,
     assets: input.assets || null,
   };
   return [
@@ -65,9 +59,9 @@ export function observerBrief(input) {
     'price has moved from the window reference by more than the threshold. You are the OBSERVE phase:',
     'read-only, you emit events; you never score, propose, or trade, and no wallet is reachable.',
     '',
-    'Use the `observe_opportunities` tool for the detection — pass it the reading window, the',
-    'threshold in basis points, and the asset allowlist (if any) below. Do not compute the deviations',
-    'yourself; the tool returns the crossings (most significant first) and the latest price book.',
+    'Use the `observe_opportunities` tool for the detection. Its dispatch-bound inputs are below',
+    'for context, but the tool receives the trusted window, threshold, and asset allowlist from',
+    'this dispatch. Do not compute deviations yourself; the tool returns crossings and the latest price book.',
     '',
     'Then report how many crossings were found and, if any, the most significant asset and its',
     'direction.',
@@ -86,39 +80,31 @@ export function observerBrief(input) {
  * events, so the inference-driven path and the headless `observeOpportunities`
  * call yield the same crossings.
  *
- * A live subagent chooses the `observe_opportunities` arguments freely, so the
- * extracted observation is not trusted on its face: it is RECONCILED against a
- * deterministic recompute over the same TRUSTED `input` window/threshold/assets,
- * making the "reproduces the headless path" invariant a runtime check rather than
- * a property of the scripted double alone. `reconciled` is true only when the two
- * agree byte-for-byte — a hallucinated window, threshold, or allowlist yields
- * `reconciled: false`, and the caller (`bin/finbot-dispatch`, via
- * {@link guardedObservation}) refuses to drive the loop on a non-reconciling
- * observation. OBSERVE is the first stage, so an unreconciled divergence would
- * change the whole loop's input set.
+ * The observer tool is bound to the trusted `input` window/threshold/assets at
+ * dispatch creation. The subagent decides whether to call it but cannot alter
+ * those values by reserializing tool arguments. The reported tool result is
+ * reconciled with a direct deterministic recompute, and the caller
+ * (`bin/finbot-dispatch`, via {@link guardedObservation}) feeds only that
+ * canonical recompute downstream. OBSERVE is the first stage, so this keeps an
+ * inference-driven call from changing the loop's input set.
  *
  * @param {object} input  { readings, thresholdBps?, assets? }
  * @param {object} deps
  * @param {Function} deps.spawn        the harness `spawn` function
  * @param {string}   deps.finbotRoot   root holding `roles/<role>/AGENT.md`
  * @param {Function} [deps.llm]        injected LLM; omit to use the harness stub (offline)
- * @param {Record<string, object>} [deps.tools]  tool registry (default: observer detect tools)
- * @param {string[]} [deps.capabilities]         tool subset the observer may call (default: observer tool names)
- * @returns {Promise<object>} { handle, status, observation, canonical, reconciled, reportedCrossings, observed, toolCalls, finalText }.
+ * @returns {Promise<object>} { handle, status, reportedObservation, canonical, reconciled, reportedCrossings, observed, toolCalls, finalText }.
  *   `canonical` is the trusted deterministic recompute and is the ONLY value a
  *   caller should feed downstream (`bin/finbot-dispatch` reads `canonical.crossings`,
- *   never the reported ones). `observation` and `reportedCrossings` are the
- *   UNTRUSTED, boundary-crossed values the subagent surfaced, named to announce
- *   they are for divergence reporting, not for driving the loop — `reportedCrossings`
- *   equals `canonical.crossings` exactly when `reconciled` is true, and may diverge
- *   otherwise.
+ *   never the reported ones). `reportedObservation` and `reportedCrossings` are
+ *   boundary-crossed tool results kept for traceability, not for driving the loop.
  */
 export async function dispatchObserver(input, deps) {
   if (!deps || typeof deps.spawn !== 'function') {
     throw new Error('dispatchObserver: deps.spawn (the harness spawn function) is required');
   }
-  const tools = deps.tools || observerToolRegistry();
-  const capabilities = deps.capabilities || OBSERVER_TOOL_NAMES;
+  const tools = observerToolRegistry(input);
+  const capabilities = OBSERVER_TOOL_NAMES;
 
   const handle = await deps.spawn(
     {
@@ -132,34 +118,28 @@ export async function dispatchObserver(input, deps) {
   await handle.done;
 
   const toolCalls = extractToolCalls(handle.events);
-  const observation = lastObservationResult(handle.events);
+  const reportedObservation = lastObservationResult(handle.events);
 
-  // The deterministic recompute over the TRUSTED input — the reference the
-  // extracted observation must match. Honors the same threshold/asset options a
-  // faithful dispatch would forward to the tool.
+  // The deterministic recompute over the trusted input is both the reference
+  // result and the only value that may reach a later OODA stage.
   const canonical = observeOpportunities(
     { readings: input.readings || [] },
     { thresholdBps: input.thresholdBps, assets: input.assets },
   );
-  // `JSON.stringify` string-equality is a sound structural compare HERE only
-  // because both operands are outputs of the same pure `observeOpportunities`
-  // over identically-ordered readings: key insertion order matches, and any
-  // JSON-lossy case (NaN/Infinity->null, -0->0, dropped undefined) collapses
-  // identically on both sides. It fails SAFE — a real divergence never
-  // stringifies equal, so a spurious mismatch costs only an exit-1 upstream,
-  // never a false accept. A future edit that compares a value from a DIFFERENT
-  // producer must revisit this and use an order-insensitive deep-equal.
-  const reconciled = observation != null
-    && JSON.stringify(observation) === JSON.stringify(canonical);
+  // Both operands are produced by the same deterministic function over the
+  // same dispatch-bound input. This catches a broken bound tool without
+  // treating model JSON formatting or key order as a safety failure.
+  const reconciled = reportedObservation != null
+    && JSON.stringify(reportedObservation) === JSON.stringify(canonical);
 
   return {
     handle,
     status: handle.status,
-    observation,
+    reportedObservation,
     canonical,
     reconciled,
-    reportedCrossings: observation ? observation.crossings || [] : [],
-    observed: observation != null,
+    reportedCrossings: reportedObservation ? reportedObservation.crossings || [] : [],
+    observed: reportedObservation != null,
     toolCalls,
     finalText: handle.result ? handle.result.finalText : '',
   };
@@ -229,13 +209,13 @@ export function lastObservationResult(events) {
 
 /**
  * A deterministic, offline stand-in for an inference-driven observer LLM: it
- * calls `observe_opportunities` with the real reading window on turn 0, then
+ * calls `observe_opportunities` on turn 0, then
  * ends with a one-line summary on turn 1. The OBSERVE-stage counterpart to
  * {@link makeScriptedAnalyzerLlm} — exercises the same dispatch wiring as a real
  * provider with no network call. The emitted messages carry a fixed tool-call
- * id and `timestamp: 0` (never `crypto.randomBytes`/`Date.now`) so the whole
- * event stream is byte-reproducible run-to-run, matching the "deterministic"
- * contract determinism-invariant tests and journal fixtures rely on.
+ * id and `timestamp: 0` (never `crypto.randomBytes`/`Date.now`) so its emitted
+ * assistant messages are byte-reproducible run-to-run. The harness stamps the
+ * enclosing event stream independently.
  *
  * @param {object} input  same shape passed to {@link dispatchObserver}
  * @returns {Function} an `llm` matching the spawn contract

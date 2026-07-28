@@ -62,8 +62,8 @@ export const PIPELINE_TOOL_NAMES = ['score_opportunities', 'realized_volatility'
  *
  * @returns {Record<string, object>} a registry of `assertToolDef`-shaped tools
  */
-export function observerToolRegistry() {
-  const tools = [observeOpportunitiesTool()];
+export function observerToolRegistry(trustedInput = undefined) {
+  const tools = [observeOpportunitiesTool(trustedInput)];
   const registry = {};
   for (const t of tools) registry[t.name] = t;
   return registry;
@@ -443,7 +443,7 @@ function realizedVolatilityTool() {
 }
 
 /** `observeOpportunities` as a tool (the observe-phase detector). */
-function observeOpportunitiesTool() {
+function observeOpportunitiesTool(trustedInput = undefined) {
   return {
     name: 'observe_opportunities',
     description:
@@ -462,10 +462,14 @@ function observeOpportunitiesTool() {
     },
     run: async (args) => {
       try {
+        // A dispatch binds its trusted input here. The model still chooses
+        // whether to call the detector, but cannot alter the oracle window
+        // that the detector observes by reserializing tool arguments.
+        const source = trustedInput || args;
         const opts = {};
-        if (args.thresholdBps != null) opts.thresholdBps = args.thresholdBps;
-        if (args.assets) opts.assets = args.assets;
-        const observed = observeOpportunities({ readings: args.readings || [] }, opts);
+        if (source.thresholdBps != null) opts.thresholdBps = source.thresholdBps;
+        if (source.assets) opts.assets = source.assets;
+        const observed = observeOpportunities({ readings: source.readings || [] }, opts);
         return toolResult(true, [
           { type: 'json', value: observed },
           { type: 'text', text: `observe_opportunities: ${observed.crossings.length} crossing(s)` },
