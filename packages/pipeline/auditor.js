@@ -627,6 +627,16 @@ function dataSufficiencyGate({ forecast, minCoverage, minCoverageUsable, rawMinC
         + `${Math.max(0, historyFrames - 1)}; the gate cannot be evaluated (fails closed)`,
     };
   }
+  // Positive coverage identifies the limiting constituent. Without that name,
+  // the descriptor cannot establish which projected series its counts measured;
+  // a hand-built positive descriptor with no asset is therefore not evidence.
+  if (historyReturns > 0 && (worstAsset == null || worstAsset === '')) {
+    return {
+      pass: false,
+      detail: `data-sufficiency descriptor claims ${historyReturns} observed return(s) without a `
+        + 'nameable worst-covered asset; the gate cannot be evaluated (fails closed)',
+    };
+  }
   const recomputed = horizon > 0 ? round12(historyReturns / horizon) : 0;
   if (round12(recomputed) !== round12(coverageRatio)) {
     return {

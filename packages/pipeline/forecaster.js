@@ -733,8 +733,9 @@ export function makeRebalanceAction(targetWeights, bounds) {
  * @param {object} [input.bounds]            rebalance risk bounds (forwarded to deriveSteps)
  * @param {Array<{ t?: number, prices?: Record<string, number> }>} [input.readings]  observed window, for an adaptive vol fit
  * @param {Array<{ t?: number, prices?: Record<string, number> }>} [input.fitReadings]  a LONGER rolling
- *   window used ONLY for the adaptive vol fit, so the per-asset GARCH MLE can engage on a short live
- *   cycle. Absent → the fit uses `input.readings`, byte-identical to before.
+ *   window used for the adaptive-vol fit and, when `reportDataSufficiency` is on, for the coverage
+ *   measurement too; it lets the per-asset GARCH MLE engage on a short live cycle. Absent → both use
+ *   `input.readings`, byte-identical to before.
  * @param {object} [config]
  * @param {number} [config.horizon]          ticks per child (default 20)
  * @param {number} [config.ensembleSize]     children (default 200)

@@ -2,7 +2,7 @@
 created: 2026-06-17
 updated: 2026-07-28
 author: architect
-status: stub
+status: active
 ---
 
 # Design: ensemble forecasting
@@ -69,8 +69,8 @@ A 10,000-simulation ensemble on a non-trivial program takes minutes. The orchest
 
 ## Implementation pointers
 
-- The ensemble runner lives in `skills/monte-carlo-ensemble`; the renderer lives in `skills/histogram-projection-render`. Both are stubs.
-- The forecaster role file names the inputs and outputs; the implementation lands when the first concrete program is chosen for forecasting.
+- The ensemble runner is implemented in `packages/pipeline/forecaster.js`; the renderer is part of the returned projection.
+- The forecaster role file names the inputs and outputs. The first concrete forecasting program is implemented in the pipeline's simulator-backed projection path.
 
 ## Notes from the field (2026-06-26 — richer-forecasting build)
 

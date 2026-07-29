@@ -75,6 +75,20 @@ test('audit: gate on, forecast clears coverage -> passes', () => {
   assert.ok(!/scarce/.test(invariant.detail));
 });
 
+test('audit: positive coverage without a worst-covered asset fails CLOSED', () => {
+  const forecast = forecastWith(readingsOf(DIP), { horizon: 5 });
+  const verdict = audit(
+    auditInputFor({
+      ...forecast,
+      dataSufficiency: { ...forecast.dataSufficiency, worstAsset: null },
+    }),
+    { tailFloorPct: 0.5, dataSufficiencyMinCoverage: 1 },
+  );
+  assert.equal(sufficiencyOf(verdict).pass, false);
+  assert.match(sufficiencyOf(verdict).detail, /without a nameable worst-covered asset/);
+  assert.match(sufficiencyOf(verdict).detail, /fails closed/);
+});
+
 test('audit: gate on, forecast below coverage -> rejected', () => {
   // 4-frame window (3 returns) / 20-tick horizon -> coverage 0.15, below 1.0.
   const forecast = forecastWith(readingsOf(DIP.slice(0, 4)), { horizon: 20 });
