@@ -74,7 +74,14 @@ export async function spawn(params, ctx) {
   }
 
   // attenuate capabilities
-  const attenuated = attenuator(params.role, params.capabilities, ctx);
+  // Host-realm LLM adapters keep the legacy omitted-capabilities behavior.
+  // An untrusted llmProgram is different: omission must mean no grants, never
+  // every host tool. The program receives tool names as data and the host later
+  // resolves a requested name against this exact attenuated registry.
+  const capabilities = params.llmProgram && params.capabilities === undefined
+    ? []
+    : params.capabilities;
+  const attenuated = attenuator(params.role, capabilities, ctx);
 
   // run asynchronously; the caller awaits the handle's result via the
   // returned promise pattern.

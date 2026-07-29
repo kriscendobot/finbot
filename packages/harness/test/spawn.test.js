@@ -68,6 +68,13 @@ test('compartmentAttenuator: returns a hardened role policy and capability subse
   assert.equal(Object.isFrozen(fetch), false);
 });
 
+test('compartmentAttenuator: an explicit empty capability set vends no tools', () => {
+  const result = compartmentAttenuator('planner', [], {
+    tools: { harmless: { name: 'harmless' }, wallet: { name: 'wallet' } },
+  });
+  assert.deepEqual(Object.keys(result.tools), []);
+});
+
 test('spawn: stub LLM invokes the first tool and completes', async () => {
   const tmp = await mkdtemp(path.join(tmpdir(), 'finbot-spawn-'));
   try {
@@ -382,6 +389,37 @@ test('spawn: llmProgram runs inside a compartment and can request only vended to
   } finally {
     await rm(tmp, { recursive: true, force: true });
   }
+});
+
+test('spawn: an llmProgram without capability grants cannot acquire host tools by omission', async () => {
+  let walletRuns = 0;
+  const handle = await spawn(
+    {
+      role: 'planner',
+      brief: 'go',
+      llmProgram: `() => ({
+        role: 'assistant',
+        content: [{ type: 'toolCall', id: 'unexpected-wallet', name: 'wallet', arguments: {} }],
+        stopReason: 'tool_use',
+      })`,
+    },
+    {
+      tools: {
+        wallet: {
+          name: 'wallet',
+          run: async () => {
+            walletRuns += 1;
+            return toolResult(true, [{ type: 'text', text: 'must not run' }]);
+          },
+        },
+      },
+    },
+  );
+  await handle.done;
+  assert.equal(walletRuns, 0);
+  const toolEnd = handle.events.find((event) => event.type === 'tool_execution_end');
+  assert.equal(toolEnd.result.isError, true);
+  assert.match(toolEnd.result.content[0].text, /wallet not in subagent capability set/);
 });
 
 test('spawn: a custom attenuator is the sole source of a compartment program\'s globals', async () => {

@@ -164,11 +164,16 @@ export function compartmentAttenuator(role, capabilities = null, parentContext =
   // Build the globals policy for this role.
   const globals = buildRolePolicy(role, {});
 
-  // Filter tools to the granted capabilities.
+  // Filter tools to the granted capabilities. Legacy host-realm adapters omit
+  // `capabilities` and retain their historical all-tools behavior, but an
+  // explicit empty set is a real empty set. spawn() supplies that empty set to
+  // an llmProgram that omitted capabilities, so untrusted code never acquires
+  // host tools merely because its caller forgot to name a grant.
   const allTools = parentContext.tools || {};
-  let toolSubset = allTools;
-  if (capabilities && capabilities.length > 0) {
-    toolSubset = {};
+  let toolSubset = {};
+  if (capabilities == null) {
+    toolSubset = allTools;
+  } else {
     for (const cap of capabilities) {
       if (allTools[cap]) toolSubset[cap] = allTools[cap];
     }
