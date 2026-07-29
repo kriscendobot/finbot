@@ -73,7 +73,13 @@ export function priceFramesFromReadings(readings) {
  */
 function priceFramesForCoverage(readings) {
   const frames = [];
-  for (const reading of readings || []) {
+  // `fitReadings` may be supplied directly to an OODA cycle. Bound this
+  // conversion before allocating its derived frame array: `computeDataSufficiency`
+  // already bounds its walk, but a limit applied only after this `for...of`
+  // would leave the opt-in gate able to allocate for an untrusted length.
+  const length = safeLength(readings || []);
+  for (let index = 0; index < length; index += 1) {
+    const reading = safeElementAt(readings || [], index);
     const prices = readOwnDataProperty(reading, 'prices');
     frames.push(prices && typeof prices === 'object' ? prices : null);
   }
@@ -226,28 +232,23 @@ export function round12(value) {
  */
 export function worstAssetPersistence(volFit) {
   const inert = { worstAsset: null, persistence: 0 };
-  let assets;
-  try {
-    assets = volFit && typeof volFit === 'object' ? volFit.assets : null;
-  } catch (_error) {
-    return inert; // a hostile assets accessor is not a regime signal
-  }
+  const assets = readOwnDataProperty(volFit, 'assets');
   if (!assets || typeof assets !== 'object') return inert;
-  let entries;
+  let assetNames;
   try {
-    entries = Object.entries(assets);
+    assetNames = Object.keys(assets);
   } catch (_error) {
     return inert; // a hostile ownKeys trap is not a regime signal
   }
   let worstAsset = null;
   let maxPersistence = -Infinity;
-  for (const [asset, st] of entries) {
-    let persistence;
-    try {
-      persistence = st && typeof st === 'object' ? st.persistence : null;
-    } catch (_error) {
-      continue; // a throwing accessor is no persistence estimate
-    }
+  for (const asset of assetNames) {
+    // A getter is code supplied by the audit caller, not evidence. Read both
+    // levels through descriptors, just as price coverage does, so looking for a
+    // regime cannot execute a hostile accessor before the auditor returns its
+    // fail-closed verdict.
+    const st = readOwnDataProperty(assets, asset);
+    const persistence = readOwnDataProperty(st, 'persistence');
     if (typeof persistence !== 'number' || !Number.isFinite(persistence)) continue;
     // Ties break LEXICOGRAPHICALLY, never on `Object.entries` order: this
     // `worstAsset` rides into `horizonRegime` and thence into the hashed

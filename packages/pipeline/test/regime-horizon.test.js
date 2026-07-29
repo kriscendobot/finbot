@@ -104,6 +104,25 @@ test('worstAssetPersistence: TOTAL over hostile input — the inert answer, neve
     worstAssetPersistence({ assets: { BAD: throwingStat, ATOM: { persistence: 0.8 } } }),
     { worstAsset: 'ATOM', persistence: 0.8 },
   );
+
+  // An accessor is caller-supplied code, not a persistence estimate. The
+  // regime read is shared with the auditor, so it must not invoke either the
+  // top-level map accessor or a per-asset persistence getter.
+  let reads = 0;
+  const accessorStat = {};
+  Object.defineProperty(accessorStat, 'persistence', {
+    enumerable: true,
+    get() { reads += 1; return 0.9; },
+  });
+  assert.deepEqual(worstAssetPersistence({ assets: { ATOM: accessorStat } }), inert);
+  assert.equal(reads, 0);
+  const accessorFit = {};
+  Object.defineProperty(accessorFit, 'assets', {
+    enumerable: true,
+    get() { reads += 1; return { ATOM: accessorStat }; },
+  });
+  assert.deepEqual(worstAssetPersistence(accessorFit), inert);
+  assert.equal(reads, 0);
 });
 
 test('persistenceStress: clamped linear ramp; degenerate span is a step at hi', () => {

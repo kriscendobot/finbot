@@ -77,7 +77,9 @@ export async function runOodaCycle(input) {
     auditorConfig.regimeTailBump = 0.1;
   }
 
-  const windowTicks = config.windowTicks || 10;
+  // Zero is a valid explicit observed-window size (and must remain zero when
+  // the coverage gate is armed); only an omitted value takes the default.
+  const windowTicks = config.windowTicks ?? 10;
   const readings = input.readings
     || windowFromHistory(input.history || [], windowTicks);
 

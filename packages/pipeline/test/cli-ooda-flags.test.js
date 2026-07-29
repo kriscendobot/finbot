@@ -43,6 +43,22 @@ test('finbot-ooda: a threshold the gate could not evaluate exits 2', () => {
   }
 });
 
+test('finbot-ooda: zero threshold exponent forms remain the documented off value', () => {
+  const plain = runCli('--ensemble=8', '--json', '--data-sufficiency-min=0');
+  const exponent = runCli('--ensemble=8', '--json', '--data-sufficiency-min=0e1');
+  assert.equal(exponent.status, 0);
+  assert.equal(exponent.stdout, plain.stdout);
+});
+
+test('finbot-ooda: an armed gate rejects an unusable horizon-stretch override', () => {
+  for (const flag of ['--regime-horizon-stretch=abc', '--regime-horizon-stretch=-0.5',
+    '--regime-horizon-stretch=Infinity']) {
+    const result = runCli(flag, '--data-sufficiency-min=1', '--ensemble=4');
+    assert.equal(result.status, 2, flag);
+    assert.match(result.stderr, /--regime-horizon-stretch must be a finite number/);
+  }
+});
+
 test('finbot-ooda: a horizon that is not a tick count exits 2', () => {
   // The horizon is the DENOMINATOR of the ratio the gate reads, so leaving it
   // unvalidated disarms the gate through the sibling flag: `--horizon=abc` once

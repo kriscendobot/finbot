@@ -161,9 +161,14 @@ function parseArgs(argv) {
   // --significance-alpha. The test is the auditor's own exported predicate — not
   // a restatement of it — so a value this CLI accepts is by construction a value
   // the gate can evaluate.
+  // Look only at the significand. A digit in the exponent does not make zero
+  // positive: `0e1` is the documented off value just as `0` is, whereas
+  // `1e-5000` underflows a genuinely positive threshold and must be rejected.
+  const thresholdSignificand = args.dataSufficiencyMinLiteral == null
+    ? ''
+    : String(args.dataSufficiencyMinLiteral).trim().split(/[eE]/, 1)[0];
   const underflowedPositiveThreshold = args.dataSufficiencyMin === 0
-    && args.dataSufficiencyMinLiteral != null
-    && /[1-9]/.test(args.dataSufficiencyMinLiteral);
+    && /[1-9]/.test(thresholdSignificand);
   if (args.dataSufficiencyMin != null
       && (underflowedPositiveThreshold || !coverageThresholdUsable(args.dataSufficiencyMin))) {
     console.error('finbot-ooda: --data-sufficiency-min must be a finite number >= 0 that, when '
@@ -183,6 +188,17 @@ function parseArgs(argv) {
       && !(Number.isSafeInteger(args.horizon) && args.horizon >= 1)) {
     console.error('finbot-ooda: --horizon must be a whole number of ticks >= 1 '
       + '(for example --horizon=20)');
+    process.exit(2);
+  }
+  // This option changes the projected horizon, which is the gate's
+  // denominator. A malformed explicit value otherwise suppresses the adaptive
+  // default (or is capped after an infinite calculation), silently changing
+  // the coverage an operator asked to enforce.
+  if (coverageGateArmed(args.dataSufficiencyMin)
+      && args.regimeHorizonStretch != null
+      && !(Number.isFinite(args.regimeHorizonStretch) && args.regimeHorizonStretch >= 0)) {
+    console.error('finbot-ooda: --regime-horizon-stretch must be a finite number >= 0 '
+      + '(for example --regime-horizon-stretch=0.5) when the data-sufficiency gate is armed');
     process.exit(2);
   }
   // `--fit-window` is the NUMERATOR's window — the observed history the coverage
