@@ -14,17 +14,23 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { spawn } from '@finbot/harness/spawn';
 
 import { observeOpportunities } from '../oracle-watcher.js';
-import { observerToolRegistry, OBSERVER_TOOL_NAMES } from '../agent-tools.js';
+import { boundObservationWindow, observerToolRegistry, OBSERVER_TOOL_NAMES } from '../agent-tools.js';
 import {
-  dispatchObserver, guardedObservation, observerBrief, makeScriptedObserverLlm, lastObservationResult,
+  dispatchObserver, guardedObservation, reconcileObservation, observerBrief, makeScriptedObserverLlm, lastObservationResult,
 } from '../role-dispatch.js';
+
+const execFileAsync = promisify(execFile);
+const finbotDispatchBin = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../bin/finbot-dispatch');
 
 async function withFinbotRoot(fn) {
   const root = await mkdtemp(path.join(tmpdir(), 'finbot-observe-dispatch-'));
@@ -82,6 +88,27 @@ test('observe stage exposes exactly the read-only detector — no wallet-reachin
     assert.doesNotMatch(name, /wallet|sign|execute|simulate|propose|audit/,
       'no observe-phase tool reaches a wallet / action capability');
   }
+});
+
+test('boundObservationWindow: makes a frozen defensive input snapshot', () => {
+  const input = observeInput();
+  const bound = boundObservationWindow(input);
+  input.readings[0].prices.ATOM = 1;
+  assert.equal(bound.readings[0].prices.ATOM, 10);
+  assert.throws(() => { bound.readings[0].prices.ATOM = 1; }, TypeError);
+});
+
+test('reconcileObservation: rejects JSON-lossy value distinctions', () => {
+  assert.equal(reconcileObservation({ price: NaN }, { price: Infinity }), false);
+  assert.equal(reconcileObservation({ price: -0 }, { price: 0 }), false);
+});
+
+test('finbot-dispatch CLI: reports a guarded observer tool call before downstream stages', async () => {
+  const { stdout } = await execFileAsync(process.execPath, [finbotDispatchBin, '--seed=7', '--json']);
+  const report = JSON.parse(stdout);
+  assert.equal(report.observe.status, 'completed');
+  assert.ok(report.observe.toolCalls.includes('observe_opportunities'));
+  assert.equal(report.opportunities, 1, 'the guarded canonical observation drives the reported loop input');
 });
 
 test('dispatchObserver (scripted LLM): drives the observe stage end-to-end via the deterministic detector', async () => {

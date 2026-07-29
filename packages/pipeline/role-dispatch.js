@@ -27,11 +27,12 @@
  */
 
 import crypto from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 
 import { observeOpportunities } from './oracle-watcher.js';
 import {
   pipelineToolRegistry, PIPELINE_TOOL_NAMES,
-  observerToolRegistry, OBSERVER_TOOL_NAMES,
+  observerToolRegistry, OBSERVER_TOOL_NAMES, boundObservationWindow,
   plannerToolRegistry, PLANNER_TOOL_NAMES,
   auditorToolRegistry, AUDITOR_TOOL_NAMES,
   executorToolRegistry, EXECUTOR_TOOL_NAMES,
@@ -90,9 +91,11 @@ export function observerBrief(input) {
  *
  * @param {object} input  { readings, thresholdBps?, assets? }
  * @param {object} deps
- * @param {Function} deps.spawn        the harness `spawn` function
+ * @param {(spec: object, context: object) => Promise<object>} deps.spawn
+ *   the harness `spawn` function
  * @param {string}   deps.finbotRoot   root holding `roles/<role>/AGENT.md`
- * @param {Function} [deps.llm]        injected LLM; omit to use the harness stub (offline)
+ * @param {(args: object) => Promise<object>} [deps.llm]
+ *   injected LLM; omit to use the harness stub (offline)
  * @returns {Promise<object>} { handle, status, reportedObservation, canonical, reconciled, reportedCrossings, observed, toolCalls, finalText }.
  *   `canonical` is the trusted deterministic recompute and is the ONLY value a
  *   caller should feed downstream (`bin/finbot-dispatch` reads `canonical.crossings`,
@@ -103,7 +106,7 @@ export async function dispatchObserver(input, deps) {
   if (!deps || typeof deps.spawn !== 'function') {
     throw new Error('dispatchObserver: deps.spawn (the harness spawn function) is required');
   }
-  const trustedInput = harden(structuredClone(input || {}));
+  const trustedInput = boundObservationWindow(input || {});
   const tools = observerToolRegistry(trustedInput);
   const capabilities = OBSERVER_TOOL_NAMES;
 
@@ -132,11 +135,7 @@ export async function dispatchObserver(input, deps) {
   } catch {
     // Preserve the guard's fail-closed result shape for malformed trusted input.
   }
-  // Both operands are produced by the same deterministic function over the
-  // same dispatch-bound input. This catches a broken bound tool without
-  // treating model JSON formatting or key order as a safety failure.
-  const reconciled = canonical != null && reportedObservation != null
-    && JSON.stringify(reportedObservation) === JSON.stringify(canonical);
+  const reconciled = reconcileObservation(reportedObservation, canonical);
 
   return {
     handle,
@@ -208,9 +207,27 @@ export function lastObservationResult(events) {
     const result = e.result;
     if (!result || result.isError) continue;
     const jsonBlock = (result.content || []).find((c) => c && c.type === 'json');
-    if (jsonBlock) return jsonBlock.value;
+    if (jsonBlock && jsonBlock.value != null && typeof jsonBlock.value === 'object') return jsonBlock.value;
   }
   return null;
+}
+
+/**
+ * Compare the surfaced and canonical observations without JSON's lossy value
+ * coercions (notably NaN, Infinity, and -0). Any unexpected comparator failure
+ * is a refusal, preserving the guarded handoff's fail-closed behavior.
+ *
+ * @param {object|null} reportedObservation
+ * @param {object|null} canonical
+ * @returns {boolean}
+ */
+export function reconcileObservation(reportedObservation, canonical) {
+  if (reportedObservation == null || canonical == null) return false;
+  try {
+    return isDeepStrictEqual(reportedObservation, canonical);
+  } catch {
+    return false;
+  }
 }
 
 /**

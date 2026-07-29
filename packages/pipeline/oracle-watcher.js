@@ -51,7 +51,10 @@ export function observeOpportunities(input, opts = {}) {
 
   /** @type {Opportunity[]} */
   const crossings = [];
-  for (const asset of assets.slice().sort()) {
+  // An allowlist is an authority restriction, not a request to emit duplicate
+  // events. Normalize it before iterating so repeated caller entries cannot
+  // produce duplicate crossings for one observed asset.
+  for (const asset of [...new Set(assets)].sort()) {
     const ref = first.prices[asset];
     const cur = last.prices[asset];
     if (ref == null || cur == null || ref <= 0) continue;

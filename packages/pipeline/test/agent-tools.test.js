@@ -65,6 +65,16 @@ test('observerToolRegistry: requires trusted dispatch input', () => {
   assert.throws(() => observerToolRegistry(), /dispatch-bound trusted input/);
 });
 
+test('observe_opportunities tool: deduplicates a trusted asset allowlist', async () => {
+  const tool = observerToolRegistry({
+    readings: readings([10, 9.5, 9]), thresholdBps: 50, assets: ['ATOM', 'ATOM'],
+  }).observe_opportunities;
+  const result = await tool.run({});
+  const jsonBlock = result.content.find((c) => c.type === 'json');
+  assert.equal(jsonBlock.value.crossings.length, 1);
+  assert.equal(jsonBlock.value.crossings[0].asset, 'ATOM');
+});
+
 test('score_opportunities tool: empty inputs degrade to no-action, not an error', async () => {
   const tool = pipelineToolRegistry().score_opportunities;
   const result = await tool.run({ opportunities: [], readings: [], portfolio: { cash: 0, balances: {} } });

@@ -2,13 +2,12 @@
  * Pipeline functions, exposed as harness tools.
  *
  * The OODA roles are deterministic functions over the simulator world (see
- * this package's `index.js`). This module wraps the orient-phase scoring
- * functions as `@finbot/harness` Tool definitions so an inference-driven
- * subagent can CALL them as tools — the "automatic inference, automation born
- * from inference" blend the design describes: the analyzer subagent reasons in
- * natural language over the oracle-watcher output, then delegates the actual
- * risk-adjusted scoring to the deterministic `analyze` function rather than
- * doing arithmetic in its head.
+ * this package's `index.js`). This module wraps the OBSERVE, ORIENT, DECIDE,
+ * AUDIT, and dry-run ACT functions as `@finbot/harness` Tool definitions so an
+ * inference-driven subagent can CALL them as tools — the "automatic inference,
+ * automation born from inference" blend the design describes. Each stage
+ * reasons in natural language but delegates deterministic computation to its
+ * corresponding pipeline function rather than doing it by hand.
  *
  * Each tool's `run` calls the pure function and returns a `toolResult` whose
  * JSON block is the function's structured output (so the harness loop feeds it
@@ -21,6 +20,10 @@
  * nor the pipeline, so the wiring that needs the pipeline's functions belongs
  * here, where that dependency is already paid.
  */
+
+// `harden` is used to snapshot dispatch-bound inputs. Import SES here rather
+// than relying on a caller having happened to import cap-attenuation first.
+import 'ses';
 
 import { toolResult } from '@finbot/harness/schemas';
 import { Portfolio } from '@finbot/simulator/portfolio';
@@ -65,10 +68,7 @@ export const PIPELINE_TOOL_NAMES = ['score_opportunities', 'realized_volatility'
  * @returns {Record<string, object>} a registry of `assertToolDef`-shaped tools
  */
 export function observerToolRegistry(trustedInput) {
-  if (trustedInput == null) {
-    throw new TypeError('observerToolRegistry requires dispatch-bound trusted input');
-  }
-  const tools = [observeOpportunitiesTool(harden(structuredClone(trustedInput)))];
+  const tools = [observeOpportunitiesTool(boundObservationWindow(trustedInput))];
   const registry = {};
   for (const t of tools) registry[t.name] = t;
   return registry;
@@ -76,6 +76,21 @@ export function observerToolRegistry(trustedInput) {
 
 /** Names of the tools in {@link observerToolRegistry}, for capability subsets. */
 export const OBSERVER_TOOL_NAMES = ['observe_opportunities'];
+
+/**
+ * Create the frozen, defensive snapshot used by an OBSERVE dispatch. Both the
+ * tool closure and the canonical recompute receive this exact object so model
+ * arguments and later caller mutation cannot alter the input set.
+ *
+ * @param {object} input trusted observer input
+ * @returns {object} a hardened deep clone
+ */
+export function boundObservationWindow(input) {
+  if (input == null || typeof input !== 'object') {
+    throw new TypeError('observerToolRegistry requires dispatch-bound trusted input');
+  }
+  return harden(structuredClone(input));
+}
 
 /**
  * Build the decide-phase (planner) tool registry: the deterministic `plan`
@@ -464,10 +479,10 @@ function observeOpportunitiesTool(trustedInput) {
       try {
         // The model chooses whether to call the detector, but not its inputs.
         const source = trustedInput;
-        const opts = {};
-        if (source.thresholdBps != null) opts.thresholdBps = source.thresholdBps;
-        if (source.assets) opts.assets = source.assets;
-        const observed = observeOpportunities({ readings: source.readings || [] }, opts);
+        const options = {};
+        if (source.thresholdBps != null) options.thresholdBps = source.thresholdBps;
+        if (source.assets) options.assets = source.assets;
+        const observed = observeOpportunities({ readings: source.readings || [] }, options);
         return toolResult(true, [
           { type: 'json', value: observed },
           { type: 'text', text: `observe_opportunities: ${observed.crossings.length} crossing(s)` },

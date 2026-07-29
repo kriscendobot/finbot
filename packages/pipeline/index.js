@@ -38,13 +38,13 @@ export { runOodaCycle } from './ooda-cycle.js';
 export { makeDryRunCompute, deriveSeed } from './driver-compute.js';
 export {
   pipelineToolRegistry, PIPELINE_TOOL_NAMES,
-  observerToolRegistry, OBSERVER_TOOL_NAMES,
+  observerToolRegistry, OBSERVER_TOOL_NAMES, boundObservationWindow,
   plannerToolRegistry, PLANNER_TOOL_NAMES,
   auditorToolRegistry, AUDITOR_TOOL_NAMES,
   executorToolRegistry, EXECUTOR_TOOL_NAMES,
 } from './agent-tools.js';
 export {
-  dispatchObserver, guardedObservation, observerBrief, makeScriptedObserverLlm, lastObservationResult,
+  dispatchObserver, guardedObservation, reconcileObservation, observerBrief, makeScriptedObserverLlm, lastObservationResult,
   dispatchAnalyzer, analyzerBrief, makeScriptedAnalyzerLlm,
   extractToolCalls, lastScoringResult,
   dispatchPlanner, plannerBrief, makeScriptedPlannerLlm, lastProposalResult,
