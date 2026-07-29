@@ -242,13 +242,13 @@ export function worstAssetPersistence(volFit) {
   let worstAsset = null;
   let maxPersistence = -Infinity;
   for (const [asset, st] of entries) {
-    let p;
+    let persistence;
     try {
-      p = st && typeof st === 'object' ? st.persistence : null;
+      persistence = st && typeof st === 'object' ? st.persistence : null;
     } catch (_error) {
       continue; // a throwing accessor is no persistence estimate
     }
-    if (typeof p !== 'number' || !Number.isFinite(p)) continue;
+    if (typeof persistence !== 'number' || !Number.isFinite(persistence)) continue;
     // Ties break LEXICOGRAPHICALLY, never on `Object.entries` order: this
     // `worstAsset` rides into `horizonRegime` and thence into the hashed
     // artifact, so a key-order tie-break would make `projectionId` depend on how
@@ -257,8 +257,8 @@ export function worstAssetPersistence(volFit) {
     // The `worstAsset != null` guard is what makes the comparison well-typed:
     // it holds whenever `maxPersistence` is finite, but only the explicit test
     // says so to a reader (or a checker) of this line alone.
-    if (p > maxPersistence || (p === maxPersistence && worstAsset != null && asset < worstAsset)) {
-      maxPersistence = p;
+    if (persistence > maxPersistence || (persistence === maxPersistence && worstAsset != null && asset < worstAsset)) {
+      maxPersistence = persistence;
       worstAsset = asset;
     }
   }
