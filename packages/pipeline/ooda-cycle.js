@@ -81,7 +81,10 @@ export async function runOodaCycle(input) {
   // the coverage gate is armed); only an omitted value takes the default.
   const windowTicks = config.windowTicks ?? 10;
   const readings = input.readings
-    || windowFromHistory(input.history || [], windowTicks);
+    // `slice(-0)` means `slice(0)`, so delegating an explicit zero to
+    // windowFromHistory would select the entire history — the exact opposite
+    // of a zero-tick observed window and an inflation of gate evidence.
+    || (windowTicks === 0 ? [] : windowFromHistory(input.history || [], windowTicks));
 
   // Separable fit window: the oracle deviation and realized-vol reads want a
   // short, recent window (`readings`), but the GARCH vol-surface fit wants a
