@@ -180,7 +180,12 @@ export function round12(value) {
  */
 export function worstAssetPersistence(volFit) {
   const inert = { worstAsset: null, persistence: 0 };
-  const assets = volFit && typeof volFit === 'object' ? volFit.assets : null;
+  let assets;
+  try {
+    assets = volFit && typeof volFit === 'object' ? volFit.assets : null;
+  } catch (_error) {
+    return inert; // a hostile assets accessor is not a regime signal
+  }
   if (!assets || typeof assets !== 'object') return inert;
   let entries;
   try {
@@ -558,14 +563,10 @@ function measureHistoryCoverage(frames, assets) {
  * only as well-evidenced as its thinnest instrument, so a freshly-listed asset
  * inside a long window cannot hide behind its better-observed neighbours.
  *
- * "Worst-covered" ranges over the assets the CALLER names, and `project()` names
- * the projected TARGET weights. It is therefore the worst-covered *target*, not
- * the worst-covered constituent of the projected portfolio: `maxStepPct` /
- * `maxDayPct` bound the exit, so a residual untargeted holding persists across
- * the horizon and contributes to the terminal equity the gate protects while
- * being invisible here. Widening the set to targets-union-holdings is the honest
- * fix and would change every reported ratio, so it is deferred rather than
- * silently assumed; until then read the descriptor as bounding the target set.
+ * "Worst-covered" ranges over the assets the CALLER names. `project()` names the
+ * union of its projected targets and its current portfolio holdings: bounded
+ * exits can retain an untargeted holding through the horizon, so that holding
+ * must not be invisible to the terminal-equity gate.
  *
  * Measurement only, no policy. The descriptor carries counts and the ratio; the
  * consumer (the auditor's gate, the CLI report) owns the threshold it is judged
@@ -759,8 +760,9 @@ export function project(input, config = {}) {
   // (`fitReadings`, the longer rolling window when supplied), against the
   // possibly regime-stretched `horizon` — so a regime that stretched the horizon
   // correctly lowers the coverage it must be justified against. Coverage is
-  // measured on the assets actually projected and reported for the worst-covered
-  // one, so a thin newcomer in a well-observed portfolio still reads as thin.
+  // measured on every asset that can contribute to the projected terminal equity
+  // and reported for the worst-covered one, so a thin newcomer or residual
+  // holding in a well-observed portfolio still reads as thin.
   // Off by default (`config.reportDataSufficiency` unset) -> the descriptor is
   // null and `projectionArtifact` omits it, so the hashed artifact and its
   // content hash stay byte-identical to before; computed only when asked.
@@ -768,7 +770,12 @@ export function project(input, config = {}) {
     ? computeDataSufficiency({
         frames: priceFramesFromReadings(fitReadings),
         horizon,
-        assets: Object.keys(input.targetWeights || {}),
+        assets: [...new Set([
+          ...Object.keys(input.targetWeights || {}),
+          ...Object.entries(input.world.portfolio.balances || {})
+            .filter(([_asset, balance]) => typeof balance === 'number' && balance > 0)
+            .map(([asset]) => asset),
+        ])],
       })
     : null;
 

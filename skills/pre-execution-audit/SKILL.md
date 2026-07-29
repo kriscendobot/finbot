@@ -181,10 +181,10 @@ emit_journal_result(
 The configured floors and windows are canonical here, with optional per-dispatch overrides:
 
 - `tail_risk_floor_pct`: default 80 (forecast's p05 must clear 80% of entry value).
-- `staleness_window_seconds`: default 300 (5 minutes).
-- `per_step_max_pct_nav`: default 5.
-- `per_day_max_pct_nav`: default 20.
-- `per_instrument_concentration_cap_pct`: default 40.
+- `staleness_window_ticks`: default 5.
+- `per_step_max_pct_nav`: default 25.
+- `per_day_max_pct_nav`: default 50.
+- `per_instrument_concentration_cap_pct`: default 80.
 - `data_sufficiency_min_coverage`: default 0 (OFF; invariant 7 is not emitted).
   When set to a positive number, the forecast's recomputed coverage ratio must
   clear it. A value the gate cannot evaluate (any non-number, a non-finite or

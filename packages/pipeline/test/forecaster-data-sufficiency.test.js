@@ -425,6 +425,29 @@ test('project: reported coverage is deterministic and tracks the horizon', () =>
   assert.equal(projectionId(a), projectionId(b));
 });
 
+test('project: coverage includes residual holdings, not only target weights', () => {
+  const world = makeWorld({
+    portfolio: { cash: 1000, balances: { ATOM: 50, OSMO: 1 }, initialPrice: 10 },
+    priceFeed: {
+      kind: 'gbm', initialPrices: { ATOM: 10, OSMO: 5 },
+      volatilities: { ATOM: 0.02, OSMO: 0.02 }, drifts: { ATOM: 0, OSMO: 0 }, seed: 7,
+    },
+    seed: 7,
+    tag: 'ds-residual-holding',
+  });
+  const readings = DIP.map((price, index) => ({
+    t: index,
+    prices: index === DIP.length - 1 ? { ATOM: price, OSMO: 5 } : { ATOM: price },
+  }));
+  const projection = project(
+    { world, targetWeights: { ATOM: 0.5 }, readings },
+    { ensembleSize: 8, horizon: 5, baseSeed: 100, render: false, reportDataSufficiency: true },
+  );
+  assert.equal(projection.dataSufficiency.worstAsset, 'OSMO');
+  assert.equal(projection.dataSufficiency.historyReturns, 0);
+  assert.equal(projection.dataSufficiency.coverageRatio, 0);
+});
+
 test('project: a horizon that outruns the window reports thin coverage', () => {
   const window = readingsOf(DIP.slice(0, 4)); // 4 frames -> 3 returns
   const p = project(

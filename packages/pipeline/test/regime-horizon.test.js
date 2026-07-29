@@ -85,8 +85,12 @@ test('worstAssetPersistence: TOTAL over hostile input — the inert answer, neve
   const throwingStat = Object.defineProperty({}, 'persistence', {
     get() { throw new Error('boom'); }, enumerable: true,
   });
+  const throwingAssets = Object.defineProperty({}, 'assets', {
+    get() { throw new Error('boom'); }, enumerable: true,
+  });
   for (const [label, volFit] of [
     ['a throwing ownKeys trap', { assets: throwingOwnKeys }],
+    ['a throwing assets accessor', throwingAssets],
     ['a throwing persistence accessor', { assets: { ATOM: throwingStat } }],
     ['a numeric assets map', { assets: 7 }],
     ['a string assets map', { assets: 'ATOM' }],
