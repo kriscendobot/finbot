@@ -56,7 +56,10 @@ function readOwnDataProperty(object, key) {
  */
 export function priceFramesFromReadings(readings) {
   const frames = [];
-  for (const r of readings || []) {
+  const source = readings || [];
+  const length = safeLength(source);
+  for (let index = 0; index < length; index += 1) {
+    const r = safeElementAt(source, index);
     const prices = readOwnDataProperty(r, 'prices');
     if (prices && typeof prices === 'object') frames.push(prices);
   }
@@ -77,9 +80,10 @@ function priceFramesForCoverage(readings) {
   // conversion before allocating its derived frame array: `computeDataSufficiency`
   // already bounds its walk, but a limit applied only after this `for...of`
   // would leave the opt-in gate able to allocate for an untrusted length.
-  const length = safeLength(readings || []);
+  const source = readings || [];
+  const length = safeLength(source);
   for (let index = 0; index < length; index += 1) {
-    const reading = safeElementAt(readings || [], index);
+    const reading = safeElementAt(source, index);
     const prices = readOwnDataProperty(reading, 'prices');
     frames.push(prices && typeof prices === 'object' ? prices : null);
   }
@@ -788,7 +792,8 @@ export function project(input, config = {}) {
   // The adaptive fit prefers a longer `fitReadings` when the caller supplies one
   // (engaging the per-asset MLE on a short live window); else it fits from the
   // same `readings` as before. Both windows end at the current tick.
-  const fitReadings = input.fitReadings && input.fitReadings.length >= (input.readings || []).length
+  const fitReadings = input.fitReadings
+    && safeLength(input.fitReadings) >= safeLength(input.readings || [])
     ? input.fitReadings
     : input.readings;
   const { world: forecastWorld, fit: volFit } = fitForecastWorld(
@@ -822,7 +827,10 @@ export function project(input, config = {}) {
         frames: priceFramesForCoverage(fitReadings),
         horizon,
         assets: [...new Set([
-          ...Object.keys(input.targetWeights || {}),
+          ...Object.entries(input.targetWeights || {})
+            .filter(([_asset, weight]) => typeof weight === 'number'
+              && Number.isFinite(weight) && weight !== 0)
+            .map(([asset]) => asset),
           ...Object.entries(input.world.portfolio.balances || {})
             .filter(([_asset, balance]) => typeof balance === 'number' && balance !== 0)
             .map(([asset]) => asset),

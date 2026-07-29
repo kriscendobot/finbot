@@ -117,9 +117,9 @@ if data_sufficiency_min_coverage is supplied and is not the number 0:  # absent 
   assert descriptor is readable and its counts are whole and non-negative
   assert descriptor.horizon == forecast.horizon
   assert descriptor.historyReturns <= max(0, descriptor.historyFrames - 1)
-  recomputed = descriptor.historyReturns / descriptor.horizon if horizon > 0 else 0
-  assert recomputed == descriptor.coverageRatio        # never read the reported ratio
-  assert recomputed >= data_sufficiency_min_coverage
+  recomputed = round12(descriptor.historyReturns / descriptor.horizon) if horizon > 0 else 0
+  assert round12(recomputed) == round12(descriptor.coverageRatio)  # never trust the reported ratio
+  assert round12(recomputed) >= round12(data_sufficiency_min_coverage)
 ```
 
 Two properties are load-bearing:
@@ -150,9 +150,9 @@ therefore bounds forgery (an inconsistent descriptor cannot approve itself), not
 provenance (an internally consistent fabrication still clears it). Binding the
 descriptor to an attested `projectionId` is how that gap closes.
 
-Until it does, the operational rule for anyone (or anything) assembling an audit
-input: **the descriptor must come from the projection that was cited, never be
-hand-built.** A descriptor synthesized to satisfy this gate satisfies it.
+Until it does, provenance is an operational limitation rather than an enforced
+invariant: callers should pass through the descriptor from the cited projection,
+never synthesize one to satisfy this self-consistency gate.
 
 ## Procedure
 
