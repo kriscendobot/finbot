@@ -424,7 +424,7 @@ test('audit: a zero-tick projection has no exemption — the armed gate has NO u
 
   // A forecast whose own horizon cannot be read is refuted one step earlier, so
   // the descriptor's self-consistency never gets to speak for it.
-  for (const horizon of [undefined, null, '20', NaN, Infinity, 2.5, -0.5]) {
+  for (const horizon of [undefined, null, '20', NaN, Infinity, 2.5, -0.5, 2 ** 53]) {
     const bypass = audit(
       auditInputFor({ horizon, p05Equity: 1000, dataSufficiency: zeroTick }),
       armed,

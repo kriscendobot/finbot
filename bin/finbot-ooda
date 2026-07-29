@@ -20,7 +20,8 @@
  *   --drift=F        per-tick GBM drift for ATOM (default -0.01, biases a dip)
  *   --vol=F          per-tick GBM volatility for ATOM (default 0.02)
  *   --warmup=N       price-feed warmup ticks before the cycle (default 10); a whole tick count
- *   --fit-window=N   longer rolling window for the GARCH vol-surface fit only (default 0 = warmup);
+ *   --fit-window=N   longer rolling window for the GARCH vol-surface fit and data-sufficiency
+ *                    coverage measurement (default 0 = warmup);
  *                    set > warmup (e.g. 13+) so `--adaptive-vol=mle` engages the per-asset MLE while
  *                    the oracle deviation / realized-vol reads stay on the short `warmup` window.
  *                    It is the observed window the coverage ratio --data-sufficiency-min gates on

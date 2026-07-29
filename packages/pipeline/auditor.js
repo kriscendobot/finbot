@@ -313,7 +313,7 @@ function finiteNumber(value) {
  * @returns {number|null}
  */
 function wholeCount(value) {
-  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : null;
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
 /**

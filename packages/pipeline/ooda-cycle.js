@@ -45,7 +45,7 @@ import { navOf } from './rebalance.js';
  * @param {object} input
  * @param {import('@finbot/simulator/world').World} input.world   already warmed up (history present on its sim, or pass `readings`)
  * @param {Array<{ t: number, prices: Record<string, number> }>} [input.readings]   oracle window; else derived from `input.history`
- * @param {Array<{ t: number, prices: Record<string, number> }>} [input.fitReadings]   longer rolling window for the vol-surface fit only; else derived from `input.history` via `config.fitWindowTicks`, else the oracle window
+ * @param {Array<{ t: number, prices: Record<string, number> }>} [input.fitReadings]   longer rolling window for the vol-surface fit and data-sufficiency coverage; else derived from `input.history` via `config.fitWindowTicks`, else the oracle window
  * @param {Array<object>} [input.history]   simulator history to window from when `readings` absent
  * @param {object} [input.config]           per-stage config; `config.windowTicks` (oracle/realized-vol window, default 10) and `config.fitWindowTicks` (longer vol-fit window, default = windowTicks) among them
  * @param {object} [input.recorder]         optional { record(entry): Promise<string> }
