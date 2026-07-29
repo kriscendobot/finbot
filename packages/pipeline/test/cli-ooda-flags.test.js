@@ -126,7 +126,7 @@ test('finbot-ooda: a window flag that is not a tick count exits 2', () => {
   // false, and the window silently collapses back to `--warmup` — the operator
   // gets a rejection naming a gate they believe they widened past.
   for (const flag of ['--fit-window=abc', '--fit-window=2.5', '--fit-window=-1', '--fit-window',
-    '--warmup=abc', '--warmup=2.5']) {
+    '--warmup=abc', '--warmup=2.5', '--warmup', '--warmup=']) {
     const result = runCli(flag, '--data-sufficiency-min=1', '--ensemble=4');
     assert.equal(result.status, 2, flag);
     assert.match(result.stderr, /must be a whole number of ticks/);

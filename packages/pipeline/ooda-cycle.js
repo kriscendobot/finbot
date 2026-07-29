@@ -21,7 +21,7 @@ import { observeOpportunities, windowFromHistory } from './oracle-watcher.js';
 import { analyze } from './analyzer.js';
 import { project } from './forecaster.js';
 import { plan } from './planner.js';
-import { audit, coverageGateArmed } from './auditor.js';
+import { audit, coverageGateArmed, sanitizeLabel } from './auditor.js';
 import { execute } from './executor.js';
 import { navOf } from './rebalance.js';
 
@@ -289,7 +289,18 @@ function forecastBody(cycleId, f) {
     `p05 / p50 / p95: ${f.summary.p05.toFixed(2)} / ${f.summary.p50.toFixed(2)} / ${f.summary.p95.toFixed(2)}`,
     `pProfit: ${(f.pProfit * 100).toFixed(1)}%`,
   ];
-  if (f.dataSufficiency) lines.push(`data_sufficiency: ${JSON.stringify(f.dataSufficiency)}`);
+  if (f.dataSufficiency) {
+    // This line enters the journal as Markdown. JSON escapes C0 controls but
+    // leaves Unicode line separators and bidi controls intact, so preserve the
+    // descriptor while applying the same recorder-safe label discipline the
+    // auditor uses for its verdict detail.
+    const worstAsset = f.dataSufficiency.worstAsset;
+    const recorded = {
+      ...f.dataSufficiency,
+      worstAsset: typeof worstAsset === 'string' ? sanitizeLabel(worstAsset) : worstAsset,
+    };
+    lines.push(`data_sufficiency: ${JSON.stringify(recorded)}`);
+  }
   lines.push('');
   return lines.join('\n');
 }

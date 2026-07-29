@@ -955,10 +955,11 @@ binary pre-execution gate for the graded planner downweight it also asked for.
   verdict is a precondition for irreversible action; the sibling tail-risk floor
   already fails closed on a missing forecast. An unusable threshold fails closed
   on the same reasoning, so a malformed knob can never degrade to no gate at all
-  — and "unusable" is read *strictly*: only a `number` arms the gate, because
-  `Number('')`, `Number(false)`, and `Number([])` are all `0`, which is exactly
-  the OFF value, so a coercing read would hand an operator who asked for a gate
-  no gate at all. So is a positive threshold that quantizes to zero at the
+  — and "unusable" is read *strictly*: only a finite non-negative `number` can
+  be usable, because `Number('')`, `Number(false)`, and `Number([])` are all
+  `0`, which is exactly the OFF value, so a coercing read would hand an operator
+  who asked for a gate no gate at all. A supplied non-number therefore arms the
+  invariant and makes it fail closed. So does a positive threshold that quantizes to zero at the
   descriptor's own 12-decimal resolution, which no coverage could fail (that
   boundary is where `round12` rounds up, just above 5e-13, not 1e-12 itself).
 - **The gate recomputes; it does not read a verdict.** Coverage is recomputed
