@@ -179,7 +179,7 @@ function parseArgs(argv) {
   // coverage requirement anyway (the armed gate has NO unconditional pass — see
   // `dataSufficiencyGate`), so it is not a cycle worth running.
   if (coverageGateArmed(args.dataSufficiencyMin)
-      && !(Number.isInteger(args.horizon) && args.horizon >= 1)) {
+      && !(Number.isSafeInteger(args.horizon) && args.horizon >= 1)) {
     console.error('finbot-ooda: --horizon must be a whole number of ticks >= 1 '
       + '(for example --horizon=20)');
     process.exit(2);
@@ -192,9 +192,9 @@ function parseArgs(argv) {
   // past. A flag that arms a safety gate validates every sibling flag the gate's
   // arithmetic reads, not only the one it divides by. 0 is the documented
   // "unset" value (fall back to --warmup); --warmup itself takes the same shape.
-  for (const [flag, value, min] of [['--fit-window', args.fitWindow, 0], ['--warmup', args.warmup, 0]]) {
-    if (!(Number.isInteger(value) && value >= min)) {
-      console.error(`finbot-ooda: ${flag} must be a whole number of ticks >= ${min} `
+  for (const [flag, value, minimum] of [['--fit-window', args.fitWindow, 0], ['--warmup', args.warmup, 0]]) {
+    if (!(Number.isSafeInteger(value) && value >= minimum)) {
+      console.error(`finbot-ooda: ${flag} must be a whole number of ticks >= ${minimum} `
         + `(for example ${flag}=20)`);
       process.exit(2);
     }
