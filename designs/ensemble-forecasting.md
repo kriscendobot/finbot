@@ -64,7 +64,7 @@ A 10,000-simulation ensemble on a non-trivial program takes minutes. The orchest
 ## Open questions
 
 - What is the right N for routine forecasts vs. high-confidence pre-rebalance forecasts? N=10,000 is the default; tail risk at p01 / p99 is noisy there.
-- How does the forecaster handle programs whose horizon exceeds the historical window? (A 30-day forecast of a one-week-old instrument has thin data.) **Naming it: resolved** — see *Notes from the field (2026-07-28 — forecast data-sufficiency)*. The downweighting half is still open: what landed is a binary auditor gate, not the graded planner downweight this question originally proposed.
+- How does the forecaster handle programs whose horizon exceeds the historical window? (A 30-day forecast of a one-week-old instrument has thin data.) **Partially resolved:** the binary auditor gate is described in *Notes from the field (2026-07-28 — forecast data-sufficiency)*; the graded planner-downweighting half remains open.
 - Does the forecaster vend its output as a Far ref to the analyzer (per `skills/far-exo-vending`) or as a journal-entry path the analyzer reads? The latter is simpler at bootstrap; the former is the right shape if forecasts get large enough that we want to lazy-load.
 
 ## Implementation pointers
@@ -1071,7 +1071,7 @@ binary pre-execution gate for the graded planner downweight it also asked for.
   with a diagnosis.
 - **`ownness-prototype-independence.test.js` imports `forecaster.js` and nothing
   else, deliberately.** `auditor.js` reaches `cap-attenuation.js` transitively
-  (auditor → substrates → cap-attenuation), whose import calls `lockdown()` and
+  (auditor -> substrates -> cap-attenuation), whose import calls `lockdown()` and
   freezes `Object.prototype` — so the prototype-pollution attack cannot even be
   staged in a process that imported it. That shields the auditor's half of the
   `'value' in descriptor` hazard today, by an import chain with nothing to do

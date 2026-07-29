@@ -75,15 +75,15 @@ export function audit(input, config = {}) {
   // read per knob, uniformly — the same discipline the forecast's own fields get
   // below, on the same untrusted `audit_proposal` / fire-time re-audit surface.
   const withDefault = (value, fallback) => (value != null ? value : fallback);
-  const maxStepPct = withDefault(config.maxStepPct, 0.25);
-  const maxDayPct = withDefault(config.maxDayPct, 0.50);
-  const concentrationCapPct = withDefault(config.concentrationCapPct, 0.80);
-  const tailFloorPct = withDefault(config.tailFloorPct, 0.80);
-  const regimeTailBump = withDefault(config.regimeTailBump, 0);
-  const regimePersistenceLo = withDefault(config.regimePersistenceLo, 0.70);
-  const regimePersistenceHi = withDefault(config.regimePersistenceHi, 0.98);
-  const regimeTailFloorCap = withDefault(config.regimeTailFloorCap, 0.98);
-  const stalenessWindowTicks = withDefault(config.stalenessWindowTicks, 5);
+  const maxStepPct = withDefault(readOwn(config, 'maxStepPct'), 0.25);
+  const maxDayPct = withDefault(readOwn(config, 'maxDayPct'), 0.50);
+  const concentrationCapPct = withDefault(readOwn(config, 'concentrationCapPct'), 0.80);
+  const tailFloorPct = withDefault(readOwn(config, 'tailFloorPct'), 0.80);
+  const regimeTailBump = withDefault(readOwn(config, 'regimeTailBump'), 0);
+  const regimePersistenceLo = withDefault(readOwn(config, 'regimePersistenceLo'), 0.70);
+  const regimePersistenceHi = withDefault(readOwn(config, 'regimePersistenceHi'), 0.98);
+  const regimeTailFloorCap = withDefault(readOwn(config, 'regimeTailFloorCap'), 0.98);
+  const stalenessWindowTicks = withDefault(readOwn(config, 'stalenessWindowTicks'), 5);
   // The threshold's arming and usability tests are the exported predicates, so
   // the CLI's flag validation and the cycle's evidence auto-enable cannot drift
   // from the gate they claim to mirror.
@@ -576,11 +576,11 @@ function readDataSufficiency(forecast) {
  * close the remaining gap; until then, treat this invariant as measuring
  * self-consistency, not provenance.
  *
- * @param {object} args
- * @param {unknown} args.forecast          untrusted, caller-supplied
- * @param {number} args.minCoverage        the threshold, NaN when unusable
- * @param {boolean} args.minCoverageUsable
- * @param {unknown} args.rawMinCoverage    as supplied, for the unusable-threshold detail
+ * @param {object} input
+ * @param {unknown} input.forecast          untrusted, caller-supplied
+ * @param {number} input.minCoverage        the threshold, NaN when unusable
+ * @param {boolean} input.minCoverageUsable
+ * @param {unknown} input.rawMinCoverage    as supplied, for the unusable-threshold detail
  * @returns {{ pass: boolean, detail: string }}
  */
 function dataSufficiencyGate({ forecast, minCoverage, minCoverageUsable, rawMinCoverage }) {

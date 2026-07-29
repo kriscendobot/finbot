@@ -624,13 +624,13 @@ function measureHistoryCoverage(frames, assets) {
  * Pure and deterministic (counts + arithmetic, no RNG), so a projection that
  * carries the descriptor still hashes stably.
  *
- * @param {object} args
- * @param {unknown} args.frames   the observed price frames used — an array of per-tick price maps
+ * @param {object} input
+ * @param {unknown} input.frames   the observed price frames used — an array of per-tick price maps
  *   (`{ ASSET: price }`, what `priceFramesFromReadings` returns), or a bare count. The frames are
  *   untrusted shapes, so each price is read from its own descriptor and type-checked rather than assumed
- * @param {unknown} args.horizon   ticks projected forward; anything that is not a non-negative integer
+ * @param {unknown} input.horizon   ticks projected forward; anything that is not a non-negative integer
  *   tick count is reported as UNMEASURABLE (`horizon: null`) rather than normalized to a number
- * @param {unknown} [args.assets]   the assets projected; coverage is the worst-covered of these. Omitted,
+ * @param {unknown} [input.assets]   the assets projected; coverage is the worst-covered of these. Omitted,
  *   EMPTY (as `project()` passes when `targetWeights` is empty), or carrying any element that is not an
  *   asset name measures ZERO and reports `worstAsset: null`: with no asset set, no predicate can tell a
  *   price from any other positive number, so there is nothing to measure rather than everything
