@@ -81,7 +81,15 @@ export function audit(input, config = {}) {
   // The threshold's arming and usability tests are the exported predicates, so
   // the CLI's flag validation and the cycle's evidence auto-enable cannot drift
   // from the gate they claim to mirror.
-  const rawMinCoverage = config.dataSufficiencyMinCoverage;
+  let rawMinCoverage;
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(config, 'dataSufficiencyMinCoverage');
+    rawMinCoverage = descriptor && Object.hasOwn(descriptor, 'value')
+      ? descriptor.value
+      : descriptor ? Symbol('unreadable data-sufficiency threshold') : undefined;
+  } catch (_error) {
+    rawMinCoverage = Symbol('unreadable data-sufficiency threshold');
+  }
   const dataSufficiencyMinCoverage = typeof rawMinCoverage === 'number' ? rawMinCoverage : NaN;
   const minCoverageUsable = coverageThresholdUsable(rawMinCoverage);
   const dataSufficiencyArmed = coverageGateArmed(rawMinCoverage);

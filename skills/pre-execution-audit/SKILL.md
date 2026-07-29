@@ -72,8 +72,8 @@ Every cited oracle reading is within the configured staleness window:
 now = current_iso_time()
 for oracle_ref in proposal.cited_oracle_readings:
   reading = read_journal(oracle_ref)
-  age_seconds = now - reading.read_at
-  assert age_seconds <= configured_staleness_window_seconds
+  age_ticks = current_tick - reading.tick
+  assert age_ticks <= configured_staleness_window_ticks
 ```
 
 ### 6. On-chain verifiability
@@ -188,7 +188,8 @@ The configured floors and windows are canonical here, with optional per-dispatch
 - `data_sufficiency_min_coverage`: default 0 (OFF; invariant 7 is not emitted).
   When set to a positive number, the forecast's recomputed coverage ratio must
   clear it. A value the gate cannot evaluate (any non-number, a non-finite or
-  negative number, or a positive one below the descriptor's 1e-12 resolution)
+  negative number, or a positive one that rounds to zero at the descriptor's
+  12-decimal resolution)
   ARMS the gate and fails it closed rather than degrading to no gate at all.
 
 The maintainer adjusts these via a journal `message: liaison → *` entry; the auditor reads the most recent setting from the journal.

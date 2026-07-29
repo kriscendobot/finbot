@@ -419,11 +419,10 @@ function safeLength(arrayLike) {
  * @param {(frame: unknown) => boolean} observed
  * @returns {{ historyFrames: number, historyReturns: number }}
  */
-function countObservedFramesAndReturns(frames, observed) {
+function countObservedFramesAndReturns(frames, observed, length = safeLength(frames)) {
   let historyFrames = 0;
   let historyReturns = 0;
   let run = 0;
-  const length = safeLength(frames);
   for (let i = 0; i < length; i += 1) {
     if (!observed(safeElementAt(frames, i))) { run = 0; continue; }
     run += 1;
@@ -468,7 +467,7 @@ function namedAssets(assets) {
     if (typeof asset !== 'string') return { named: [], malformed: true };
     named.push(asset);
   }
-  return { named, malformed: false };
+  return { named: [...new Set(named)], malformed: false };
 }
 
 /**
@@ -520,17 +519,21 @@ function measureHistoryCoverage(frames, assets) {
   // docstring: there is nothing to intersect an "is this a price?" predicate
   // against, so the only honest count is none.
   if (named.length === 0) return { historyFrames: 0, historyReturns: 0, worstAsset: null };
+  const frameLength = safeLength(frames);
+  if (frameLength > 0 && named.length > Math.floor(MAX_UNTRUSTED_LENGTH / frameLength)) {
+    return { historyFrames: 0, historyReturns: 0, worstAsset: null };
+  }
   // Seeded from the first named asset rather than from `null`, so the declared
   // (non-nullable) return holds on every path a checker can see, not only on the
   // one the empty-list early return happens to have excluded.
   let worstCoverage = {
-    ...countObservedFramesAndReturns(frames, (frame) => hasOwnPositivePrice(frame, named[0])),
+    ...countObservedFramesAndReturns(frames, (frame) => hasOwnPositivePrice(frame, named[0]), frameLength),
     worstAsset: named[0],
   };
   for (let i = 1; i < named.length; i += 1) {
     const asset = named[i];
     const counts = countObservedFramesAndReturns(
-      frames, (frame) => hasOwnPositivePrice(frame, asset),
+      frames, (frame) => hasOwnPositivePrice(frame, asset), frameLength,
     );
     if (counts.historyReturns < worstCoverage.historyReturns
         || (counts.historyReturns === worstCoverage.historyReturns

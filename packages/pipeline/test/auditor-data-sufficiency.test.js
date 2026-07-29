@@ -250,6 +250,16 @@ test('audit: a hostile descriptor owes a verdict, never a throw', () => {
   assert.match(sufficiencyOf(hostileThreshold).detail, /fails closed/);
 });
 
+test('audit: an unreadable data-sufficiency threshold fails closed', () => {
+  const forecast = forecastWith(readingsOf(DIP), { horizon: 5 });
+  const config = Object.defineProperty({ tailFloorPct: 0.5 }, 'dataSufficiencyMinCoverage', {
+    get() { throw new Error('boom'); }, enumerable: true,
+  });
+  const invariant = sufficiencyOf(audit(auditInputFor(forecast), config));
+  assert.equal(invariant.pass, false);
+  assert.match(invariant.detail, /cannot be evaluated/);
+});
+
 test('audit: an untrusted worstAsset cannot forge lines in the record', () => {
   // The verdict is recorded to the journal and re-read (the CLI report,
   // auditBody), so a newline in a caller-supplied identifier would let the
