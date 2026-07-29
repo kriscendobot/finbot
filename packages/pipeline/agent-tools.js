@@ -41,14 +41,14 @@ import { execute } from './executor.js';
  * @returns {Record<string, object>} a registry of `assertToolDef`-shaped tools
  */
 export function pipelineToolRegistry() {
-  const tools = [scoreOpportunitiesTool(), realizedVolatilityTool()];
+  const tools = [scoreOpportunitiesTool(), realizedVolatilityTool(), legacyObserveOpportunitiesTool()];
   const registry = {};
   for (const t of tools) registry[t.name] = t;
   return registry;
 }
 
 /** Names of the tools in {@link pipelineToolRegistry}, for capability subsets. */
-export const PIPELINE_TOOL_NAMES = ['score_opportunities', 'realized_volatility'];
+export const PIPELINE_TOOL_NAMES = ['score_opportunities', 'realized_volatility', 'observe_opportunities'];
 
 /**
  * Build the observe-phase (oracle-watcher) tool registry: the deterministic
@@ -483,6 +483,38 @@ function observeOpportunitiesTool(trustedInput) {
         if (source.thresholdBps != null) options.thresholdBps = source.thresholdBps;
         if (source.assets) options.assets = source.assets;
         const observed = observeOpportunities({ readings: source.readings || [] }, options);
+        return toolResult(true, [
+          { type: 'json', value: observed },
+          { type: 'text', text: `observe_opportunities: ${observed.crossings.length} crossing(s)` },
+        ]);
+      } catch (err) {
+        return toolResult(false, [{ type: 'text', text: `observe_opportunities failed: ${err.message || err}` }]);
+      }
+    },
+  };
+}
+
+/** Backward-compatible, caller-parameterized observer for composed registries. */
+function legacyObserveOpportunitiesTool() {
+  return {
+    name: 'observe_opportunities',
+    description: 'Detect opportunity-deviation events over a supplied price-reading window. Read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        readings: { type: 'array', description: 'ordered window: [{ t, prices: { ASSET: price } }]' },
+        thresholdBps: { type: 'number', description: 'minimum |deviation| in basis points (default 50)' },
+        assets: { type: 'array', description: 'optional asset allowlist' },
+      },
+      required: ['readings'],
+      additionalProperties: true,
+    },
+    run: async (toolArguments) => {
+      try {
+        const options = {};
+        if (toolArguments.thresholdBps != null) options.thresholdBps = toolArguments.thresholdBps;
+        if (toolArguments.assets) options.assets = toolArguments.assets;
+        const observed = observeOpportunities({ readings: toolArguments.readings || [] }, options);
         return toolResult(true, [
           { type: 'json', value: observed },
           { type: 'text', text: `observe_opportunities: ${observed.crossings.length} crossing(s)` },

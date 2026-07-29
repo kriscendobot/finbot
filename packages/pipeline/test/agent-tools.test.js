@@ -25,6 +25,13 @@ test('pipelineToolRegistry: exposes the named orient tools, all valid', () => {
   for (const tool of Object.values(registry)) assert.doesNotThrow(() => assertToolDef(tool));
 });
 
+test('pipelineToolRegistry: retains the caller-parameterized observer compatibility tool', async () => {
+  const tool = pipelineToolRegistry().observe_opportunities;
+  const result = await tool.run({ readings: readings([10, 9.5, 9]), thresholdBps: 50 });
+  const jsonBlock = result.content.find((c) => c.type === 'json');
+  assert.equal(jsonBlock.value.crossings.length, 1);
+});
+
 test('score_opportunities tool: matches direct analyze() output on a dip', async () => {
   const r = readings([10, 9.5, 9.0]);
   const opportunities = observeOpportunities({ readings: r }, { thresholdBps: 50 }).crossings;

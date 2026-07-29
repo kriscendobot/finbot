@@ -98,6 +98,13 @@ test('boundObservationWindow: makes a frozen defensive input snapshot', () => {
   assert.throws(() => { bound.readings[0].prices.ATOM = 1; }, TypeError);
 });
 
+test('pipeline barrel: exports the observer boundary APIs', async () => {
+  const pipeline = await import('../index.js');
+  for (const name of ['observerToolRegistry', 'boundObservationWindow', 'dispatchObserver', 'guardedObservation', 'reconcileObservation']) {
+    assert.equal(typeof pipeline[name], 'function', `${name} is publicly exported`);
+  }
+});
+
 test('reconcileObservation: rejects JSON-lossy value distinctions', () => {
   assert.equal(reconcileObservation({ price: NaN }, { price: Infinity }), false);
   assert.equal(reconcileObservation({ price: -0 }, { price: 0 }), false);
@@ -162,8 +169,8 @@ test('dispatchObserver: a faithful dispatch reconciles against the deterministic
 // can never surface. The extracted crossings then diverge from the recompute,
 // so `reconciled` must be false and the bin refuses to drive the loop on them.
 function makeDivergentObserverLlm(input, tamperedThresholdBps) {
-  return async function divergentObserverLlm(args) {
-    if (args.turn === 0 && args.tools && args.tools.observe_opportunities) {
+  return async function divergentObserverLlm(context) {
+    if (context.turn === 0 && context.tools && context.tools.observe_opportunities) {
       return {
         role: 'assistant',
         content: [
@@ -206,8 +213,8 @@ test('dispatchObserver: dispatch-bound inputs ignore model-supplied tool argumen
 // in for any live-path hallucination (a tampered window, threshold, or asset
 // allowlist) the faithful scripted double never produces.
 function makeTamperedObserverLlm(toolArguments) {
-  return async function tamperedObserverLlm(args) {
-    if (args.turn === 0 && args.tools && args.tools.observe_opportunities) {
+  return async function tamperedObserverLlm(context) {
+    if (context.turn === 0 && context.tools && context.tools.observe_opportunities) {
       return {
         role: 'assistant',
         content: [
@@ -413,16 +420,9 @@ test('dispatchObserver: an absent readings window yields zero crossings and reco
   });
 });
 
-// The threshold is the one reconciled input whose value the subagent forwards
-// through its chosen `observe_opportunities` tool arguments, while the canonical
-// recompute receives `input.thresholdBps` directly — the two operands reach
-// their producer by different paths. Its out-of-band / JSON-lossy value set
-// (NaN, ±Infinity, a negative threshold) is therefore the corner where the two
-// paths could default apart (e.g. a serializing transport collapsing NaN->null,
-// which the tool would then default to 50 while the recompute keeps the raw
-// NaN). A faithful dispatch forwards the raw value on BOTH paths, so each must
-// still reconcile and agree crossing-for-crossing; this reddens if a future edit
-// lets the transports diverge for these values.
+// The bound snapshot must retain unusual threshold values even when the model
+// supplies a conventional value. These cases redden if the detector ever reads
+// the model's tool arguments instead of the dispatch-bound input.
 for (const [label, thresholdBps] of [
   ['NaN', NaN],
   ['Infinity', Infinity],
@@ -433,11 +433,11 @@ for (const [label, thresholdBps] of [
     await withFinbotRoot(async (finbotRoot) => {
       const input = observeInput(thresholdBps);
       const dispatch = await dispatchObserver(input, {
-        spawn, finbotRoot, llm: makeScriptedObserverLlm(input),
+        spawn, finbotRoot, llm: makeTamperedObserverLlm({ readings: input.readings, thresholdBps: 50 }),
       });
       assert.equal(dispatch.status, 'completed');
       assert.equal(dispatch.reconciled, true,
-        'the faithful dispatch forwards the raw threshold on both paths, so they still reconcile');
+        'the bound detector and canonical recompute retain the unusual trusted threshold');
       assert.deepEqual(dispatch.reportedCrossings, dispatch.canonical.crossings,
         'the tool path and the deterministic recompute agree crossing-for-crossing');
     });
@@ -456,6 +456,23 @@ test('dispatchObserver: a quiet window surfaces zero crossings through the same 
     assert.equal(dispatch.observed, true);
     assert.equal(dispatch.reportedCrossings.length, 0);
     assert.match(dispatch.finalText, /0 crossing/);
+  });
+});
+
+test('makeScriptedObserverLlm: summarizes safely when no tool result is present', async () => {
+  const scripted = makeScriptedObserverLlm(observeInput());
+  const response = await scripted({ turn: 1, messages: [] });
+  assert.equal(response.content[0].text, 'Observe complete.');
+});
+
+test('dispatchObserver: malformed trusted readings fail closed', async () => {
+  await withFinbotRoot(async (finbotRoot) => {
+    const input = { readings: {} };
+    const dispatch = await dispatchObserver(input, {
+      spawn, finbotRoot, llm: makeScriptedObserverLlm(input),
+    });
+    assert.equal(dispatch.status, 'error');
+    assert.equal(guardedObservation(dispatch).ok, false);
   });
 });
 

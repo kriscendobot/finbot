@@ -171,7 +171,7 @@ export function guardedObservation(dispatch) {
   if (dispatch.status !== 'completed') {
     return { ok: false, reason: `observer dispatch did not complete (status=${dispatch.status})` };
   }
-  if (!dispatch.toolCalls.includes('observe_opportunities')) {
+  if (!Array.prototype.includes.call(dispatch.toolCalls, 'observe_opportunities')) {
     return { ok: false, reason: 'observer never called the deterministic observe_opportunities tool' };
   }
   // Distinct from a reconciliation divergence: the detector was called but no
@@ -244,8 +244,8 @@ export function reconcileObservation(reportedObservation, canonical) {
  * @returns {Function} an `llm` matching the spawn contract
  */
 export function makeScriptedObserverLlm(input) {
-  return async function scriptedObserverLlm(args) {
-    if (args.turn === 0 && args.tools && args.tools.observe_opportunities) {
+  return async function scriptedObserverLlm(context) {
+    if (context.turn === 0 && context.tools && context.tools.observe_opportunities) {
       const toolArguments = { readings: input.readings || [] };
       if (input.thresholdBps != null) toolArguments.thresholdBps = input.thresholdBps;
       if (input.assets) toolArguments.assets = input.assets;
@@ -264,7 +264,7 @@ export function makeScriptedObserverLlm(input) {
         timestamp: 0,
       };
     }
-    const summary = summarizeObservationFromToolResults(args.messages);
+    const summary = summarizeObservationFromToolResults(context.messages);
     return {
       role: 'assistant',
       content: [{ type: 'text', text: summary }],
