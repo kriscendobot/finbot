@@ -28,7 +28,8 @@
  *                    rather than silently collapsing back to --warmup
  *   --threshold=BPS  oracle deviation threshold in basis points (default 30)
  *   --ensemble=N     forecaster ensemble size (default 200)
- *   --horizon=N      forecaster BASE horizon in whole ticks, >= 1 (default 20); the projected horizon
+ *   --horizon=N      forecaster BASE horizon (default 20); when --data-sufficiency-min arms the gate it
+ *                    must be a whole tick count >= 1. The projected horizon
  *                    is the denominator of the coverage ratio --data-sufficiency-min gates on, so a
  *                    value that is not a tick count is rejected (exit 2) rather than silently making
  *                    that gate unevaluable. The projected horizon is this value AFTER any regime

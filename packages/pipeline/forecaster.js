@@ -25,6 +25,8 @@ import { deriveSteps, applyStepsToPortfolio, navOf } from './rebalance.js';
 // coverage evidence.
 const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
 const hasOwn = Object.hasOwn;
+const numberToFixed = Number.prototype.toFixed;
+const reflectApply = Reflect.apply;
 
 /**
  * Read an own data property without executing an accessor. An unreadable
@@ -197,7 +199,7 @@ export function fitForecastWorld(world, readings, adaptiveVol) {
  */
 export function round12(value) {
   return typeof value === 'number' && Number.isFinite(value)
-    ? Number(value.toFixed(12))
+    ? Number(reflectApply(numberToFixed, value, [12]))
     : value;
 }
 
@@ -820,7 +822,7 @@ export function project(input, config = {}) {
         assets: [...new Set([
           ...Object.keys(input.targetWeights || {}),
           ...Object.entries(input.world.portfolio.balances || {})
-            .filter(([_asset, balance]) => typeof balance === 'number' && balance > 0)
+            .filter(([_asset, balance]) => typeof balance === 'number' && balance !== 0)
             .map(([asset]) => asset),
         ])],
       })

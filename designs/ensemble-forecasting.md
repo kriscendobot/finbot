@@ -1014,11 +1014,11 @@ binary pre-execution gate for the graded planner downweight it also asked for.
   so an operator who widened the window to reach coverage 1.0 got a rejection
   naming a gate they believed they had widened past. A flag that arms a safety
   gate validates every sibling flag the gate's arithmetic reads, not only the one
-  it divides by. Note that the `--horizon`, `--fit-window`, and `--warmup`
-  narrowings are *unconditional*: they fire on runs that never arm the gate, so
-  invocations that previously accepted `--horizon=0` or `--horizon=2.5` now exit
-  2. That is a deliberate tightening of a shared entry point, not a
-  gate-scoped one.
+  it divides by. The `--horizon` narrowing is gate-scoped, preserving legacy
+  ungated runs; it rejects a non-tick horizon whenever
+  `--data-sufficiency-min` arms the coverage gate. `--fit-window` and
+  `--warmup` remain unconditional because they set the observed history used by
+  the gate and the simulator alike.
 - **One scrubber, exported.** Every caller-supplied identifier that lands in a
   record goes through one `sanitizeLabel` (exported from `auditor.js`, imported
   by `bin/finbot-ooda`), for the reason the quantizer is shared: a value one

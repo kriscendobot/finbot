@@ -218,16 +218,14 @@ test('ooda-cycle: adaptive vol on defaults the regime horizon stretch (0.5); off
   // persistence 0.98 → stress 1.0 → round(10 * 1.5) = 15.
   const on = await run(buildWorld('rh-on'), { ensembleSize: 8, horizon: 10, baseSeed: 100, adaptiveVol: { kind: 'garch' } });
   assert.equal(on.walletTouched, false);
-  if (on.forecast) {
-    assert.equal(on.forecast.horizon, 15);
-    assert.equal(on.forecast.horizonRegime.worstAsset, 'ATOM');
-  }
+  assert.ok(on.forecast, 'adaptive run produces a forecast');
+  assert.equal(on.forecast.horizon, 15);
+  assert.equal(on.forecast.horizonRegime.worstAsset, 'ATOM');
 
   // Adaptive off → no stretch, horizon stays at the configured 10.
   const off = await run(buildWorld('rh-off'), { ensembleSize: 8, horizon: 10, baseSeed: 100 });
   assert.equal(off.walletTouched, false);
-  if (off.forecast) {
-    assert.equal(off.forecast.horizon, 10);
-    assert.equal(off.forecast.horizonRegime, null);
-  }
+  assert.ok(off.forecast, 'non-adaptive run produces a forecast');
+  assert.equal(off.forecast.horizon, 10);
+  assert.equal(off.forecast.horizonRegime, null);
 });
