@@ -278,7 +278,7 @@ function analysisBody(cycleId, a) {
 }
 
 function forecastBody(cycleId, f) {
-  return [
+  const lines = [
     `# forecast (${cycleId})`, '',
     `ensemble_size: ${f.ensembleSize}`,
     `horizon: ${f.horizon}`,
@@ -286,8 +286,10 @@ function forecastBody(cycleId, f) {
     `meanEquity: ${f.summary.meanEquity.toFixed(2)}`,
     `p05 / p50 / p95: ${f.summary.p05.toFixed(2)} / ${f.summary.p50.toFixed(2)} / ${f.summary.p95.toFixed(2)}`,
     `pProfit: ${(f.pProfit * 100).toFixed(1)}%`,
-    '',
-  ].join('\n');
+  ];
+  if (f.dataSufficiency) lines.push(`data_sufficiency: ${JSON.stringify(f.dataSufficiency)}`);
+  lines.push('');
+  return lines.join('\n');
 }
 
 function proposalBody(cycleId, p) {

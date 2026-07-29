@@ -35,6 +35,23 @@ export function priceFramesFromReadings(readings) {
 }
 
 /**
+ * Preserve a missing price map as a gap for data-sufficiency measurement. The
+ * adaptive-vol fitter may discard an unusable reading, but coverage cannot make
+ * the two observations on either side of an outage adjacent evidence.
+ *
+ * @param {Array<{ prices?: Record<string, number> }>} readings
+ * @returns {Array<Record<string, number>|null>}
+ */
+function priceFramesForCoverage(readings) {
+  const frames = [];
+  for (const reading of readings || []) {
+    frames.push(reading && reading.prices && typeof reading.prices === 'object'
+      ? reading.prices : null);
+  }
+  return frames;
+}
+
+/**
  * When the caller asks for an adaptive vol surface, fit one from the observed
  * window and return a forecast world whose price feed carries it, plus a
  * small descriptor of what was fit (for the projection's citation trail).
@@ -768,7 +785,7 @@ export function project(input, config = {}) {
   // content hash stay byte-identical to before; computed only when asked.
   const dataSufficiency = config.reportDataSufficiency
     ? computeDataSufficiency({
-        frames: priceFramesFromReadings(fitReadings),
+        frames: priceFramesForCoverage(fitReadings),
         horizon,
         assets: [...new Set([
           ...Object.keys(input.targetWeights || {}),

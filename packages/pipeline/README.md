@@ -24,7 +24,7 @@ in-process for a dry-run cycle with **no LLM required**.
 | -------------------- | ------------------------------------------------------------------------- |
 | `oracle-watcher.js`  | detect price deviations past a basis-point threshold over a reading window |
 | `analyzer.js`        | risk-adjusted scoring (price edge + APR carry, less a correlated-cluster penalty); single- or multi-leg target allocation; no-action is valid |
-| `forecaster.js`      | Monte Carlo via the simulator's nested-fork `forecast()`; deterministic; `project({ reportDataSufficiency: true })` also measures whether the projection outruns its observed window |
+| `forecaster.js`      | Monte Carlo via the simulator's nested-fork `forecast()`; deterministic; `project(input, { reportDataSufficiency: true })` also measures whether the projection outruns its observed window |
 | `planner.js`         | ymax-shaped proposal: hashed steps + forecast/analysis citations           |
 | `auditor.js`         | the invariant set: citation-completeness, risk-bound-compliance, tail-risk-floor, reproducibility, pricing-freshness, place-route-reachability, plus the opt-in forecast-data-sufficiency gate |
 | `executor.js`        | dry-run simulation on a clone; refuses live without authorization          |

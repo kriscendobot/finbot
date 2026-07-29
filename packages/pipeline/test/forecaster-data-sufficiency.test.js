@@ -86,6 +86,22 @@ test('computeDataSufficiency: evidence-free frames cannot pad the coverage', () 
   }).historyFrames, 1);
 });
 
+test('project: a missing price map breaks the coverage return run', () => {
+  const world = worldFor('ds-price-gap');
+  const readings = [
+    { t: 0, prices: { ATOM: 10 } },
+    { t: 1 },
+    { t: 2, prices: { ATOM: 11 } },
+  ];
+  const projection = project(
+    { world, targetWeights: { ATOM: 0.5 }, readings },
+    { ensembleSize: 8, horizon: 2, baseSeed: 100, render: false, reportDataSufficiency: true },
+  );
+  assert.equal(projection.dataSufficiency.historyFrames, 2);
+  assert.equal(projection.dataSufficiency.historyReturns, 0);
+  assert.equal(projection.dataSufficiency.coverageRatio, 0);
+});
+
 test('computeDataSufficiency: with NO asset nameable, the measurement is zero — never a portfolio-wide count', () => {
   // Regression: a "counts as observed if the frame carries at least one own
   // positive price" fallback is strictly MORE permissive than every per-asset

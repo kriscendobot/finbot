@@ -35,7 +35,8 @@ test('finbot-ooda: a threshold the gate could not evaluate exits 2', () => {
   // or into 0 — and 0 is the OFF value, so the operator would get no gate at all.
   for (const flag of ['--data-sufficiency-min', '--data-sufficiency-min=',
     '--data-sufficiency-min=   ', '--data-sufficiency-min=abc', '--data-sufficiency-min=-1',
-    '--data-sufficiency-min=Infinity', '--data-sufficiency-min=1e-13']) {
+    '--data-sufficiency-min=Infinity', '--data-sufficiency-min=1e-13',
+    '--data-sufficiency-min=1e-5000']) {
     const result = runCli(flag, '--ensemble=4');
     assert.equal(result.status, 2, flag);
     assert.match(result.stderr, /--data-sufficiency-min must be a finite number/);

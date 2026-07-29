@@ -99,6 +99,7 @@ function parseArgs(argv) {
     ensemble: 200, horizon: 20, tailFloor: 0.6, journal: null, json: false,
     multi: false, adaptiveVol: null, fitWindow: 0, regimeTailBump: null,
     regimeHorizonStretch: null, regimePositionShrink: null, dataSufficiencyMin: null,
+    dataSufficiencyMinLiteral: null,
   };
   for (const arg of argv) {
     const eq = arg.indexOf('=');
@@ -124,7 +125,10 @@ function parseArgs(argv) {
     // A bare `--data-sufficiency-min`, or an empty/whitespace value, carries no
     // number; NaN routes it to the validation below rather than to `Number(null)`
     // or `Number('  ')`, both of which are 0 — the silently-off value.
-    else if (key === '--data-sufficiency-min') args.dataSufficiencyMin = numberOrNaN(val);
+    else if (key === '--data-sufficiency-min') {
+      args.dataSufficiencyMin = numberOrNaN(val);
+      args.dataSufficiencyMinLiteral = val;
+    }
     else if (key === '--journal') args.journal = val;
     else if (key === '--json') args.json = true;
     else if (key === '--multi') args.multi = true;
@@ -155,7 +159,11 @@ function parseArgs(argv) {
   // --significance-alpha. The test is the auditor's own exported predicate — not
   // a restatement of it — so a value this CLI accepts is by construction a value
   // the gate can evaluate.
-  if (args.dataSufficiencyMin != null && !coverageThresholdUsable(args.dataSufficiencyMin)) {
+  const underflowedPositiveThreshold = args.dataSufficiencyMin === 0
+    && args.dataSufficiencyMinLiteral != null
+    && /[1-9]/.test(args.dataSufficiencyMinLiteral);
+  if (args.dataSufficiencyMin != null
+      && (underflowedPositiveThreshold || !coverageThresholdUsable(args.dataSufficiencyMin))) {
     console.error('finbot-ooda: --data-sufficiency-min must be a finite number >= 0 that, when '
       + "positive, does not quantize to zero at the descriptor's 12-decimal resolution "
       + '(for example --data-sufficiency-min=1)');
