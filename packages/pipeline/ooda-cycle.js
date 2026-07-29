@@ -79,8 +79,19 @@ export async function runOodaCycle(input) {
 
   // Zero is a valid explicit observed-window size (and must remain zero when
   // the coverage gate is armed); only an omitted value takes the default.
-  const windowTicks = config.windowTicks ?? 10;
-  const readings = input.readings
+  // A malformed direct API window must not flow through `slice` coercion and
+  // accidentally select the entire history as coverage evidence.
+  const coverageGateOn = coverageGateArmed(auditorConfig.dataSufficiencyMinCoverage);
+  const requestedWindowTicks = config.windowTicks ?? 10;
+  const requestedFitWindowTicks = config.fitWindowTicks;
+  const validTickCount = (value) => Number.isSafeInteger(value) && value >= 0;
+  const invalidCoverageWindow = coverageGateOn
+    && (!validTickCount(requestedWindowTicks)
+      || (requestedFitWindowTicks != null && !validTickCount(requestedFitWindowTicks)));
+  const windowTicks = invalidCoverageWindow ? 0 : requestedWindowTicks;
+  const readings = invalidCoverageWindow
+    ? []
+    : input.readings
     // `slice(-0)` means `slice(0)`, so delegating an explicit zero to
     // windowFromHistory would select the entire history — the exact opposite
     // of a zero-tick observed window and an inflation of gate evidence.
@@ -93,10 +104,13 @@ export async function runOodaCycle(input) {
   // longer window from the same history; it ends at the same current tick, so
   // the regime read still lands "where in the vol cycle we are now". Absent or
   // <= windowTicks → fitReadings === readings and the cycle is byte-identical.
-  const fitWindowTicks = config.fitWindowTicks && config.fitWindowTicks > windowTicks
-    ? config.fitWindowTicks
+  const fitWindowTicks = !invalidCoverageWindow
+    && requestedFitWindowTicks && requestedFitWindowTicks > windowTicks
+    ? requestedFitWindowTicks
     : windowTicks;
-  const fitReadings = input.fitReadings
+  const fitReadings = invalidCoverageWindow
+    ? []
+    : input.fitReadings
     || (fitWindowTicks > windowTicks && !input.readings
       ? windowFromHistory(input.history || [], fitWindowTicks)
       : readings);

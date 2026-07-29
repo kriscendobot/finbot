@@ -69,7 +69,6 @@ assert recomputed == proposal.proposal_hash
 Every cited oracle reading is within the configured staleness window:
 
 ```pseudo
-now = current_iso_time()
 for oracle_ref in proposal.cited_oracle_readings:
   reading = read_journal(oracle_ref)
   age_ticks = current_tick - reading.tick
