@@ -241,9 +241,10 @@ test('audit: a hostile descriptor owes a verdict, never a throw', () => {
   assert.equal(reads, 0, 'the getter never ran');
   assert.match(sufficiencyOf(cited).detail, /counts are not whole, non-negative/);
 
-  // A `worstAsset` whose `toString` throws is not a string, so it is simply not
-  // a label; a hostile THRESHOLD whose `toString` throws still owes a verdict
-  // rather than an exception out of the unusable-threshold detail line.
+  // A `worstAsset` whose `toString` throws is not a string, so it cannot name
+  // the limiting constituent. The armed gate rejects it rather than throwing.
+  // A hostile THRESHOLD whose `toString` throws also owes a verdict rather than
+  // an exception out of the unusable-threshold detail line.
   const hostileAsset = audit(
     auditInputFor({
       ...forecast,
@@ -254,8 +255,8 @@ test('audit: a hostile descriptor owes a verdict, never a throw', () => {
     }),
     armed,
   );
-  assert.equal(sufficiencyOf(hostileAsset).pass, true); // the label is optional evidence
-  assert.ok(!/ on /.test(sufficiencyOf(hostileAsset).detail));
+  assert.equal(sufficiencyOf(hostileAsset).pass, false);
+  assert.match(sufficiencyOf(hostileAsset).detail, /without a nameable worst-covered asset/);
   const hostileThreshold = audit(auditInputFor(forecast), {
     tailFloorPct: 0.5,
     dataSufficiencyMinCoverage: { toString() { throw new Error('boom'); }, valueOf() { throw new Error('boom'); } },
@@ -587,7 +588,7 @@ test('audit: a count that is not a whole number is not a count, and only that re
       horizon: 20,
       p05Equity: 1e9,
       dataSufficiency: {
-        coverageRatio: 0.5, historyReturns: 10, historyFrames: 21, horizon: 20,
+        coverageRatio: 0.5, historyReturns: 10, historyFrames: 21, horizon: 20, worstAsset: 'ATOM',
       },
     }),
     { tailFloorPct: 0.5, dataSufficiencyMinCoverage: 0.5 },
@@ -878,7 +879,9 @@ test('audit: the contiguity bound is checked at its own edge, not only far from 
   const armed = { tailFloorPct: 0.5, dataSufficiencyMinCoverage: 1 };
   const at = audit(auditInputFor({
     horizon: 20, p05Equity: 1e9,
-    dataSufficiency: { coverageRatio: 1, historyReturns: 20, historyFrames: 21, horizon: 20 },
+    dataSufficiency: {
+      coverageRatio: 1, historyReturns: 20, historyFrames: 21, horizon: 20, worstAsset: 'ATOM',
+    },
   }), armed);
   assert.equal(sufficiencyOf(at).pass, true, '20 returns from 21 frames is exactly reachable');
 
