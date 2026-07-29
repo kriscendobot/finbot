@@ -17,6 +17,12 @@ import { navOf } from './rebalance.js';
 import { stepHasRealRoute } from './substrates.js';
 import { worstAssetPersistence, persistenceStress, round12 } from './forecaster.js';
 
+// audit() accepts caller-supplied forecasts and configuration. Preserve the
+// primordial own-data-property machinery before any untrusted call can replace
+// it, so accessors and prototype pollution remain absence of evidence.
+const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+const hasOwn = Object.hasOwn;
+
 /** @import { DataSufficiency, ForecastProjection } from './forecaster.js' */
 /** @import { Proposal } from './planner.js' */
 /** @import { Opportunity } from './oracle-watcher.js' */
@@ -83,8 +89,8 @@ export function audit(input, config = {}) {
   // from the gate they claim to mirror.
   let rawMinCoverage;
   try {
-    const descriptor = Object.getOwnPropertyDescriptor(config, 'dataSufficiencyMinCoverage');
-    rawMinCoverage = descriptor && Object.hasOwn(descriptor, 'value')
+    const descriptor = getOwnPropertyDescriptor(config, 'dataSufficiencyMinCoverage');
+    rawMinCoverage = descriptor && hasOwn(descriptor, 'value')
       ? descriptor.value
       : descriptor ? Symbol('unreadable data-sufficiency threshold') : undefined;
   } catch (_error) {
@@ -337,11 +343,11 @@ function readOwn(object, key) {
   if (object == null || typeof object !== 'object') return undefined;
   let descriptor;
   try {
-    descriptor = Object.getOwnPropertyDescriptor(object, key);
+    descriptor = getOwnPropertyDescriptor(object, key);
   } catch (_error) {
     return undefined; // a hostile proxy trap owes a verdict, not an exception
   }
-  return descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
+  return descriptor && hasOwn(descriptor, 'value') ? descriptor.value : undefined;
 }
 
 /**

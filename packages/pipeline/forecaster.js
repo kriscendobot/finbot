@@ -18,6 +18,32 @@ import { forecast as simForecast } from '@finbot/simulator/forecast';
 import { makeVolSurface } from '@finbot/simulator/world';
 import { deriveSteps, applyStepsToPortfolio, navOf } from './rebalance.js';
 
+// This module measures caller-supplied oracle frames before the dependency graph
+// happens to import a lockdown shim. Capture the primordials used for own-data
+// reads now: a later replacement of Object.hasOwn or
+// Object.getOwnPropertyDescriptor must not turn an accessor-only price into
+// coverage evidence.
+const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+const hasOwn = Object.hasOwn;
+
+/**
+ * Read an own data property without executing an accessor. An unreadable
+ * property is absent evidence.
+ *
+ * @param {unknown} object
+ * @param {string} key
+ * @returns {unknown}
+ */
+function readOwnDataProperty(object, key) {
+  if (!object || typeof object !== 'object') return undefined;
+  try {
+    const descriptor = getOwnPropertyDescriptor(object, key);
+    return descriptor && hasOwn(descriptor, 'value') ? descriptor.value : undefined;
+  } catch (_error) {
+    return undefined;
+  }
+}
+
 /**
  * Extract the per-tick price frames (`[{ asset: price }, ...]`) an
  * empirical / GARCH fitter wants from an oracle reading window
@@ -29,7 +55,8 @@ import { deriveSteps, applyStepsToPortfolio, navOf } from './rebalance.js';
 export function priceFramesFromReadings(readings) {
   const frames = [];
   for (const r of readings || []) {
-    if (r && r.prices && typeof r.prices === 'object') frames.push(r.prices);
+    const prices = readOwnDataProperty(r, 'prices');
+    if (prices && typeof prices === 'object') frames.push(prices);
   }
   return frames;
 }
@@ -45,8 +72,8 @@ export function priceFramesFromReadings(readings) {
 function priceFramesForCoverage(readings) {
   const frames = [];
   for (const reading of readings || []) {
-    frames.push(reading && reading.prices && typeof reading.prices === 'object'
-      ? reading.prices : null);
+    const prices = readOwnDataProperty(reading, 'prices');
+    frames.push(prices && typeof prices === 'object' ? prices : null);
   }
   return frames;
 }
@@ -334,11 +361,11 @@ function hasOwnPositivePrice(frame, asset) {
   if (!frame || typeof frame !== 'object') return false;
   let descriptor;
   try {
-    descriptor = Object.getOwnPropertyDescriptor(frame, asset);
+    descriptor = getOwnPropertyDescriptor(frame, asset);
   } catch (_error) {
     return false; // a hostile proxy trap is not evidence either
   }
-  if (!descriptor || !Object.hasOwn(descriptor, 'value')) return false;
+  if (!descriptor || !hasOwn(descriptor, 'value')) return false;
   const price = descriptor.value;
   return typeof price === 'number' && Number.isFinite(price) && price > 0;
 }

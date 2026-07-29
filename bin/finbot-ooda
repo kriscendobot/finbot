@@ -78,7 +78,7 @@ import { runSimulator } from '../packages/simulator/runner.js';
 // drift from. All come through the package entry point, like `runOodaCycle`,
 // rather than by reaching around it into a module.
 import {
-  runOodaCycle, round12, sanitizeLabel, formatCoverage, coverageThresholdUsable,
+  runOodaCycle, round12, sanitizeLabel, formatCoverage, coverageThresholdUsable, coverageGateArmed,
 } from '../packages/pipeline/index.js';
 
 /**
@@ -169,7 +169,7 @@ function parseArgs(argv) {
       + '(for example --data-sufficiency-min=1)');
     process.exit(2);
   }
-  // The horizon is the base of the DENOMINATOR the gate's ratio is taken over,
+  // When the gate is armed, the horizon is the base of the DENOMINATOR its ratio is taken over.
   // so leaving it unvalidated would disarm through the sibling flag:
   // `--horizon=abc` yields a horizon that is not a tick count, hence an
   // unmeasurable coverage descriptor, and an operator who armed the gate would
@@ -177,7 +177,8 @@ function parseArgs(argv) {
   // of ticks, and at least one: a zero-tick projection clears no positive
   // coverage requirement anyway (the armed gate has NO unconditional pass — see
   // `dataSufficiencyGate`), so it is not a cycle worth running.
-  if (!(Number.isInteger(args.horizon) && args.horizon >= 1)) {
+  if (coverageGateArmed(args.dataSufficiencyMin)
+      && !(Number.isInteger(args.horizon) && args.horizon >= 1)) {
     console.error('finbot-ooda: --horizon must be a whole number of ticks >= 1 '
       + '(for example --horizon=20)');
     process.exit(2);
