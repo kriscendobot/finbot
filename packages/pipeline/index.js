@@ -25,14 +25,21 @@ export { plan, hashProposal } from './planner.js';
 export {
   toleranceFromProfile, selectAllocationForProfile, planForProfile,
 } from './profile-allocation.js';
-// The auditor's recording and gating primitives are promoted on the same
-// criterion, and each has the same out-of-package consumer — `bin/finbot-ooda`,
-// which re-records the coverage evidence and validates the flag that arms the
-// gate. A caller-supplied identifier the auditor sanitizes before recording is
-// sanitized (and bounded, hence `MAX_LABEL_CODE_POINTS`) by every module that
-// records it; a coverage ratio the auditor formats for a record is formatted the
-// same way by every module that records it; and the arming/usability predicates
-// are the one definition the CLI's validation must not drift from.
+// The auditor's recording and gating primitives are promoted on ONE criterion: a
+// figure or label that appears in more than one RECORD is written by exactly one
+// rule, so a co-recorder cannot render the same evidence differently. Most also
+// share the out-of-package consumer `bin/finbot-ooda`, which re-records the
+// auditor's coverage evidence and validates the flag that arms the gate — the
+// coverage ratio it re-prints goes through the one `formatCoverage`, the
+// identifier it scrubs through the one `sanitizeLabel`, its flag validation
+// through the one `coverageThresholdUsable`/`coverageGateArmed`. `MAX_LABEL_CODE_POINTS`
+// rides the SAME criterion on its own ground — it is that scrubber's cap, and ANY
+// module that records a bounded label needs it to size the field and tell a
+// truncation from a label that really ends in `...` (see the README's
+// § Recording primitives table). It is NOT consumed by `bin/finbot-ooda`, and is
+// promoted for the co-recorder ground, not that one. `computeDataSufficiency`
+// stays unpromoted: it records nothing across a module boundary and has no
+// consumer outside `forecaster.js`.
 export {
   audit, sanitizeLabel, MAX_LABEL_CODE_POINTS, formatCoverage,
   coverageThresholdUsable, coverageGateArmed,

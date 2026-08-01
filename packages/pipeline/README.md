@@ -36,8 +36,12 @@ in-process for a dry-run cycle with **no LLM required**.
 
 A figure or label that appears in more than one record is written by exactly one
 rule, so a second reader cannot render the same evidence differently. Those rules
-are named on `@finbot/pipeline` itself, because `bin/finbot-ooda` re-records the
-auditor's coverage evidence and must not re-approximate any of them:
+are named on `@finbot/pipeline` itself, because a co-recorder must not
+re-approximate them: `bin/finbot-ooda` re-records the auditor's coverage evidence
+(the ratio, the scrubbed label, and the gate-arming flag it validates), and any
+module that records a bounded label needs the scrubber's cap to size its field.
+`MAX_LABEL_CODE_POINTS` is promoted on that second ground, not as a
+`bin/finbot-ooda` import:
 
 | Export                    | Contract                                                                 |
 | ------------------------- | ------------------------------------------------------------------------ |
