@@ -110,6 +110,22 @@ test('3b saboteur#4: a non-finite bound knob fails the gate closed via config-in
   assert.equal(verdict.verdict, 'rejected');
 });
 
+test('r4 M1: a non-NUMBER bound knob fails config-integrity closed (type-scoped, not value-scoped)', () => {
+  const forecast = forecastWith(readingsOf(DIP), 5);
+  const proposal = { ...BASE_PROPOSAL, cited_forecasts: [projectionId(forecast)] };
+  // The value-scoped guard (`typeof === 'number' && !isFinite`) caught only
+  // non-finite NUMBERS; a knob that is not a number at all — '25%', {}, true —
+  // walked through, `maxStepPct * nav` was NaN, and the cap silently never tripped.
+  for (const bad of ['25%', 'unbounded', {}, true]) {
+    const verdict = audit(auditInput(proposal, forecast), { maxStepPct: bad });
+    const integrity = verdict.invariant_results.find((r) => r.name === 'config-integrity');
+    assert.ok(integrity, `a ${typeof bad} maxStepPct emits config-integrity`);
+    assert.equal(integrity.pass, false);
+    assert.match(integrity.detail, /maxStepPct/);
+    assert.equal(verdict.verdict, 'rejected');
+  }
+});
+
 test('3b saboteur#3: a NaN/string step field fails risk-bound-compliance closed', () => {
   const forecast = forecastWith(readingsOf(DIP), 5);
   for (const bad of [Number.NaN, 'lots', undefined]) {

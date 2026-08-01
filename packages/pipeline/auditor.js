@@ -92,14 +92,20 @@ export function audit(input, config = {}) {
       return fallback;
     }
     if (value == null) return fallback;
-    // A knob that IS readable but is a non-finite number (NaN, ±Infinity) is not
-    // a usable safety bound: every `value > NaN` comparison is false, so the
-    // bound silently never trips (fail-OPEN) — the mirror hazard to an unreadable
-    // knob defaulting to a looser value. Fail it CLOSED through the same
-    // config-integrity family rather than approving under a bound that cannot
-    // bite. (`dataSufficiencyMinCoverage` has its own usability predicate and is
-    // read separately, so it is not funnelled through here.)
-    if (typeof value === 'number' && !Number.isFinite(value)) {
+    // A knob that IS readable but is not a USABLE FINITE NUMBER is not a safety
+    // bound the gate can honor, and the check must be TYPE-scoped, not value-
+    // scoped. A non-finite number (NaN, ±Infinity) makes every `value > NaN`
+    // comparison false, so the bound silently never trips (fail-OPEN); but so does
+    // a value that is not a number AT ALL — `'25%'`, `'unbounded'`, `{}`, `true` —
+    // because `maxStepPct * nav` is then `NaN` and `notional > NaN` is likewise
+    // always false, and a value whose coercion throws (`{ valueOf() { throw } }`)
+    // would throw out of `audit()` at `maxStepPct * nav`. Lead with
+    // `typeof === 'number'` (the same order `coverageThresholdUsable` /
+    // `coverageGateArmed` already take) so all three fail CLOSED through the
+    // config-integrity family rather than defaulting a bound that cannot bite.
+    // (`dataSufficiencyMinCoverage` has its own usability predicate and is read
+    // separately, so it is not funnelled through here.)
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
       unusableKnobs.push(key);
       return fallback;
     }
@@ -144,7 +150,19 @@ export function audit(input, config = {}) {
   // which the citation and reproducibility invariants below then reject.
   const steps = safeSteps(readOwn(proposal, 'steps'));
   const proposalHash = readOwn(proposal, 'proposal_hash');
-  const nav = navOf(input.portfolio, prices);
+  // Snapshot the pre-trade portfolio as OWN DATA before computing nav, so nav and
+  // the risk loop below read the portfolio the ONE fail-closed way. `navOf` used
+  // to plain-`[[Get]]` `input.portfolio` here — ~48 lines ahead of the readOwn
+  // guards — so a hostile `cash`/`balances` accessor threw straight out of
+  // `audit()` (falsifying the invariant that a throwing accessor owes a verdict),
+  // and an INHERITED `balances` split the view (nav counted it; the risk loop's
+  // own-read did not). Compute nav from the snapshot instead; a well-formed
+  // plain-data portfolio yields byte-identical numbers. `balances` is a
+  // NULL-PROTOTYPE object read own-data-only, so a step whose `asset` is
+  // `'__proto__'` keys a plain own slot here, never `Object.prototype`.
+  const balances = snapshotBalances(readOwn(input.portfolio, 'balances'));
+  const cash0 = readOwnFiniteNumber(input.portfolio, 'cash') ?? 0;
+  const nav = navOf({ cash: cash0, balances }, prices);
   const results = [];
 
   // 0. Config integrity: a safety knob that was present but unreadable (own
@@ -161,7 +179,8 @@ export function audit(input, config = {}) {
     }
     if (unusableKnobs.length > 0) {
       parts.push(`${unusableKnobs.map((k) => sanitizedLabelOr(k, '(unnamed)')).join(', ')} `
-        + 'present but not a finite number (NaN or ±Infinity), so the bound would never trip');
+        + 'present but not a usable finite number (a non-number, NaN, or ±Infinity), so the bound '
+        + 'would never trip');
     }
     results.push({
       name: 'config-integrity',
@@ -188,16 +207,11 @@ export function audit(input, config = {}) {
       : 'plan has no steps to audit',
   });
 
-  // 2. Risk-bound compliance: per-step, cumulative, concentration.
+  // 2. Risk-bound compliance: per-step, cumulative, concentration. The portfolio
+  // was snapshotted own-data-only above (a null-prototype `balances`, a finite
+  // `cash`), so nav and this simulation read the one fail-closed view.
   let cumulative = 0;
-  // The pre-trade snapshot is read as own data too: a hostile `portfolio` whose
-  // `balances`/`cash` accessor throws owes the gate a verdict, not an exception.
-  // `navOf` above reads the same fields, so a well-formed portfolio is
-  // byte-identical; the guard only bites on the untrusted-surface hostile case.
-  const balancesSource = readOwn(input.portfolio, 'balances');
-  const balances = balancesSource != null && typeof balancesSource === 'object'
-    ? { ...balancesSource } : {};
-  let cash = readOwnFiniteNumber(input.portfolio, 'cash') ?? 0;
+  let cash = cash0;
   let riskPass = true;
   let riskDetail = 'all steps within per-step, per-day, and concentration bounds';
   for (const s of steps) {
@@ -216,6 +230,19 @@ export function audit(input, config = {}) {
     if (notional == null || qty == null || price == null) {
       riskPass = false;
       riskDetail = 'a step carries no finite notional, quantity, or price, so it cannot be shown within risk bounds';
+      break;
+    }
+    // `asset` was read via `readOwn` (no accessor), but it is used below as a
+    // COMPUTED property key `balances[asset]`, and `ToPropertyKey` re-invokes
+    // untrusted code: an `asset: { toString() { throw } }` would throw out of
+    // `audit()`, and `asset: '__proto__'` would (on a plain-prototype object)
+    // resolve the balance to `Object.prototype` — `weight` `NaN`, concentration
+    // cap never trips. `balances` is null-prototype (above), which defuses the
+    // pollution key; type-checking `asset` to a string here defuses the throwing
+    // coercion and keeps a non-string asset from being SHOWN within the cap.
+    if (typeof asset !== 'string') {
+      riskPass = false;
+      riskDetail = 'a step names no string asset, so its concentration cannot be shown within the cap';
       break;
     }
     cumulative += notional;
@@ -282,16 +309,38 @@ export function audit(input, config = {}) {
     detail: reproPass ? 'recomputed hash matches' : `hash mismatch: recomputed ${recomputed.slice(0, 12)} != ${String(proposalHash).slice(0, 12)}`,
   });
 
-  // 5. Pricing freshness: cited readings within the staleness window.
-  const readings = input.oracleReadings || [];
+  // 5. Pricing freshness: cited readings within the staleness window. This was
+  // the one untrusted surface the round-2/3 own-data pass skipped, and it read
+  // three fail-open ways: a non-array `oracleReadings` (`{ length: 2 }`, `[null]`,
+  // a throwing element getter, a Proxy `length` trap) threw `filter is not a
+  // function` / a `TypeError` out of `audit()`; a non-numeric `observedAtTick`, or
+  // an ABSENT `currentTick`, made `currentTick - observedAtTick > window` a
+  // NaN-compare that is always false, recording `pass: true` — an affirmative
+  // false attestation, the same fail-open closed for notional/qty/price above. So:
+  // materialize the readings into a bounded array (`safeSteps`), read the freshness
+  // clock and each `observedAtTick` as own finite numbers, fail closed on an
+  // unreadable clock, and treat a reading with no finite observed tick as stale.
+  // The window value in the detail is the finite number `knob` now guarantees, so
+  // a forged config knob can no longer forge an invariant line (M7).
+  const readings = safeSteps(readOwn(input, 'oracleReadings'));
+  const currentTick = readOwnFiniteNumber(input, 'currentTick');
   let freshPass = true;
   let freshDetail = 'no oracle readings cited (vacuously fresh)';
   if (readings.length > 0) {
-    const stale = readings.filter((r) => input.currentTick - r.observedAtTick > stalenessWindowTicks);
-    freshPass = stale.length === 0;
-    freshDetail = freshPass
-      ? `all ${readings.length} cited readings within ${stalenessWindowTicks} ticks`
-      : `${stale.length} cited reading(s) older than ${stalenessWindowTicks} ticks`;
+    if (currentTick == null) {
+      freshPass = false;
+      freshDetail = 'oracle readings cited but the current tick is absent or not a finite number, so '
+        + 'freshness cannot be shown (fails closed)';
+    } else {
+      const stale = readings.filter((r) => {
+        const observedAtTick = readOwnFiniteNumber(r, 'observedAtTick');
+        return observedAtTick == null || currentTick - observedAtTick > stalenessWindowTicks;
+      });
+      freshPass = stale.length === 0;
+      freshDetail = freshPass
+        ? `all ${readings.length} cited readings within ${stalenessWindowTicks} ticks`
+        : `${stale.length} cited reading(s) older than ${stalenessWindowTicks} ticks or carrying no finite observed tick`;
+    }
   }
   results.push({ name: 'pricing-freshness', pass: freshPass, detail: freshDetail });
 
@@ -302,14 +351,28 @@ export function audit(input, config = {}) {
   // mapping (or naming an unknown place) is not reachable and fails the gate.
   // A route that only awaits deploy-config detail (pool addresses, GMP
   // channels) is reachable: filling it is a later, separately authorized step.
-  const realRouteSteps = steps.filter((s) => s && typeof s === 'object' && s.route && typeof s.route === 'object');
+  // Snapshot each step's `route` as OWN DATA before the reachability check.
+  // `stepHasRealRoute` (in `substrates.js`, outside this diff) plain-`[[Get]]`s
+  // `route`/`place`/`substrate`/`needs_internal_detail`, so a throwing own `route`
+  // accessor — or a polluted `Object.prototype.substrate`, or an inherited `route`
+  // — would throw out of, or forge a claim into, `audit()` here; and this same call
+  // is the executor's UNWRAPPED fire-time drift guard. Read `route` own-data-only
+  // and hand `stepHasRealRoute` a plain snapshot (containment lives here, not in
+  // the shared helper); `proposal.substrate` on the detail line is read the same.
+  const realRouteSteps = [];
+  for (const s of steps) {
+    const route = readOwn(s, 'route');
+    if (route != null && typeof route === 'object') {
+      realRouteSteps.push({ route: snapshotRoute(route) });
+    }
+  }
   let routePass = true;
   let routeDetail = 'sim venue: each step is self-contained (asset, qty, price); venue is implicit';
   if (realRouteSteps.length > 0) {
     const unreachable = realRouteSteps.filter((s) => !stepHasRealRoute(s));
     routePass = unreachable.length === 0;
     routeDetail = routePass
-      ? `all ${realRouteSteps.length} step(s) carry a reachable ${sanitizedLabelOr(proposal.substrate, 'substrate')} place/route`
+      ? `all ${realRouteSteps.length} step(s) carry a reachable ${sanitizedLabelOr(readOwn(proposal, 'substrate'), 'substrate')} place/route`
       : `${unreachable.length} step(s) have an unresolved place/route (unmapped or unknown venue)`;
   }
   results.push({ name: 'place-route-reachability', pass: routePass, detail: routeDetail });
@@ -460,6 +523,25 @@ function readOwnFiniteNumber(object, key) {
 }
 
 /**
+ * `Array.isArray`, made TOTAL. `IsArray` throws a `TypeError` on a REVOKED Proxy
+ * (ECMA-262 §7.2.2 IsArray, step 3.a), so a bare `Array.isArray(revoked)` in a
+ * guard escapes `audit()` with no verdict — the exact outcome the fail-closed
+ * reads exist to prevent, and the one gap left after
+ * `Object.getOwnPropertyDescriptor` was already `try`-wrapped. A check that cannot
+ * complete is treated as "not an array" (fail closed: an unmeasurable list rejects).
+ *
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+function isArraySafe(value) {
+  try {
+    return Array.isArray(value);
+  } catch (_error) {
+    return false;
+  }
+}
+
+/**
  * The length of an untrusted array value, or 0 when it is not an array or a
  * hostile `length` trap throws. A fail-closed count: a list the auditor cannot
  * measure is treated as empty, which rejects rather than crashes.
@@ -468,7 +550,7 @@ function readOwnFiniteNumber(object, key) {
  * @returns {number}
  */
 function safeArrayLength(value) {
-  if (!Array.isArray(value)) return 0;
+  if (!isArraySafe(value)) return 0;
   try {
     return value.length;
   } catch (_error) {
@@ -491,7 +573,7 @@ function safeArrayLength(value) {
  * @returns {Array<unknown>}
  */
 function safeSteps(value) {
-  if (!Array.isArray(value)) return [];
+  if (!isArraySafe(value)) return [];
   const length = Math.min(safeArrayLength(value), 4096);
   const steps = [];
   for (let index = 0; index < length; index += 1) {
@@ -502,6 +584,74 @@ function safeSteps(value) {
     }
   }
   return steps;
+}
+
+/**
+ * Snapshot an untrusted portfolio `balances` map into a NULL-PROTOTYPE object of
+ * finite numbers, reading each entry as own data only.
+ *
+ * Null-prototype because the balances are keyed below by a caller-supplied
+ * `asset`, and a step naming `asset: '__proto__'` (plain JSON) would otherwise
+ * resolve `balances['__proto__']` to `Object.prototype`, weighting the
+ * concentration cap against a NaN it can never trip. Own-data-only (never a plain
+ * spread `{ ...source }`, which runs own accessors) because a hostile `balances`
+ * whose entry is a throwing getter owes the gate a verdict, not an exception out
+ * of `audit()`; a non-finite balance is dropped, the fail-closed direction for a
+ * count feeding a risk bound. A well-formed plain-data map snapshots identically.
+ *
+ * @param {unknown} source
+ * @returns {Record<string, number>}  a null-prototype own-data map
+ */
+function snapshotBalances(source) {
+  const out = Object.create(null);
+  if (source == null || typeof source !== 'object') return out;
+  let names;
+  try {
+    names = Object.getOwnPropertyNames(source);
+  } catch (_error) {
+    return out; // a hostile ownKeys trap owes a verdict, not an exception
+  }
+  for (const name of names) {
+    const value = readOwnFiniteNumber(source, name);
+    if (value != null) out[name] = value;
+  }
+  return out;
+}
+
+/**
+ * Snapshot an untrusted step `route` into a plain object carrying only the fields
+ * `stepHasRealRoute` reads (`place`, `substrate`, `needs_internal_detail`), each
+ * read as own data. `stepHasRealRoute` lives in `substrates.js` (outside this
+ * diff) and plain-`[[Get]]`s those fields, so the containment has to happen HERE,
+ * before the value crosses into it: this hands it a plain snapshot on which its
+ * `[[Get]]`s and its `flags.includes` cannot run caller code. `needs_internal_detail`
+ * is materialized into a real, bounded string array so `.includes` resolves to
+ * `Array.prototype.includes`, not a hostile own method. A well-formed plain-data
+ * route snapshots to the same fields, so the reachability verdict is unchanged.
+ *
+ * @param {unknown} route   own-data `route` value, already known to be an object
+ * @returns {{ place: unknown, substrate: unknown, needs_internal_detail: string[] }}
+ */
+function snapshotRoute(route) {
+  const flags = [];
+  const flagsRaw = readOwn(route, 'needs_internal_detail');
+  if (isArraySafe(flagsRaw)) {
+    const length = Math.min(safeArrayLength(flagsRaw), 4096);
+    for (let index = 0; index < length; index += 1) {
+      let flag;
+      try {
+        flag = flagsRaw[index];
+      } catch (_error) {
+        continue; // a hostile element getter is not a flag
+      }
+      if (typeof flag === 'string') flags.push(flag);
+    }
+  }
+  return {
+    place: readOwn(route, 'place'),
+    substrate: readOwn(route, 'substrate'),
+    needs_internal_detail: flags,
+  };
 }
 
 /**
@@ -610,7 +760,7 @@ function recomputeProjectionId(forecast) {
  */
 function citedProjectionIds(proposal) {
   const cited = readOwn(proposal, 'cited_forecasts');
-  if (!Array.isArray(cited)) return [];
+  if (!isArraySafe(cited)) return [];
   const ids = [];
   // The `length` read is guarded like every per-element read below: a Proxy
   // array whose `length` trap throws owes the gate a fail-closed verdict (an
