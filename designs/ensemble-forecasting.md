@@ -1002,14 +1002,21 @@ binary pre-execution gate for the graded planner downweight it also asked for.
   descriptor to *provenance*. Because the descriptor is a hashed component of the
   projection artifact (`projectionArtifact` folds it into the JSON that
   `projectionId` hashes), the gate recomputes that id and requires the proposal to
-  cite it: a descriptor lifted onto a thinner or foreign forecast — tampered at
-  rest or in flight before the executor's fire-time re-audit — changes the id and
-  no longer matches a cited one, so it fails closed. This is the sibling of
+  cite it: a forged or foreign descriptor SUBSTITUTED onto the forecast — swapped
+  at rest or in flight before the executor's fire-time re-audit — recomputes to an
+  id that matches no honest cited one, so it fails closed. This is the sibling of
   invariant 4's `proposal_hash` recompute and shares its one residual: a wholly
   self-consistent, self-cited artifact is measured, not disproven, since the
   auditor holds no price window to recount coverage from scratch. What the binding
   enforces is that the ratio it judges belongs to the artifact the proposal
-  committed to; the forged-descriptor path the pre-merge review flagged is closed.
+  committed to. Its scope is descriptor SUBSTITUTION, not full proposal-tamper:
+  `hashProposal` commits to the proposal's `steps` alone, so `cited_forecasts`
+  sits outside `proposal_hash`. A payload-level tamperer who swaps the descriptor
+  AND appends its recomputed id to `cited_forecasts` therefore still clears the
+  binding — the disclosed residual, measured rather than disproven, the same shape
+  as invariant 4's self-hashed proposal. Widening `hashProposal` to cover the
+  citations would close it, at the cost of changing the proposal commitment; that
+  is out of this change's scope.
 - **Wiring.** `runOodaCycle` auto-enables the forecaster report when only the
   auditor knob is set, so a lone gate knob yields a live gate. An explicit
   `forecaster.reportDataSufficiency: false` still wins, but no longer disarms the
@@ -1061,8 +1068,8 @@ binary pre-execution gate for the graded planner downweight it also asked for.
   identically, so `round12` is exported from `forecaster.js` and imported by the
   auditor and the CLI report rather than copied under a "mirrors X" comment. A
   drift there would fail every honest forecast closed — an availability failure
-  on a live-execution gate. The same discipline had to reach one level further
-  than it first did, to the things *built on* the quantizer: `formatCoverage`
+  on a live-execution gate. The same discipline reaches one level further, to the
+  things *built on* the quantizer: `formatCoverage`
   (the CLI re-printed the same evidence through a flat `toFixed(2)`, which renders
   a coverage that PASSES a 0.001 requirement as `0.00`, the number that reads as
   the OFF value) and the arming/usability predicates (`coverageGateArmed`,
@@ -1098,17 +1105,8 @@ binary pre-execution gate for the graded planner downweight it also asked for.
   `forecaster.js` pulls in no such chain, so the producing side is exposed in an
   ordinary process and that test's attack is a live one.
 
-Reconciled in this change: the invariant now appears in
-`skills/pre-execution-audit/SKILL.md` (the canonical home, § 7 plus its config
-knob, and #6 there now names the code's `place-route-reachability`),
-`roles/auditor/AGENT.md`, `packages/pipeline/README.md`, and the `agent-tools.js`
-schemas for `audit_proposal` and `simulate_execution` — the last of these being
-the surface an LLM caller actually reads at run time, where an under-reported
-config bag means a gate the caller cannot arm and a rejection naming an invariant
-its own tool contract denied existed.
-
-Still outstanding: the descriptor is not bound to the projection the proposal
-cites (`projectionId` covers `dataSufficiency`, but invariant 1 only counts
-citations), which is what would turn this gate from self-consistency into
-provenance. The graded planner downweight the open question also asked about
-remains unbuilt; `planner.js` is untouched.
+Still outstanding: the graded planner downweight the open question also asked
+about remains unbuilt; `planner.js` is untouched. And the binding is descriptor-
+substitution-scoped, not full proposal-tamper resistance — a payload tamperer who
+also rewrites `cited_forecasts` is out of its reach until `hashProposal` covers
+the citations (see "What the recompute buys" above).

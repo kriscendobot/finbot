@@ -155,19 +155,30 @@ artifact (`projectionArtifact` folds it into the JSON that `projectionId`
 hashes), the gate recomputes that id and requires the proposal to cite it. For a
 **plain-data forecast** — the gate's real threat surface, since the
 `audit_proposal` tool and the executor's fire-time re-audit both receive parsed
-JSON, which carries no accessors, Proxies, or `toJSON` — a descriptor lifted onto
-a thinner or foreign forecast, tampered at rest or in flight, changes the
-recomputed id and no longer matches a cited one, so it fails closed. This closes
-the "an internally consistent fabrication still clears it" gap that
-self-consistency alone leaves open.
+JSON, which carries no accessors, Proxies, or `toJSON` — a forged or foreign
+descriptor SUBSTITUTED onto the forecast recomputes to an id that matches no
+honest cited one, so it fails closed. This buys DESCRIPTOR-SUBSTITUTION
+resistance: it closes the "a forged descriptor borrowing another artifact's
+coverage clears it" gap that self-consistency alone leaves open. It does NOT buy
+full at-rest/in-flight proposal-tamper resistance — see the payload-tamper
+residual below.
 
-Two residuals remain, both disclosed rather than closed:
+Three residuals remain, all disclosed rather than closed:
 
 - **Self-consistency**, shared with invariant 4: a wholly self-consistent,
   self-cited artifact is measured, not disproven — exactly as a self-hashed
   proposal clears invariant 4's reproducibility check. The auditor holds no price
   window to recount the coverage from scratch; what the binding enforces is that
   the ratio it judges belongs to the forecast artifact the proposal committed to.
+- **Payload-level proposal tamper**, the scope limit above: `hashProposal` commits
+  to the proposal's `steps` alone, so `cited_forecasts` sits OUTSIDE `proposal_hash`
+  (a bare checksum). A tamperer who swaps the descriptor AND appends its recomputed
+  `projectionId` to `cited_forecasts` still clears the binding — the reproducibility
+  check passes and the gate approves. The binding buys descriptor SUBSTITUTION
+  resistance (a forged/foreign descriptor whose id matches no honest cited id fails
+  closed), not resistance to a tamperer who rewrites the citation list too. Closing
+  it would mean widening `hashProposal` to cover the citations, changing the
+  proposal commitment — out of scope here.
 - **In-process split view**, out of the threat model: a hostile in-process object
   whose `getOwnPropertyDescriptor('dataSufficiency').value` (the gate's own-data
   snapshot) diverges from its `[[Get]]`/`toJSON` view (what `projectionId` hashes)
@@ -182,6 +193,30 @@ Two residuals remain, both disclosed rather than closed:
 
 Callers therefore pass the whole projection through from the cited run and cite
 its `projectionId`; they never synthesize a descriptor to satisfy the gate.
+
+### 8. Config integrity (fail-closed, emitted only on a bad knob)
+
+The audit config carries the safety bounds themselves, and it arrives on the same
+untrusted surface as the proposal and forecast (the `audit_proposal` tool, the
+executor's fire-time re-audit). Two ways a knob can be present yet not a bound the
+gate can honor, both of which REJECT via a `config-integrity` invariant emitted
+only when one occurs (a plain-data config with legible knobs leaves the verdict
+byte-identical to before):
+
+- **Unreadable as own data** — an own accessor (reading it would run caller code
+  inside `audit()`), an INHERITED value (not evidence THIS config set it — a
+  single polluted `Object.prototype.tailFloorPct` would otherwise stand in), or a
+  hostile descriptor trap. Defaulting a safety bound to a built-in that may be
+  LOOSER than the value the operator set is the fail-open this refuses.
+- **Non-finite** — a readable `NaN`/`±Infinity` bound: every `value > NaN`
+  comparison is false, so the bound silently never trips. `dataSufficiencyMinCoverage`
+  is exempt only because it has its own usability predicate (§ 7) that already
+  fails it closed.
+
+Either way the bound cannot legibly bite, so the gate fails CLOSED rather than
+approving under it. `dataSufficiencyMinCoverage` is read through the same
+own-data-only path, so an inherited threshold ARMS the gate (§ 7) rather than
+silently disarming it.
 
 ## Procedure
 
