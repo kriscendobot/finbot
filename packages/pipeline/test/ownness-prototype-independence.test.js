@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { computeDataSufficiency } from '../forecaster.js';
+import { computeDataSufficiency, worstAssetPersistence } from '../forecaster.js';
 
 // Both the producing side (`hasOwnPositivePrice`) and the consuming side
 // (`readOwn`) read an untrusted property through its own DESCRIPTOR rather than
@@ -61,6 +61,34 @@ test('forecaster: a polluted Object.prototype.value supplies no price', () => {
     () => computeDataSufficiency({ frames, horizon: 2, assets: ['ATOM'] }),
   );
   assert.deepEqual(polluted, clean, 'the polluted prototype changed nothing');
+});
+
+test('forecaster: a polluted Object.prototype.value supplies no regime persistence', () => {
+  // `readOwnDataProperty` is the same descriptor+`hasOwn(_, 'value')` question the
+  // frame-price read asks, and `worstAssetPersistence` uses it to read
+  // `volFit.assets[asset].persistence` — the value that keys the regime tail floor
+  // and horizon stretch. An ACCESSOR persistence carries no own `value`, so the
+  // honest read finds no regime; an `in`-based check would let one polluted
+  // `Object.prototype.value` name a worst asset at the polluted persistence and
+  // MOVE the floor the auditor enforces. This pins the second reader, not only
+  // `hasOwnPositivePrice`.
+  const volFit = {
+    assets: { ATOM: Object.defineProperty({}, 'persistence', { get: () => 0.99, enumerable: true }) },
+  };
+  const clean = worstAssetPersistence(volFit);
+  assert.deepEqual(clean, { worstAsset: null, persistence: 0 });
+
+  const polluted = withPollutedValue(0.99, () => worstAssetPersistence(volFit));
+  assert.deepEqual(polluted, clean, 'the polluted prototype named no regime');
+});
+
+test('forecaster: an own DATA persistence is still read as a regime', () => {
+  const volFit = { assets: { ATOM: { persistence: 0.95 } } };
+  const expected = worstAssetPersistence(volFit);
+  assert.deepEqual(expected, { worstAsset: 'ATOM', persistence: 0.95 });
+
+  const polluted = withPollutedValue(0.1, () => worstAssetPersistence(volFit));
+  assert.deepEqual(polluted, expected, 'the honest own-data regime still reads');
 });
 
 test('forecaster: an own DATA property is still read — the guard narrowed nothing real', () => {
