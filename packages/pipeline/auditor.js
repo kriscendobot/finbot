@@ -74,16 +74,33 @@ export function audit(input, config = {}) {
   // answers `0.8` and then `0` would set a floor the gate never agreed to. One
   // read per knob, uniformly — the same discipline the forecast's own fields get
   // below, on the same untrusted `audit_proposal` / fire-time re-audit surface.
-  const withDefault = (value, fallback) => (value != null ? value : fallback);
-  const maxStepPct = withDefault(readOwn(config, 'maxStepPct'), 0.25);
-  const maxDayPct = withDefault(readOwn(config, 'maxDayPct'), 0.50);
-  const concentrationCapPct = withDefault(readOwn(config, 'concentrationCapPct'), 0.80);
-  const tailFloorPct = withDefault(readOwn(config, 'tailFloorPct'), 0.80);
-  const regimeTailBump = withDefault(readOwn(config, 'regimeTailBump'), 0);
-  const regimePersistenceLo = withDefault(readOwn(config, 'regimePersistenceLo'), 0.70);
-  const regimePersistenceHi = withDefault(readOwn(config, 'regimePersistenceHi'), 0.98);
-  const regimeTailFloorCap = withDefault(readOwn(config, 'regimeTailFloorCap'), 0.98);
-  const stalenessWindowTicks = withDefault(readOwn(config, 'stalenessWindowTicks'), 5);
+  //
+  // A knob that is PRESENT but unreadable as an own data property — an own
+  // accessor, an inherited value, or a hostile descriptor trap — must not
+  // silently fall back to the built-in default, which can be LOOSER than the
+  // value the operator set (a getter `tailFloorPct` defaulting to 0.80, not the
+  // 0.99 they intended). A safety gate fails CLOSED: an unreadable knob is
+  // recorded and rejects the proposal via the `config-integrity` invariant
+  // below, rather than approving under a floor the config never legibly stated.
+  // An ABSENT knob still takes its default — that is the documented off state.
+  const unreadableKnobs = [];
+  const knob = (key, fallback) => {
+    const value = readConfigKnob(config, key);
+    if (value === UNREADABLE_KNOB) {
+      unreadableKnobs.push(key);
+      return fallback;
+    }
+    return value != null ? value : fallback;
+  };
+  const maxStepPct = knob('maxStepPct', 0.25);
+  const maxDayPct = knob('maxDayPct', 0.50);
+  const concentrationCapPct = knob('concentrationCapPct', 0.80);
+  const tailFloorPct = knob('tailFloorPct', 0.80);
+  const regimeTailBump = knob('regimeTailBump', 0);
+  const regimePersistenceLo = knob('regimePersistenceLo', 0.70);
+  const regimePersistenceHi = knob('regimePersistenceHi', 0.98);
+  const regimeTailFloorCap = knob('regimeTailFloorCap', 0.98);
+  const stalenessWindowTicks = knob('stalenessWindowTicks', 5);
   // The threshold's arming and usability tests are the exported predicates, so
   // the CLI's flag validation and the cycle's evidence auto-enable cannot drift
   // from the gate they claim to mirror.
@@ -104,9 +121,30 @@ export function audit(input, config = {}) {
   const nav = navOf(input.portfolio, prices);
   const results = [];
 
-  // 1. Citation completeness.
-  const hasSteps = proposal.steps.length > 0;
-  const cited = proposal.cited_forecasts.length > 0 && proposal.cited_analyses.length > 0;
+  // 0. Config integrity: a safety knob that was present but unreadable (own
+  // accessor, inherited, or a hostile descriptor trap) fails the gate closed
+  // rather than approving under a silently-defaulted floor. Emitted ONLY when a
+  // knob was unreadable, so a plain-data config (the JSON tool boundary) leaves
+  // the verdict byte-identical to before.
+  if (unreadableKnobs.length > 0) {
+    results.push({
+      name: 'config-integrity',
+      pass: false,
+      detail: `audit config knob(s) ${unreadableKnobs.map((k) => sanitizedLabelOr(k, '(unnamed)')).join(', ')} `
+        + 'are present but not readable as own data properties (an accessor, an inherited value, or a '
+        + 'hostile descriptor); a safety bound cannot silently default to a possibly-looser value '
+        + '(fails closed)',
+    });
+  }
+
+  // 1. Citation completeness. The three array lengths are read through a guard:
+  // a hostile proposal whose `steps` / `cited_*` `length` trap throws owes the
+  // gate a fail-closed verdict (an unmeasurable citation list reads as empty and
+  // rejects), not an exception out of `audit()` — the same contract
+  // `citedProjectionIds` keeps for the provenance binding.
+  const hasSteps = safeArrayLength(readOwn(proposal, 'steps')) > 0;
+  const cited = safeArrayLength(readOwn(proposal, 'cited_forecasts')) > 0
+    && safeArrayLength(readOwn(proposal, 'cited_analyses')) > 0;
   results.push({
     name: 'citation-completeness',
     pass: hasSteps && cited,
@@ -365,6 +403,72 @@ function readOwnFiniteNumber(object, key) {
 }
 
 /**
+ * The length of an untrusted array value, or 0 when it is not an array or a
+ * hostile `length` trap throws. A fail-closed count: a list the auditor cannot
+ * measure is treated as empty, which rejects rather than crashes.
+ *
+ * @param {unknown} value
+ * @returns {number}
+ */
+function safeArrayLength(value) {
+  if (!Array.isArray(value)) return 0;
+  try {
+    return value.length;
+  } catch (_error) {
+    return 0;
+  }
+}
+
+/**
+ * Sentinel distinguishing "this config knob is PRESENT but unreadable" from
+ * "absent" (`undefined`). A safety knob that a config carries yet the auditor
+ * cannot read as an own data property must fail the gate closed, never silently
+ * default; an absent knob still takes its documented default. See `audit()`'s
+ * `config-integrity` invariant.
+ */
+const UNREADABLE_KNOB = Symbol('unreadable audit config knob');
+
+/**
+ * Read one audit config knob, distinguishing absent from present-but-unreadable.
+ *
+ * Returns the own data value when the knob is a readable own data property,
+ * `undefined` when it is genuinely absent (→ the caller defaults), and
+ * `UNREADABLE_KNOB` when it is PRESENT but unreadable — an own ACCESSOR (calling
+ * it would run caller code inside `audit()` and could answer differently on a
+ * second read), an INHERITED value (not evidence THIS config supplied it, the
+ * same own-only discipline `readOwn` applies), or a hostile descriptor trap. The
+ * auditor fails closed on that sentinel rather than defaulting a safety bound to
+ * a possibly-looser built-in.
+ *
+ * @param {unknown} config
+ * @param {string} key
+ * @returns {unknown}
+ */
+function readConfigKnob(config, key) {
+  if (config == null || typeof config !== 'object') return undefined;
+  let descriptor;
+  try {
+    descriptor = getOwnPropertyDescriptor(config, key);
+  } catch (_error) {
+    return UNREADABLE_KNOB; // a hostile trap cannot show the operator's intent
+  }
+  if (descriptor) {
+    // Own property present: a data descriptor is readable, an accessor is not.
+    return hasOwn(descriptor, 'value') ? descriptor.value : UNREADABLE_KNOB;
+  }
+  // Not an own property. An inherited value is not evidence this config supplied
+  // the knob, but its PRESENCE means the reader cannot assume the operator left
+  // it unset either — fail closed rather than default a safety bound.
+  let inherited;
+  try {
+    inherited = key in config;
+  } catch (_error) {
+    return UNREADABLE_KNOB;
+  }
+  return inherited ? UNREADABLE_KNOB : undefined;
+}
+
+/**
  * Recompute the forecast's canonical projection id from the artifact the caller
  * supplied, or `null` when it cannot be computed. `projectionId` folds the
  * data-sufficiency descriptor into the hashed artifact, so this id changes the
@@ -375,15 +479,27 @@ function readOwnFiniteNumber(object, key) {
  * an exception out of `audit()`.
  *
  * Unlike the descriptor reads, this recompute goes through `projectionId`'s plain
- * property access and `JSON.stringify`, so a caller accessor CAN run here — but
- * it cannot corrupt the verdict. It reaches this point only after the descriptor
- * passed the own-data checks above, the detail line quotes those own-data values
- * (never this recompute's), and the binding compares only the resulting HASH, so
- * a side-effecting getter changes at most the attacker's own id, which then
- * fails to match a cited one. Recomputing with the SAME `projectionId` the
- * producer/citer used is what guarantees an honest plain-data forecast hashes
- * identically on both sides; a bespoke own-data snapshot here would risk drifting
- * from that hash and fail-closing honest forecasts.
+ * property access and `JSON.stringify`, so a caller accessor CAN run here. For a
+ * PLAIN-DATA forecast — the real threat surface, since the `audit_proposal` tool
+ * and the executor's fire-time re-audit both receive parsed JSON, which carries
+ * no accessors, Proxies, or `toJSON` — the two reads are identical and the
+ * binding is sound: a side-effecting getter changes at most the attacker's own
+ * id, which then fails to match a cited one. Recomputing with the SAME
+ * `projectionId` the producer/citer used is what guarantees an honest plain-data
+ * forecast hashes identically on both sides; a bespoke own-data snapshot here
+ * would risk drifting from that hash and fail-closing honest forecasts.
+ *
+ * The RESIDUAL this leaves is an IN-PROCESS split view, out of the threat model:
+ * a hostile object whose `getOwnPropertyDescriptor('dataSufficiency').value` (the
+ * gate's own-data snapshot) diverges from its `[[Get]]`/`toJSON` (what this
+ * recompute hashes) — a Proxy with disagreeing `getOwnPropertyDescriptor`/`get`
+ * traps, or a `toJSON` — could present forged counts to the gate while presenting
+ * an honest artifact here, binding forged coverage to an honest cited id. That
+ * requires a live hostile JS object in the auditor's own process; it cannot cross
+ * the JSON boundary that is this function's actual attack surface. Closing it
+ * would mean recomputing the id from the same own-data snapshot the gate judges,
+ * which cannot be done without drifting from `projectionId` and fail-closing the
+ * honest plain-data forecasts above — so the split view is disclosed, not fixed.
  *
  * @param {unknown} forecast
  * @returns {string|null}
@@ -411,7 +527,11 @@ function citedProjectionIds(proposal) {
   const cited = readOwn(proposal, 'cited_forecasts');
   if (!Array.isArray(cited)) return [];
   const ids = [];
-  const length = Math.min(cited.length, 4096);
+  // The `length` read is guarded like every per-element read below: a Proxy
+  // array whose `length` trap throws owes the gate a fail-closed verdict (an
+  // empty citation list, which no recomputed id can match), not an exception out
+  // of `audit()` — the docstring promises a verdict, not a throw.
+  const length = Math.min(safeArrayLength(cited), 4096);
   for (let index = 0; index < length; index += 1) {
     let id;
     try {
@@ -640,12 +760,23 @@ function readDataSufficiency(forecast) {
  * recomputes `proposal_hash` from the proposal's own steps — and it inherits the
  * same residual: a wholly self-consistent, self-cited artifact is measured, not
  * disproven, exactly as a self-hashed proposal clears invariant 4. What the
- * binding removes is the gap the finding named — a forged descriptor borrowing
- * the coverage of an artifact the proposal never committed to, whether swapped
- * at rest or in flight before the executor's fire-time re-audit. The auditor
- * holds no price window to recount against, so it cannot re-derive the coverage
- * from scratch; what it enforces is that the ratio it judges is the ratio the
- * cited artifact's own evidence supports.
+ * binding removes is the gap the finding named for PLAIN-DATA forecasts — a
+ * forged descriptor borrowing the coverage of an artifact the proposal never
+ * committed to, swapped at rest or in flight before the executor's fire-time
+ * re-audit. That is the binding's real scope, because the `audit_proposal` tool
+ * and the fire-time re-audit both receive parsed JSON: plain data, on which the
+ * gate's own-data descriptor read and `projectionId`'s plain access see the same
+ * values, so a swapped descriptor changes the recomputed id and stops matching.
+ * The auditor holds no price window to recount against, so it cannot re-derive
+ * the coverage from scratch; what it enforces is that the ratio it judges is the
+ * ratio the cited artifact's own evidence supports.
+ *
+ * OUT of that scope, and disclosed rather than closed (see `recomputeProjectionId`):
+ * an IN-PROCESS hostile object that diverges its `getOwnPropertyDescriptor` view
+ * (this gate's snapshot) from its `[[Get]]`/`toJSON` view (`projectionId`'s hash)
+ * can bind forged coverage to an honest cited id. It needs a live JS Proxy or
+ * `toJSON` in the auditor's own process and cannot cross the JSON boundary, so it
+ * is an out-of-threat-model residual, not a reachable bypass of the tool gate.
  *
  * @param {object} input
  * @param {unknown} input.forecast          untrusted, caller-supplied
