@@ -77,25 +77,35 @@ export async function runOodaCycle(input) {
     auditorConfig.regimeTailBump = 0.1;
   }
 
-  // Zero is a valid explicit observed-window size (and must remain zero when
-  // the coverage gate is armed); only an omitted value takes the default.
-  // A malformed direct API window must not flow through `slice` coercion and
-  // accidentally select the entire history as coverage evidence.
+  // Zero is a valid explicit observed-window size (and must remain zero when the
+  // coverage gate is armed); only an omitted value takes the default 10. A
+  // MALFORMED explicit window (NaN, fractional, negative, unsafe) must never flow
+  // into `windowFromHistory`, whose `Math.max(0, length - NaN)` slice-start is
+  // `NaN` and selects the ENTIRE history — an inflation of the oracle/vol-fit
+  // window that diverges from the pre-feature `|| 10` coercion EVEN WHEN THE
+  // COVERAGE GATE IS OFF. So the malformed test runs on both paths: armed, an
+  // unusable window leaves the auditor no coverage evidence and FAILS the
+  // data-sufficiency invariant closed (empty readings); off the gate, it coerces
+  // to the default window, so a default-config cycle stays byte-identical to
+  // before for malformed inputs too. A valid explicit window (0 included) is
+  // used verbatim on either path.
   const coverageGateOn = coverageGateArmed(auditorConfig.dataSufficiencyMinCoverage);
+  const validTickCount = (value) => Number.isSafeInteger(value) && value >= 0;
   const requestedWindowTicks = config.windowTicks ?? 10;
   const requestedFitWindowTicks = config.fitWindowTicks;
-  const validTickCount = (value) => Number.isSafeInteger(value) && value >= 0;
-  const invalidCoverageWindow = coverageGateOn
-    && (!validTickCount(requestedWindowTicks)
-      || (requestedFitWindowTicks != null && !validTickCount(requestedFitWindowTicks)));
-  const windowTicks = invalidCoverageWindow ? 0 : requestedWindowTicks;
+  const windowTicksValid = validTickCount(requestedWindowTicks);
+  const fitWindowTicksValid = requestedFitWindowTicks == null || validTickCount(requestedFitWindowTicks);
+  const windowMalformed = !windowTicksValid || !fitWindowTicksValid;
+  const invalidCoverageWindow = coverageGateOn && windowMalformed;
+  // Off the gate a malformed window coerces to the default 10 (the pre-feature
+  // behaviour); armed, `invalidCoverageWindow` collapses it to an empty window.
+  const windowTicks = invalidCoverageWindow ? 0 : (windowTicksValid ? requestedWindowTicks : 10);
+  // `windowFromHistory(history, 0)` already returns `[]` — its start is
+  // `Math.max(0, length - 0) === length`, so a valid zero window needs no
+  // special case; the only branch is the fail-closed empty-window one above.
   const readings = invalidCoverageWindow
     ? []
-    : input.readings
-    // `slice(-0)` means `slice(0)`, so delegating an explicit zero to
-    // windowFromHistory would select the entire history — the exact opposite
-    // of a zero-tick observed window and an inflation of gate evidence.
-    || (coverageGateOn && windowTicks === 0 ? [] : windowFromHistory(input.history || [], windowTicks));
+    : input.readings || windowFromHistory(input.history || [], windowTicks);
 
   // Separable fit window: the oracle deviation and realized-vol reads want a
   // short, recent window (`readings`), but the GARCH vol-surface fit wants a
@@ -105,7 +115,7 @@ export async function runOodaCycle(input) {
   // the regime read still lands "where in the vol cycle we are now". Absent or
   // <= windowTicks → fitReadings === readings and the cycle is byte-identical.
   const fitWindowTicks = !invalidCoverageWindow
-    && requestedFitWindowTicks && requestedFitWindowTicks > windowTicks
+    && fitWindowTicksValid && requestedFitWindowTicks && requestedFitWindowTicks > windowTicks
     ? requestedFitWindowTicks
     : windowTicks;
   const fitReadings = invalidCoverageWindow
