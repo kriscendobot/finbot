@@ -2,13 +2,12 @@
  * Pipeline functions, exposed as harness tools.
  *
  * The OODA roles are deterministic functions over the simulator world (see
- * this package's `index.js`). This module wraps the orient-phase scoring
- * functions as `@finbot/harness` Tool definitions so an inference-driven
- * subagent can CALL them as tools — the "automatic inference, automation born
- * from inference" blend the design describes: the analyzer subagent reasons in
- * natural language over the oracle-watcher output, then delegates the actual
- * risk-adjusted scoring to the deterministic `analyze` function rather than
- * doing arithmetic in its head.
+ * this package's `index.js`). This module wraps the OBSERVE, ORIENT, DECIDE,
+ * AUDIT, and dry-run ACT functions as `@finbot/harness` Tool definitions so an
+ * inference-driven subagent can CALL them as tools — the "automatic inference,
+ * automation born from inference" blend the design describes. Each stage
+ * reasons in natural language but delegates deterministic computation to its
+ * corresponding pipeline function rather than doing it by hand.
  *
  * Each tool's `run` calls the pure function and returns a `toolResult` whose
  * JSON block is the function's structured output (so the harness loop feeds it
@@ -21,6 +20,10 @@
  * nor the pipeline, so the wiring that needs the pipeline's functions belongs
  * here, where that dependency is already paid.
  */
+
+// `harden` is used to snapshot dispatch-bound inputs. Import SES here rather
+// than relying on a caller having happened to import cap-attenuation first.
+import 'ses';
 
 import { toolResult } from '@finbot/harness/schemas';
 import { Portfolio } from '@finbot/simulator/portfolio';
@@ -38,7 +41,7 @@ import { execute } from './executor.js';
  * @returns {Record<string, object>} a registry of `assertToolDef`-shaped tools
  */
 export function pipelineToolRegistry() {
-  const tools = [scoreOpportunitiesTool(), realizedVolatilityTool(), observeOpportunitiesTool()];
+  const tools = [scoreOpportunitiesTool(), realizedVolatilityTool(), legacyObserveOpportunitiesTool()];
   const registry = {};
   for (const t of tools) registry[t.name] = t;
   return registry;
@@ -46,6 +49,48 @@ export function pipelineToolRegistry() {
 
 /** Names of the tools in {@link pipelineToolRegistry}, for capability subsets. */
 export const PIPELINE_TOOL_NAMES = ['score_opportunities', 'realized_volatility', 'observe_opportunities'];
+
+/**
+ * Build the observe-phase (oracle-watcher) tool registry: the deterministic
+ * deviation detector exposed as `observe_opportunities`, so an inference-driven
+ * observer subagent can reason over a price-reading window and delegate the
+ * actual threshold-crossing detection to the deterministic `observeOpportunities`
+ * function rather than eyeballing the price moves by hand. Strictly read-only —
+ * the observer consumes a price history and produces opportunity-deviation
+ * events; it never trades and no wallet capability is reachable from the
+ * observe-phase tool subset. This is the OBSERVE-stage counterpart to the
+ * orient/decide/act registries: it exposes ONLY the detector, keeping the
+ * stage's authority to the least it needs (the risk-denominator
+ * `realized_volatility` is an orient-phase concern, not an observe one).
+ *
+ * @param {object} trustedInput oracle window, threshold, and asset allowlist
+ *   captured at dispatch creation; it is cloned and hardened before vending.
+ * @returns {Record<string, object>} a registry of `assertToolDef`-shaped tools
+ */
+export function observerToolRegistry(trustedInput) {
+  const tools = [observeOpportunitiesTool(boundObservationWindow(trustedInput))];
+  const registry = {};
+  for (const t of tools) registry[t.name] = t;
+  return registry;
+}
+
+/** Names of the tools in {@link observerToolRegistry}, for capability subsets. */
+export const OBSERVER_TOOL_NAMES = ['observe_opportunities'];
+
+/**
+ * Create the frozen, defensive snapshot used by an OBSERVE dispatch. Both the
+ * tool closure and the canonical recompute receive this exact object so model
+ * arguments and later caller mutation cannot alter the input set.
+ *
+ * @param {object} input trusted observer input
+ * @returns {object} a hardened deep clone
+ */
+export function boundObservationWindow(input) {
+  if (input == null || typeof input !== 'object') {
+    throw new TypeError('observerToolRegistry requires dispatch-bound trusted input');
+  }
+  return harden(structuredClone(input));
+}
 
 /**
  * Build the decide-phase (planner) tool registry: the deterministic `plan`
@@ -417,30 +462,59 @@ function realizedVolatilityTool() {
   };
 }
 
-/** `observeOpportunities` as a tool (the observe-phase detector). */
-function observeOpportunitiesTool() {
+/** `observeOpportunities` as a dispatch-bound tool (the observe-phase detector). */
+function observeOpportunitiesTool(trustedInput) {
   return {
     name: 'observe_opportunities',
     description:
-      'Detect opportunity-deviation events over a price-reading window: assets whose price has '
-      + 'deviated from the window reference by more than thresholdBps. Read-only. Returns the '
-      + 'crossings (most significant first) and the latest price book.',
+      'Detect opportunity-deviation events over this dispatch\'s trusted price-reading window. '
+      + 'Inputs are bound by the dispatch and cannot be changed by the model. Read-only. Returns '
+      + 'the crossings (most significant first) and the latest price book.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+      additionalProperties: false,
+    },
+    run: async () => {
+      try {
+        // The model chooses whether to call the detector, but not its inputs.
+        const source = trustedInput;
+        const options = {};
+        if (source.thresholdBps != null) options.thresholdBps = source.thresholdBps;
+        if (source.assets) options.assets = source.assets;
+        const observed = observeOpportunities({ readings: source.readings || [] }, options);
+        return toolResult(true, [
+          { type: 'json', value: observed },
+          { type: 'text', text: `observe_opportunities: ${observed.crossings.length} crossing(s)` },
+        ]);
+      } catch (err) {
+        return toolResult(false, [{ type: 'text', text: `observe_opportunities failed: ${err.message || err}` }]);
+      }
+    },
+  };
+}
+
+/** Backward-compatible, caller-parameterized observer for composed registries. */
+function legacyObserveOpportunitiesTool() {
+  return {
+    name: 'observe_opportunities',
+    description: 'Detect opportunity-deviation events over a supplied price-reading window. Read-only.',
     inputSchema: {
       type: 'object',
       properties: {
         readings: { type: 'array', description: 'ordered window: [{ t, prices: { ASSET: price } }]' },
-        thresholdBps: { type: 'number', description: 'minimum |deviation| in basis points to emit (default 50)' },
+        thresholdBps: { type: 'number', description: 'minimum |deviation| in basis points (default 50)' },
         assets: { type: 'array', description: 'optional asset allowlist' },
       },
       required: ['readings'],
       additionalProperties: true,
     },
-    run: async (args) => {
+    run: async (toolArguments) => {
       try {
-        const opts = {};
-        if (args.thresholdBps != null) opts.thresholdBps = args.thresholdBps;
-        if (args.assets) opts.assets = args.assets;
-        const observed = observeOpportunities({ readings: args.readings || [] }, opts);
+        const options = {};
+        if (toolArguments.thresholdBps != null) options.thresholdBps = toolArguments.thresholdBps;
+        if (toolArguments.assets) options.assets = toolArguments.assets;
+        const observed = observeOpportunities({ readings: toolArguments.readings || [] }, options);
         return toolResult(true, [
           { type: 'json', value: observed },
           { type: 'text', text: `observe_opportunities: ${observed.crossings.length} crossing(s)` },

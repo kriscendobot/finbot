@@ -3,27 +3,21 @@
  *
  * `runOodaCycle` (this package's `ooda-cycle.js`) runs every stage as a
  * deterministic function call — pure automation, no LLM. This module is the
- * other half the design asks for: drive an OODA stage by **inference**, with
- * the deterministic pipeline functions available to the reasoning subagent as
- * tools. Concretely, `dispatchAnalyzer` spawns the analyzer (ORIENT) as an
- * LLM-shaped subagent (via `@finbot/harness`'s `spawn`), hands it the
- * oracle-watcher output in its brief plus the orient-phase pipeline tools, and
- * lets it reason over the opportunities and CALL `score_opportunities` (the
- * deterministic `analyze`) as a tool. `dispatchPlanner` is the DECIDE-stage
- * counterpart: it hands the planner subagent the analyzer's target weights and
- * a forecast, plus the decide-phase tools, and lets it reason then CALL
- * `propose_rebalance` (the deterministic `plan`) to emit the ymax-shaped
- * proposal. Each stage's product — the scored AnalyzerResult, the hashed
- * Proposal — is extracted from the tool-execution events, so the
- * inference-driven path and the headless path yield the same structured output.
+ * corresponding inference-driven form for every OODA stage: OBSERVE dispatches
+ * the oracle-watcher, ORIENT dispatches the analyzer, DECIDE dispatches the
+ * planner, AUDIT dispatches the auditor, and ACT dispatches the dry-run
+ * executor. Each LLM-shaped subagent (via `@finbot/harness`'s `spawn`) chooses
+ * whether to call its narrowly scoped deterministic tool; the tool produces the
+ * structured stage product.
  *
  * The LLM is injected. With no `llm`, `spawn` uses its deterministic stub, so
  * tests stay offline; pass `harness.providers.makeAnthropicLlm()` for real
- * inference, or `makeScriptedAnalyzerLlm(input)` for a faithful offline double
- * that calls the scoring tool with the real opportunity data.
+ * inference, or a stage's `makeScripted*Llm(input)` helper for a faithful
+ * offline double that calls its deterministic tool.
  *
- * DRY-RUN by construction: this drives every OODA stage — ORIENT (analyzer),
- * DECIDE (planner), and ACT's two halves, the auditor gate and the executor —
+ * DRY-RUN by construction: this drives every OODA stage — OBSERVE
+ * (oracle-watcher), ORIENT (analyzer), DECIDE (planner), AUDIT (auditor), and
+ * ACT (executor) —
  * with no wallet capability reachable from any stage's tool subset. The
  * analyzer scores, the planner proposes, the auditor adjudicates, and the
  * executor SIMULATES against a clone of the portfolio: none trades. The
@@ -33,13 +27,271 @@
  */
 
 import crypto from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 
+import { observeOpportunities } from './oracle-watcher.js';
 import {
   pipelineToolRegistry, PIPELINE_TOOL_NAMES,
+  observerToolRegistry, OBSERVER_TOOL_NAMES, boundObservationWindow,
   plannerToolRegistry, PLANNER_TOOL_NAMES,
   auditorToolRegistry, AUDITOR_TOOL_NAMES,
   executorToolRegistry, EXECUTOR_TOOL_NAMES,
 } from './agent-tools.js';
+
+// OBSERVE stage: inference-driven oracle-watcher dispatch.
+
+/**
+ * Compose the observer's dispatch brief from a window of price readings and an
+ * optional deviation threshold / asset allowlist. The brief embeds the
+ * structured inputs as JSON and tells the subagent to detect the crossings via
+ * the deterministic tool rather than eyeballing the price moves by hand.
+ *
+ * @param {object} input  { readings, thresholdBps?, assets? }
+ * @returns {string}
+ */
+export function observerBrief(input) {
+  const payload = {
+    readings: input.readings || [],
+    thresholdBps: input.thresholdBps != null ? input.thresholdBps : 50,
+    assets: input.assets || null,
+  };
+  return [
+    'A price-oracle window is available. Detect opportunity-deviation events over it — assets whose',
+    'price has moved from the window reference by more than the threshold. You are the OBSERVE phase:',
+    'read-only, you emit events; you never score, propose, or trade, and no wallet is reachable.',
+    '',
+    'Use the `observe_opportunities` tool for the detection. Its dispatch-bound inputs are below',
+    'for context, but the tool receives the trusted window, threshold, and asset allowlist from',
+    'this dispatch. Do not compute deviations yourself; the tool returns crossings and the latest price book.',
+    '',
+    'Then report how many crossings were found and, if any, the most significant asset and its',
+    'direction.',
+    '',
+    'Inputs (JSON):',
+    JSON.stringify(payload, null, 2),
+  ].join('\n');
+}
+
+/**
+ * Dispatch the oracle-watcher as an inference-driven subagent over a price
+ * window, with the observe-phase deterministic detector available as a tool.
+ * The stage's product — the observation `{ readings, crossings, observedAtTick }`
+ * (where `readings` is the latest price *book*, `Record<asset, price>`, distinct
+ * from the input's reading *window* array) — is extracted from the tool-execution
+ * events, so the inference-driven path and the headless `observeOpportunities`
+ * call yield the same crossings.
+ *
+ * The observer tool is bound to the trusted `input` window/threshold/assets at
+ * dispatch creation. The subagent decides whether to call it but cannot alter
+ * those values by reserializing tool arguments. The reported tool result is
+ * reconciled with a direct deterministic recompute, and the caller
+ * (`bin/finbot-dispatch`, via {@link guardedObservation}) feeds only that
+ * canonical recompute downstream. OBSERVE is the first stage, so this keeps an
+ * inference-driven call from changing the loop's input set.
+ *
+ * @param {object} input  { readings, thresholdBps?, assets? }
+ * @param {object} deps
+ * @param {(spec: object, context: object) => Promise<object>} deps.spawn
+ *   the harness `spawn` function
+ * @param {string}   deps.finbotRoot   root holding `roles/<role>/AGENT.md`
+ * @param {(args: object) => Promise<object>} [deps.llm]
+ *   injected LLM; omit to use the harness stub (offline)
+ * @returns {Promise<object>} { handle, status, reportedObservation, canonical, reconciled, reportedCrossings, observed, toolCalls, finalText }.
+ *   `canonical` is the trusted deterministic recompute and is the ONLY value a
+ *   caller should feed downstream (`bin/finbot-dispatch` reads `canonical.crossings`,
+ *   never the reported ones). `reportedObservation` and `reportedCrossings` are
+ *   boundary-crossed tool results kept for traceability, not for driving the loop.
+ */
+export async function dispatchObserver(input, deps) {
+  if (!deps || typeof deps.spawn !== 'function') {
+    throw new Error('dispatchObserver: deps.spawn (the harness spawn function) is required');
+  }
+  const trustedInput = boundObservationWindow(input || {});
+  const tools = observerToolRegistry(trustedInput);
+  const capabilities = OBSERVER_TOOL_NAMES;
+
+  const handle = await deps.spawn(
+    {
+      role: 'oracle-watcher',
+      brief: observerBrief(input),
+      capabilities,
+      llm: deps.llm,
+    },
+    { finbotRoot: deps.finbotRoot, tools },
+  );
+  await handle.done;
+
+  const toolCalls = extractToolCalls(handle.events);
+  const reportedObservation = lastObservationResult(handle.events);
+
+  // The deterministic recompute over the trusted input is both the reference
+  // result and the only value that may reach a later OODA stage.
+  let canonical = null;
+  try {
+    canonical = observeOpportunities(
+      { readings: trustedInput.readings || [] },
+      { thresholdBps: trustedInput.thresholdBps, assets: trustedInput.assets },
+    );
+  } catch {
+    // Preserve the guard's fail-closed result shape for malformed trusted input.
+  }
+  const reconciled = reconcileObservation(reportedObservation, canonical);
+
+  return {
+    handle,
+    status: canonical == null ? 'error' : handle.status,
+    reportedObservation,
+    canonical,
+    reconciled,
+    reportedCrossings: reportedObservation ? reportedObservation.crossings || [] : [],
+    observed: reportedObservation != null,
+    toolCalls,
+    finalText: handle.result ? handle.result.finalText : '',
+  };
+}
+
+/**
+ * Decide whether an OBSERVE dispatch is safe to drive the OODA loop, and select
+ * the TRUSTED value to feed downstream. The observation the subagent surfaced is
+ * boundary-crossed and is never fed forward; on success this hands back the
+ * `canonical` deterministic recompute, so no LLM-chosen value can reach
+ * ORIENT/DECIDE/AUDIT/ACT. Returns `{ ok: false, reason }` when the stage did not
+ * complete, never called the detector, surfaced no usable observation (an errored
+ * or malformed tool result), or failed reconciliation; otherwise
+ * `{ ok: true, observation }` where `observation` is `dispatch.canonical`.
+ *
+ * Pulled out of `bin/finbot-dispatch` so the load-bearing "feed the trusted
+ * recompute, refuse a divergence" property is a testable pure function, not a
+ * caller-side convention that a regression could silently drop.
+ *
+ * @param {object} dispatch  a {@link dispatchObserver} return value
+ * @returns {{ ok: true, observation: object } | { ok: false, reason: string }}
+ */
+export function guardedObservation(dispatch) {
+  if (dispatch.status !== 'completed') {
+    return { ok: false, reason: `observer dispatch did not complete (status=${dispatch.status})` };
+  }
+  if (!Array.prototype.includes.call(dispatch.toolCalls, 'observe_opportunities')) {
+    return { ok: false, reason: 'observer never called the deterministic observe_opportunities tool' };
+  }
+  // Distinct from a reconciliation divergence: the detector was called but no
+  // usable observation surfaced (an errored or json-less tool result -> null),
+  // so `reconciled` is false for a different reason. Name the actual failed
+  // precondition rather than reporting a spurious "crossings diverge".
+  if (!dispatch.observed) {
+    return {
+      ok: false,
+      reason: 'observer called observe_opportunities but surfaced no usable observation (an errored or malformed tool result)',
+    };
+  }
+  if (!dispatch.reconciled) {
+    return {
+      ok: false,
+      reason: 'SAFETY — observer crossings diverge from the deterministic recompute over the trusted window; refusing to drive the loop on them',
+    };
+  }
+  return { ok: true, observation: dispatch.canonical };
+}
+
+/**
+ * Find the observation produced by the most recent successful
+ * `observe_opportunities` tool call (the observe stage's structured product).
+ *
+ * @param {Array<object>} events
+ * @returns {object|null}
+ */
+export function lastObservationResult(events) {
+  for (let i = (events || []).length - 1; i >= 0; i -= 1) {
+    const e = events[i];
+    if (e.type !== 'tool_execution_end' || !e.toolCall || e.toolCall.name !== 'observe_opportunities') continue;
+    const result = e.result;
+    if (!result || result.isError) continue;
+    const jsonBlock = (result.content || []).find((c) => c && c.type === 'json');
+    if (jsonBlock && jsonBlock.value != null && typeof jsonBlock.value === 'object') return jsonBlock.value;
+  }
+  return null;
+}
+
+/**
+ * Compare the surfaced and canonical observations without JSON's lossy value
+ * coercions (notably NaN, Infinity, and -0). Any unexpected comparator failure
+ * is a refusal, preserving the guarded handoff's fail-closed behavior.
+ *
+ * @param {object|null} reportedObservation
+ * @param {object|null} canonical
+ * @returns {boolean}
+ */
+export function reconcileObservation(reportedObservation, canonical) {
+  if (reportedObservation == null || canonical == null) return false;
+  try {
+    return isDeepStrictEqual(reportedObservation, canonical);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A deterministic, offline stand-in for an inference-driven observer LLM: it
+ * calls `observe_opportunities` on turn 0, then
+ * ends with a one-line summary on turn 1. The OBSERVE-stage counterpart to
+ * {@link makeScriptedAnalyzerLlm} — exercises the same dispatch wiring as a real
+ * provider with no network call. The emitted messages carry a fixed tool-call
+ * id and `timestamp: 0` (never `crypto.randomBytes`/`Date.now`) so its emitted
+ * assistant messages are byte-reproducible run-to-run. The harness stamps the
+ * enclosing event stream independently.
+ *
+ * @param {object} input  same shape passed to {@link dispatchObserver}
+ * @returns {Function} an `llm` matching the spawn contract
+ */
+export function makeScriptedObserverLlm(input) {
+  return async function scriptedObserverLlm(context) {
+    if (context.turn === 0 && context.tools && context.tools.observe_opportunities) {
+      const toolArguments = { readings: input.readings || [] };
+      if (input.thresholdBps != null) toolArguments.thresholdBps = input.thresholdBps;
+      if (input.assets) toolArguments.assets = input.assets;
+      return {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'Detecting deviation crossings via the deterministic observer.' },
+          {
+            type: 'toolCall',
+            id: 'observe-opportunities-0',
+            name: 'observe_opportunities',
+            arguments: toolArguments,
+          },
+        ],
+        stopReason: 'tool_use',
+        timestamp: 0,
+      };
+    }
+    const summary = summarizeObservationFromToolResults(context.messages);
+    return {
+      role: 'assistant',
+      content: [{ type: 'text', text: summary }],
+      stopReason: 'end_turn',
+      timestamp: 0,
+    };
+  };
+}
+
+/**
+ * @param {Array<object>} messages
+ * @returns {string}
+ */
+function summarizeObservationFromToolResults(messages) {
+  for (let i = (messages || []).length - 1; i >= 0; i -= 1) {
+    const m = messages[i];
+    if (m.role !== 'toolResult') continue;
+    const jsonBlock = (m.content || []).find((c) => c && c.type === 'json');
+    if (jsonBlock && jsonBlock.value && Array.isArray(jsonBlock.value.crossings)) {
+      const v = jsonBlock.value;
+      const top = v.crossings[0];
+      return `Observe complete: ${v.crossings.length} crossing(s)`
+        + (top ? `; top ${top.asset} ${top.direction} ${Math.round(top.deviationBps)}bps` : '');
+    }
+  }
+  return 'Observe complete.';
+}
 
 /**
  * Compose the analyzer's dispatch brief from an oracle-watcher observation and

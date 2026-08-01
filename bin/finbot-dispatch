@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 /**
- * finbot-dispatch — drive one OODA stage by inference, in dry-run.
+ * finbot-dispatch — drive every OODA stage by inference, in dry-run.
  *
  * Companion to `finbot-ooda` (which runs every stage as a deterministic
  * function with no LLM). This entry runs the FULL OODA loop by **inference**:
- * it builds an oracle-watcher observation over the simulator, dispatches the
- * analyzer as an LLM-shaped subagent that reasons over the opportunities and
- * CALLS the deterministic `score_opportunities` tool; then — when the analyzer
+ * it dispatches the oracle-watcher as an LLM-shaped subagent that reasons over
+ * the simulator's price window and CALLS the deterministic
+ * `observe_opportunities` tool to detect the threshold crossings; then
+ * dispatches the analyzer as an LLM-shaped subagent that reasons over the
+ * opportunities and CALLS the deterministic `score_opportunities` tool; then — when the analyzer
  * proposes a rebalance — dispatches the planner subagent, which reasons over
  * the target allocation and CALLS the deterministic `propose_rebalance` tool to
  * emit the ymax-shaped proposal; then dispatches the auditor subagent, which
@@ -18,7 +20,7 @@
  * printed.
  *
  * Usage:
- *   finbot-dispatch                       # offline: a deterministic scripted analyzer LLM
+ *   finbot-dispatch                       # offline: deterministic scripted stage LLMs
  *   finbot-dispatch --seed=11 --drift=-0.02
  *   finbot-dispatch --live-llm            # real inference via Anthropic (needs ANTHROPIC_API_KEY)
  *   finbot-dispatch --model=claude-opus-4-8 --live-llm
@@ -35,8 +37,8 @@
  *   --json           print the structured result as JSON
  *   --help / -h
  *
- * DRY-RUN ONLY. The analyzer, the planner, the auditor, and the executor are
- * read-only and their tool subsets cannot reach a wallet capability; the
+ * DRY-RUN ONLY. Every role is read-only and its tool subset cannot reach a
+ * wallet capability; the
  * executor tool is pinned to `mode: 'dry-run'` and vends no wallet, so
  * walletTouched is always false. This entry never enables live mode or reads a
  * keystore. A *live* executor dispatch is a separate, gated capability.
@@ -48,9 +50,10 @@ import { fileURLToPath } from 'node:url';
 
 import { makeWorld } from '../packages/simulator/world.js';
 import { runSimulator } from '../packages/simulator/runner.js';
-import { observeOpportunities, windowFromHistory } from '../packages/pipeline/oracle-watcher.js';
+import { windowFromHistory } from '../packages/pipeline/oracle-watcher.js';
 import { project } from '../packages/pipeline/forecaster.js';
 import {
+  dispatchObserver, guardedObservation, makeScriptedObserverLlm,
   dispatchAnalyzer, makeScriptedAnalyzerLlm,
   dispatchPlanner, makeScriptedPlannerLlm,
   dispatchAuditor, makeScriptedAuditorLlm,
@@ -87,13 +90,13 @@ function parseArgs(argv) {
 function printHelp() {
   // eslint-disable-next-line no-console
   console.log([
-    'finbot-dispatch — drive the ORIENT stage by inference, in dry-run',
+    'finbot-dispatch — drive every OODA stage by inference, in dry-run',
     '',
     'Usage:',
     '  finbot-dispatch [--seed=N] [--drift=F] [--vol=F] [--warmup=N]',
     '                  [--threshold=BPS] [--live-llm] [--model=ID] [--json]',
     '',
-    'Offline by default (a deterministic scripted analyzer LLM). --live-llm uses',
+    'Offline by default (deterministic scripted stage LLMs). --live-llm uses',
     'the Anthropic provider and needs ANTHROPIC_API_KEY. DRY-RUN ONLY.',
     '',
   ].join('\n'));
@@ -119,10 +122,31 @@ async function main() {
 
   const prices = world.priceFeed.current();
   const readings = windowFromHistory(sim.history, args.warmup);
-  const observed = observeOpportunities({ readings }, { thresholdBps: args.threshold });
+
+  // OBSERVE by inference: dispatch the oracle-watcher subagent over the price
+  // window; it CALLS the deterministic `observe_opportunities` tool (read-only,
+  // no wallet reachable) rather than eyeballing the moves. `dispatchObserver`
+  // reconciles the surfaced crossings against a recompute over the trusted
+  // window — see its JSDoc and `guardedObservation` for the trust boundary.
+  const observeInput = { readings, thresholdBps: args.threshold };
+  const observeLlm = args.liveLlm
+    ? makeAnthropicLlm(args.model ? { model: args.model } : {})
+    : makeScriptedObserverLlm(observeInput);
+  const observeDispatch = await dispatchObserver(observeInput, { spawn, finbotRoot: FINBOT_ROOT, llm: observeLlm });
+
+  // Fail fast BEFORE any downstream stage reads the observation: `guardedObservation`
+  // refuses an unusable or non-reconciling OBSERVE (its crossings are the whole
+  // loop's input set) and hands back only the trusted `canonical` recompute, so no
+  // LLM-chosen value ever reaches the rest of the loop.
+  const observeGuard = guardedObservation(observeDispatch);
+  if (!observeGuard.ok) {
+    console.error(`finbot-dispatch: ${observeGuard.reason}`);
+    process.exit(1);
+  }
+  const observation = observeGuard.observation;
 
   const input = {
-    opportunities: observed.crossings,
+    opportunities: observation.crossings,
     readings,
     portfolio: world.portfolio.markToMarket(prices),
     prices,
@@ -173,7 +197,7 @@ async function main() {
       portfolio: input.portfolio,
       prices,
       currentTick: world.priceFeed.t,
-      oracleReadings: observed.crossings,
+      oracleReadings: observation.crossings,
     };
     const auditLlm = args.liveLlm
       ? makeAnthropicLlm(args.model ? { model: args.model } : {})
@@ -203,7 +227,7 @@ async function main() {
         { ensembleSize: 64, horizon: 12, render: false },
       ),
       currentTick: world.priceFeed.t,
-      oracleReadings: observed.crossings,
+      oracleReadings: observation.crossings,
     };
     const actLlm = args.liveLlm
       ? makeAnthropicLlm(args.model ? { model: args.model } : {})
@@ -214,7 +238,12 @@ async function main() {
   const out = {
     mode: args.liveLlm ? 'inference (anthropic)' : 'inference (offline scripted)',
     status: dispatch.status,
-    opportunities: observed.crossings.length,
+    observe: {
+      status: observeDispatch.status,
+      toolCalls: observeDispatch.toolCalls,
+      observed: observeDispatch.observed,
+    },
+    opportunities: observation.crossings.length,
     toolCalls: dispatch.toolCalls,
     scored: dispatch.scored,
     next_action: dispatch.analysis ? dispatch.analysis.next_action : null,
@@ -326,7 +355,9 @@ async function main() {
 function printReport(out, args) {
   const log = (...a) => console.log(...a); // eslint-disable-line no-console
   log(`finbot-dispatch (seed=${args.seed}) — ${out.mode}`);
-  log(`  OBSERVE  oracle-watcher: ${out.opportunities} crossing(s)`);
+  log(`  OBSERVE  oracle-watcher subagent: ${out.observe.status}`);
+  log(`           tool calls: ${out.observe.toolCalls.join(', ') || '(none)'}`);
+  log(`           crossings via deterministic tool: ${out.opportunities}`);
   log(`  ORIENT   analyzer subagent: ${out.status}`);
   log(`           tool calls: ${out.toolCalls.join(', ') || '(none)'}`);
   log(`           scored via deterministic tool: ${out.scored}`);
@@ -364,7 +395,7 @@ function printReport(out, args) {
   } else if (out.audit) {
     log('  ACT      (skipped — auditor did not approve)');
   }
-  log('  DRY-RUN: analyzer, planner, auditor, and executor are read-only; no wallet capability is reachable from their tool subsets.');
+  log('  DRY-RUN: every role is read-only; no wallet capability is reachable from its tool subset.');
 }
 
 main().catch((err) => {
