@@ -54,10 +54,21 @@ This runs one OODA tick:
    on signoff, post an `executor` job with the run's safety mode.
 
 Subagents are spawned via `spawn.js` per their role. Each spawn gets a hardened
-role policy and its own tool registry slice. A caller that supplies `llmProgram`
-gets a real SES Compartment for its role JavaScript: the program receives only
-an immutable turn snapshot and its allowed tool names, then returns a requested
-tool call for the host to execute. The program never receives host tool objects.
+role policy and its own tool registry slice, both narrowed by the role
+attenuator — the sole narrowing point for a role program's ambient globals as
+well as its tool slice. A program's tool grants are denied when the spawn omits
+them.
+
+A caller that supplies `llmProgram` gets a real SES Compartment for its role
+JavaScript, and each role-program turn runs in a **dedicated preemptible worker
+thread** (spawn-fresh per turn, JSON-only transport both ways). The program
+receives only an immutable turn snapshot and its allowed tool names, then returns
+a requested tool call for the host to execute; it never receives host tool
+objects. Running the untrusted program off the host event-loop thread is what
+makes the `timeoutMs` deadline enforceable against a non-yielding program: a
+synchronous loop (`while (true) {}`) blocks only its own thread, so the host
+still fires the deadline and terminates the worker. `timeoutMs` omitted means no
+deadline.
 
 ## Module map
 
@@ -75,6 +86,12 @@ tool call for the host to execute. The program never receives host tool objects.
 - `sandbox/permissive.js` — role-scoped compartment policy, the
   `runCompartmentLlm` SES runner for `llmProgram`, and the explicit permissive
   legacy fallback.
+- `sandbox/role-worker.js` — the per-turn worker thread that evaluates the role
+  program in a hardened SES Compartment and posts back a JSON-only assistant
+  message; spawn-fresh per turn, terminated by the host when `timeoutMs` fires.
+- `sandbox/boundary.js` — shared host/worker boundary primitives
+  (`ensureLockdown`, `buildGlobalsFromTokens`, `copyJsonData`), extracted into
+  one module so the two sides cannot drift.
 - `schemas/tool.js`, `schemas/spawn.js` — JSON-schema-shaped
   validators.
 
