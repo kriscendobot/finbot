@@ -27,6 +27,25 @@ const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
 const hasOwn = Object.hasOwn;
 const numberToFixed = Number.prototype.toFixed;
 const reflectApply = Reflect.apply;
+const arrayIsArray = Array.isArray;
+
+/**
+ * `Array.isArray`, made TOTAL. `IsArray` throws a `TypeError` on a REVOKED Proxy
+ * (ECMA-262 §7.2.2 IsArray, step 3.a), so a bare check in a coverage guard would
+ * escape the measurement with no count at all. A check that cannot complete reads
+ * as "not an array" — the fail-closed direction here (an unmeasurable window is
+ * zero coverage, and a coverage feeding a fail-closed gate degrades toward LESS).
+ *
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+function isArraySafe(value) {
+  try {
+    return arrayIsArray(value);
+  } catch (_error) {
+    return false;
+  }
+}
 
 /**
  * Read an own data property without executing an accessor. An unreadable
@@ -502,7 +521,7 @@ function countObservedFramesAndReturns(frames, observed, length = safeLength(fra
  */
 function namedAssets(assets) {
   if (assets == null) return { named: [], malformed: false };
-  if (!Array.isArray(assets)) return { named: [], malformed: true };
+  if (!isArraySafe(assets)) return { named: [], malformed: true };
   const named = [];
   const length = safeLength(assets);
   // `safeLength` truncates at its budget, which is the fail-CLOSED direction for
@@ -557,7 +576,7 @@ function namedAssets(assets) {
  * @returns {{ historyFrames: number, historyReturns: number, worstAsset: string|null }}
  */
 function measureHistoryCoverage(frames, assets) {
-  if (!Array.isArray(frames)) {
+  if (!isArraySafe(frames)) {
     const count = typeof frames === 'number' && Number.isFinite(frames)
       ? Math.max(0, Math.trunc(frames)) : 0;
     return { historyFrames: count, historyReturns: Math.max(0, count - 1), worstAsset: null };
