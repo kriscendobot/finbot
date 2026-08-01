@@ -84,13 +84,26 @@ export function audit(input, config = {}) {
   // below, rather than approving under a floor the config never legibly stated.
   // An ABSENT knob still takes its default — that is the documented off state.
   const unreadableKnobs = [];
+  const unusableKnobs = [];
   const knob = (key, fallback) => {
     const value = readConfigKnob(config, key);
     if (value === UNREADABLE_KNOB) {
       unreadableKnobs.push(key);
       return fallback;
     }
-    return value != null ? value : fallback;
+    if (value == null) return fallback;
+    // A knob that IS readable but is a non-finite number (NaN, ±Infinity) is not
+    // a usable safety bound: every `value > NaN` comparison is false, so the
+    // bound silently never trips (fail-OPEN) — the mirror hazard to an unreadable
+    // knob defaulting to a looser value. Fail it CLOSED through the same
+    // config-integrity family rather than approving under a bound that cannot
+    // bite. (`dataSufficiencyMinCoverage` has its own usability predicate and is
+    // read separately, so it is not funnelled through here.)
+    if (typeof value === 'number' && !Number.isFinite(value)) {
+      unusableKnobs.push(key);
+      return fallback;
+    }
+    return value;
   };
   const maxStepPct = knob('maxStepPct', 0.25);
   const maxDayPct = knob('maxDayPct', 0.50);
@@ -104,20 +117,33 @@ export function audit(input, config = {}) {
   // The threshold's arming and usability tests are the exported predicates, so
   // the CLI's flag validation and the cycle's evidence auto-enable cannot drift
   // from the gate they claim to mirror.
-  let rawMinCoverage;
-  try {
-    const descriptor = getOwnPropertyDescriptor(config, 'dataSufficiencyMinCoverage');
-    rawMinCoverage = descriptor && hasOwn(descriptor, 'value')
-      ? descriptor.value
-      : descriptor ? Symbol('unreadable data-sufficiency threshold') : undefined;
-  } catch (_error) {
-    rawMinCoverage = Symbol('unreadable data-sufficiency threshold');
-  }
+  // Read through the SAME `readConfigKnob` the bound knobs above use, so a
+  // PRESENT-but-unreadable threshold — an own accessor, an INHERITED value, or a
+  // hostile descriptor trap — surfaces as `UNREADABLE_KNOB` rather than reading
+  // as `undefined`. The prior inline own-descriptor snapshot mistook an inherited
+  // value for absent, which `coverageGateArmed` then read as OFF: a single
+  // polluted `Object.prototype.dataSufficiencyMinCoverage` (or a config built
+  // with `Object.create`) silently DISARMED the whole data-sufficiency gate — no
+  // invariant emitted, no fail-closed. `UNREADABLE_KNOB` instead ARMS the gate
+  // and fails it closed (`coverageGateArmed(UNREADABLE_KNOB)` is true;
+  // `coverageThresholdUsable` is false), the same fail-closed direction a
+  // malformed OWN threshold already takes. An absent knob still reads `undefined`
+  // → OFF, so a plain-data config with no threshold stays byte-identical.
+  const rawMinCoverage = readConfigKnob(config, 'dataSufficiencyMinCoverage');
   const dataSufficiencyMinCoverage = typeof rawMinCoverage === 'number' ? rawMinCoverage : NaN;
   const minCoverageUsable = coverageThresholdUsable(rawMinCoverage);
   const dataSufficiencyArmed = coverageGateArmed(rawMinCoverage);
 
   const { proposal, forecast, prices } = input;
+  // Snapshot every untrusted field of the proposal ONCE, as an own data property,
+  // so a hostile/absent/throwing `steps` (or `proposal_hash`) owes the gate a
+  // fail-closed verdict, not an exception out of `audit()` — this same call is
+  // the executor's UNWRAPPED fire-time re-audit (`executor.js`). `steps` is
+  // materialized into a plain, bounded array: a non-array, a throwing own
+  // accessor, or a Proxy whose `length` trap throws all read as an empty plan,
+  // which the citation and reproducibility invariants below then reject.
+  const steps = safeSteps(readOwn(proposal, 'steps'));
+  const proposalHash = readOwn(proposal, 'proposal_hash');
   const nav = navOf(input.portfolio, prices);
   const results = [];
 
@@ -126,14 +152,22 @@ export function audit(input, config = {}) {
   // rather than approving under a silently-defaulted floor. Emitted ONLY when a
   // knob was unreadable, so a plain-data config (the JSON tool boundary) leaves
   // the verdict byte-identical to before.
-  if (unreadableKnobs.length > 0) {
+  if (unreadableKnobs.length > 0 || unusableKnobs.length > 0) {
+    const parts = [];
+    if (unreadableKnobs.length > 0) {
+      parts.push(`${unreadableKnobs.map((k) => sanitizedLabelOr(k, '(unnamed)')).join(', ')} `
+        + 'present but not readable as own data properties (an accessor, an inherited value, or a '
+        + 'hostile descriptor)');
+    }
+    if (unusableKnobs.length > 0) {
+      parts.push(`${unusableKnobs.map((k) => sanitizedLabelOr(k, '(unnamed)')).join(', ')} `
+        + 'present but not a finite number (NaN or ±Infinity), so the bound would never trip');
+    }
     results.push({
       name: 'config-integrity',
       pass: false,
-      detail: `audit config knob(s) ${unreadableKnobs.map((k) => sanitizedLabelOr(k, '(unnamed)')).join(', ')} `
-        + 'are present but not readable as own data properties (an accessor, an inherited value, or a '
-        + 'hostile descriptor); a safety bound cannot silently default to a possibly-looser value '
-        + '(fails closed)',
+      detail: `audit config knob(s) ${parts.join('; ')}; a safety bound cannot silently default to a `
+        + 'possibly-looser value (fails closed)',
     });
   }
 
@@ -142,7 +176,7 @@ export function audit(input, config = {}) {
   // gate a fail-closed verdict (an unmeasurable citation list reads as empty and
   // rejects), not an exception out of `audit()` — the same contract
   // `citedProjectionIds` keeps for the provenance binding.
-  const hasSteps = safeArrayLength(readOwn(proposal, 'steps')) > 0;
+  const hasSteps = steps.length > 0;
   const cited = safeArrayLength(readOwn(proposal, 'cited_forecasts')) > 0
     && safeArrayLength(readOwn(proposal, 'cited_analyses')) > 0;
   results.push({
@@ -156,27 +190,50 @@ export function audit(input, config = {}) {
 
   // 2. Risk-bound compliance: per-step, cumulative, concentration.
   let cumulative = 0;
-  const balances = { ...input.portfolio.balances };
-  let cash = input.portfolio.cash;
+  // The pre-trade snapshot is read as own data too: a hostile `portfolio` whose
+  // `balances`/`cash` accessor throws owes the gate a verdict, not an exception.
+  // `navOf` above reads the same fields, so a well-formed portfolio is
+  // byte-identical; the guard only bites on the untrusted-surface hostile case.
+  const balancesSource = readOwn(input.portfolio, 'balances');
+  const balances = balancesSource != null && typeof balancesSource === 'object'
+    ? { ...balancesSource } : {};
+  let cash = readOwnFiniteNumber(input.portfolio, 'cash') ?? 0;
   let riskPass = true;
   let riskDetail = 'all steps within per-step, per-day, and concentration bounds';
-  for (const s of proposal.steps) {
-    cumulative += s.notional;
-    if (s.notional > maxStepPct * nav + 1e-6) {
+  for (const s of steps) {
+    // Read every COMPARED field as a finite number FIRST. A NaN/string
+    // `notional`/`qty`/`price` walks straight through a `>` bound — `x > NaN` is
+    // always false, so the bound never trips (fail-OPEN) — and a string field
+    // throws out of `toFixed` while formatting the detail. A step that carries no
+    // finite notional/qty/price cannot be SHOWN within bounds, so it fails the
+    // invariant closed. `side`/`asset` are read as own data (not compared, only
+    // switched on and recorded), on the same untrusted surface.
+    const notional = readOwnFiniteNumber(s, 'notional');
+    const qty = readOwnFiniteNumber(s, 'qty');
+    const price = readOwnFiniteNumber(s, 'price');
+    const side = readOwn(s, 'side');
+    const asset = readOwn(s, 'asset');
+    if (notional == null || qty == null || price == null) {
       riskPass = false;
-      riskDetail = `step notional ${s.notional.toFixed(2)} exceeds per-step cap ${(maxStepPct * nav).toFixed(2)}`;
+      riskDetail = 'a step carries no finite notional, quantity, or price, so it cannot be shown within risk bounds';
+      break;
+    }
+    cumulative += notional;
+    if (notional > maxStepPct * nav + 1e-6) {
+      riskPass = false;
+      riskDetail = `step notional ${notional.toFixed(2)} exceeds per-step cap ${(maxStepPct * nav).toFixed(2)}`;
       break;
     }
     // simulate the step's effect on weight
-    if (s.side === 'buy') { balances[s.asset] = (balances[s.asset] || 0) + s.qty; cash -= s.notional; }
-    else { balances[s.asset] = (balances[s.asset] || 0) - s.qty; cash += s.notional; }
-    const weight = nav > 0 ? ((balances[s.asset] || 0) * s.price) / nav : 0;
+    if (side === 'buy') { balances[asset] = (balances[asset] || 0) + qty; cash -= notional; }
+    else { balances[asset] = (balances[asset] || 0) - qty; cash += notional; }
+    const weight = nav > 0 ? ((balances[asset] || 0) * price) / nav : 0;
     if (weight > concentrationCapPct + 1e-6) {
       riskPass = false;
       // The asset name is caller-supplied on the same untrusted surface the
       // descriptor's `worstAsset` arrives on, and lands in the same recorded
       // detail line — so it takes the same sanitizer. A family, not a special case.
-      riskDetail = `${sanitizedLabelOr(s.asset, 'an unnamed asset')} weight ${(weight * 100).toFixed(1)}% exceeds concentration cap ${(concentrationCapPct * 100).toFixed(0)}%`;
+      riskDetail = `${sanitizedLabelOr(asset, 'an unnamed asset')} weight ${(weight * 100).toFixed(1)}% exceeds concentration cap ${(concentrationCapPct * 100).toFixed(0)}%`;
       break;
     }
   }
@@ -217,12 +274,12 @@ export function audit(input, config = {}) {
   });
 
   // 4. Reproducibility: recompute the hash from the steps.
-  const recomputed = hashProposal(proposal.steps);
-  const reproPass = recomputed === proposal.proposal_hash;
+  const recomputed = hashProposal(steps);
+  const reproPass = recomputed === proposalHash;
   results.push({
     name: 'reproducibility',
     pass: reproPass,
-    detail: reproPass ? 'recomputed hash matches' : `hash mismatch: recomputed ${recomputed.slice(0, 12)} != ${String(proposal.proposal_hash).slice(0, 12)}`,
+    detail: reproPass ? 'recomputed hash matches' : `hash mismatch: recomputed ${recomputed.slice(0, 12)} != ${String(proposalHash).slice(0, 12)}`,
   });
 
   // 5. Pricing freshness: cited readings within the staleness window.
@@ -245,7 +302,7 @@ export function audit(input, config = {}) {
   // mapping (or naming an unknown place) is not reachable and fails the gate.
   // A route that only awaits deploy-config detail (pool addresses, GMP
   // channels) is reachable: filling it is a later, separately authorized step.
-  const realRouteSteps = proposal.steps.filter((s) => s.route && typeof s.route === 'object');
+  const realRouteSteps = steps.filter((s) => s && typeof s === 'object' && s.route && typeof s.route === 'object');
   let routePass = true;
   let routeDetail = 'sim venue: each step is self-contained (asset, qty, price); venue is implicit';
   if (realRouteSteps.length > 0) {
@@ -279,7 +336,7 @@ export function audit(input, config = {}) {
 
   const failed = results.filter((r) => !r.pass).map((r) => r.name);
   return {
-    proposal_hash: proposal.proposal_hash,
+    proposal_hash: proposalHash,
     verdict: failed.length === 0 ? 'approved' : 'rejected',
     invariant_results: results,
     failed_invariants: failed,
@@ -417,6 +474,34 @@ function safeArrayLength(value) {
   } catch (_error) {
     return 0;
   }
+}
+
+/**
+ * Materialize an untrusted `steps` value into a plain, bounded array read ONCE.
+ * A non-array reads as empty; a Proxy whose `length` trap throws reads as empty
+ * (via `safeArrayLength`); a per-element getter that throws drops that element.
+ * The auditor iterates and hashes the RESULT, so a hostile/absent/throwing
+ * `steps` yields a fail-closed verdict (an empty plan rejects at citation and
+ * reproducibility) rather than an exception out of `audit()`. The 4096 bound
+ * matches `citedProjectionIds`: a real rebalance carries a handful of steps, so
+ * the cap only defuses a hostile unbounded `length`, and a truncated plan can
+ * only fail the reproducibility hash, never pass spuriously.
+ *
+ * @param {unknown} value
+ * @returns {Array<unknown>}
+ */
+function safeSteps(value) {
+  if (!Array.isArray(value)) return [];
+  const length = Math.min(safeArrayLength(value), 4096);
+  const steps = [];
+  for (let index = 0; index < length; index += 1) {
+    try {
+      steps.push(value[index]);
+    } catch (_error) {
+      // a hostile element getter is not a step; a shorter plan can only reject
+    }
+  }
+  return steps;
 }
 
 /**
