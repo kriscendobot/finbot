@@ -77,53 +77,67 @@ export async function runOodaCycle(input) {
     auditorConfig.regimeTailBump = 0.1;
   }
 
-  // Zero is a valid explicit observed-window size (and must remain zero when the
-  // coverage gate is armed); only an omitted value takes the default 10. A
-  // MALFORMED explicit window (NaN, fractional, negative, unsafe) must never flow
-  // into `windowFromHistory`, whose `Math.max(0, length - NaN)` slice-start is
-  // `NaN` and selects the ENTIRE history — an inflation of the oracle/vol-fit
-  // window that diverges from the pre-feature `|| 10` coercion EVEN WHEN THE
-  // COVERAGE GATE IS OFF. So the malformed test runs on both paths: armed, an
-  // unusable window leaves the auditor no coverage evidence and FAILS the
-  // data-sufficiency invariant closed (empty readings); off the gate, it coerces
-  // to the default window, so a default-config cycle stays byte-identical to
-  // before for malformed inputs too. A valid explicit window (0 included) is
-  // used verbatim on either path.
+  // The observed-window semantics FORK on whether the coverage gate is armed,
+  // because an explicit `0` means two different things in the two modes.
+  //
+  //   Gate OFF — reproduce the pre-feature `config.windowTicks || 10` coercion
+  //   EXACTLY. Every falsy window (0, NaN, negative-zero, absent) → the default
+  //   10; a truthy one → itself, byte-identical to `origin/main`. In particular
+  //   `windowTicks: 0` off the gate is NOT an empty window — it is the default,
+  //   the same as before this feature. An empty observed window is only
+  //   meaningful under an armed gate (it is the state the data-sufficiency
+  //   invariant measures), so `0` is honored as empty ONLY there.
+  //
+  //   Gate ARMED — an explicit `0` is a valid empty window, honored verbatim;
+  //   only an omitted value takes the default 10. A MALFORMED explicit window
+  //   (NaN, fractional, negative, unsafe integer) must never flow into
+  //   `windowFromHistory`, whose `Math.max(0, length - NaN)` slice-start is
+  //   `NaN` and selects the ENTIRE history; it collapses to an empty window,
+  //   leaving the auditor no coverage evidence so the data-sufficiency invariant
+  //   fails CLOSED. The `fitWindowTicksValid` guard bounds a truthy-but-invalid
+  //   fit window (15.5, an unsafe integer) here too — a truthiness check alone
+  //   would let those slice a fractional/whole-history vol-fit window.
   const coverageGateOn = coverageGateArmed(auditorConfig.dataSufficiencyMinCoverage);
   const validTickCount = (value) => Number.isSafeInteger(value) && value >= 0;
-  const requestedWindowTicks = config.windowTicks ?? 10;
-  const requestedFitWindowTicks = config.fitWindowTicks;
-  const windowTicksValid = validTickCount(requestedWindowTicks);
-  const fitWindowTicksValid = requestedFitWindowTicks == null || validTickCount(requestedFitWindowTicks);
-  const windowMalformed = !windowTicksValid || !fitWindowTicksValid;
-  const invalidCoverageWindow = coverageGateOn && windowMalformed;
-  // Off the gate a malformed window coerces to the default 10 (the pre-feature
-  // behaviour); armed, `invalidCoverageWindow` collapses it to an empty window.
-  const windowTicks = invalidCoverageWindow ? 0 : (windowTicksValid ? requestedWindowTicks : 10);
-  // `windowFromHistory(history, 0)` already returns `[]` — its start is
-  // `Math.max(0, length - 0) === length`, so a valid zero window needs no
-  // special case; the only branch is the fail-closed empty-window one above.
-  const readings = invalidCoverageWindow
-    ? []
-    : input.readings || windowFromHistory(input.history || [], windowTicks);
-
-  // Separable fit window: the oracle deviation and realized-vol reads want a
-  // short, recent window (`readings`), but the GARCH vol-surface fit wants a
-  // LONGER rolling history so the per-asset MLE (>=12 returns) can engage on a
-  // live cycle. `config.fitWindowTicks` (default = windowTicks) draws that
-  // longer window from the same history; it ends at the same current tick, so
-  // the regime read still lands "where in the vol cycle we are now". Absent or
-  // <= windowTicks → fitReadings === readings and the cycle is byte-identical.
-  const fitWindowTicks = !invalidCoverageWindow
-    && fitWindowTicksValid && requestedFitWindowTicks && requestedFitWindowTicks > windowTicks
-    ? requestedFitWindowTicks
-    : windowTicks;
-  const fitReadings = invalidCoverageWindow
-    ? []
-    : input.fitReadings
-    || (fitWindowTicks > windowTicks && !input.readings
-      ? windowFromHistory(input.history || [], fitWindowTicks)
-      : readings);
+  let windowTicks;
+  let fitWindowTicks;
+  let readings;
+  let fitReadings;
+  if (!coverageGateOn) {
+    // `|| 10` verbatim: 0/NaN/absent → 10, any truthy value → itself.
+    windowTicks = config.windowTicks || 10;
+    fitWindowTicks = config.fitWindowTicks && config.fitWindowTicks > windowTicks
+      ? config.fitWindowTicks
+      : windowTicks;
+    readings = input.readings || windowFromHistory(input.history || [], windowTicks);
+    fitReadings = input.fitReadings
+      || (fitWindowTicks > windowTicks && !input.readings
+        ? windowFromHistory(input.history || [], fitWindowTicks)
+        : readings);
+  } else {
+    const requestedWindowTicks = config.windowTicks ?? 10;
+    const requestedFitWindowTicks = config.fitWindowTicks;
+    const windowTicksValid = validTickCount(requestedWindowTicks);
+    const fitWindowTicksValid = requestedFitWindowTicks == null || validTickCount(requestedFitWindowTicks);
+    const windowMalformed = !windowTicksValid || !fitWindowTicksValid;
+    // A malformed window collapses to empty (fail-closed); an explicit valid 0 is
+    // honored. `windowFromHistory(history, 0)` already returns `[]`, so a valid
+    // zero window needs no special case beyond the malformed collapse.
+    windowTicks = windowMalformed ? 0 : requestedWindowTicks;
+    fitWindowTicks = !windowMalformed
+      && requestedFitWindowTicks && requestedFitWindowTicks > windowTicks
+      ? requestedFitWindowTicks
+      : windowTicks;
+    readings = windowMalformed
+      ? []
+      : input.readings || windowFromHistory(input.history || [], windowTicks);
+    fitReadings = windowMalformed
+      ? []
+      : input.fitReadings
+      || (fitWindowTicks > windowTicks && !input.readings
+        ? windowFromHistory(input.history || [], fitWindowTicks)
+        : readings);
+  }
 
   // ----- OBSERVE: oracle-watcher -----
   const observed = observeOpportunities({ readings }, config.oracle || {});
