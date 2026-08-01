@@ -141,8 +141,16 @@ export function fitForecastWorld(world, readings, adaptiveVol) {
         persistence: round12(st.persistence),
       };
       if (st.gamma != null) assets[asset].gamma = round12(st.gamma);
-      if (st.model != null) assets[asset].model = st.model;
-      if (st.selection != null) assets[asset].selection = st.selection;
+      // `model`/`selection` are STRING labels by the descriptor's contract, but
+      // `stats()` rides an untrusted surface boundary — `makeVolSurface` passes a
+      // caller-supplied surface object through untouched (`world.js`), so a
+      // hostile `stats()` can return an OBJECT here. Copied by reference it would
+      // be a MUTABLE leaf inside this record, whose freeze below is shallow — so
+      // the hashed `projectionArtifact` would carry a leaf a consumer could
+      // mutate after the hash. Copy only when the label is actually a string;
+      // drop a non-string rather than alias it.
+      if (typeof st.model === 'string') assets[asset].model = st.model;
+      if (typeof st.selection === 'string') assets[asset].selection = st.selection;
       if (st.selectionMargin != null) assets[asset].selectionMargin = round12(st.selectionMargin);
       if (st.oosQlike != null) {
         assets[asset].oosQlike = Object.freeze(Object.fromEntries(
@@ -240,7 +248,13 @@ export function worstAssetPersistence(volFit) {
   if (!assets || typeof assets !== 'object') return inert;
   let assetNames;
   try {
-    assetNames = Object.keys(assets);
+    // Own property NAMES, not `Object.keys`: the per-asset persistence below is
+    // read descriptor-based (`readOwnDataProperty`, enumerability-blind), so a
+    // key walk that skipped non-enumerable entries would let the WORST (most
+    // persistent) asset hide from the max-persistence scan behind a
+    // `defineProperty(..., { enumerable: false })`, leaving the regime tail-floor
+    // un-tightened. The two must range over the same own properties.
+    assetNames = Object.getOwnPropertyNames(assets);
   } catch (_error) {
     return inert; // a hostile ownKeys trap is not a regime signal
   }
