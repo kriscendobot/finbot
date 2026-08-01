@@ -119,6 +119,11 @@ if data_sufficiency_min_coverage is supplied and is not the number 0:  # absent 
   assert descriptor.historyReturns <= max(0, descriptor.historyFrames - 1)
   recomputed = round12(descriptor.historyReturns / descriptor.horizon) if horizon > 0 else 0
   assert round12(recomputed) == round12(descriptor.coverageRatio)  # never trust the reported ratio
+  # PROVENANCE BINDING: the descriptor is a hashed component of the projection
+  # artifact, so recompute the artifact's projectionId and require the proposal
+  # to cite it — a descriptor swapped onto a thinner or foreign forecast changes
+  # the id and no longer matches. Fails closed when unrecomputable or uncited.
+  assert projectionId(forecast) in proposal.cited_forecasts
   assert round12(recomputed) >= round12(data_sufficiency_min_coverage)
 ```
 
@@ -127,10 +132,11 @@ Two properties are load-bearing:
 - **Off by default.** Absent, `null`, or the number `0` is OFF, and the invariant
   is not emitted at all, so every verdict predating the knob is unchanged.
 - **Armed, it fails CLOSED.** An unusable threshold, an unreadable descriptor, an
-  unreadable forecast horizon, counts that refute each other, or a reported ratio
-  its own counts refute all REJECT. Absence of evidence is not evidence of
-  sufficiency, and a gate that rejects absent evidence must reject contradictory
-  evidence at least as firmly — only one of the two looks like a measurement.
+  unreadable forecast horizon, counts that refute each other, a reported ratio its
+  own counts refute, or a descriptor not bound to a cited forecast artifact all
+  REJECT. Absence of evidence is not evidence of sufficiency, and a gate that
+  rejects absent evidence must reject contradictory or unattested evidence at
+  least as firmly — only one of them looks like a measurement.
 
 There is **no unconditional pass**, and in particular no zero-horizon exemption.
 A projection of 0 ticks recomputes to coverage 0 and clears no positive
@@ -143,16 +149,23 @@ nothing at all.
 
 The gate recomputes coverage from the descriptor's primitive counts rather than
 reading its reported ratio, the same discipline invariant 4 applies to the
-proposal hash. It is a weaker guarantee than invariant 4's, and knowing why
-matters: invariant 4 recomputes from evidence the auditor independently holds,
-while these counts remain self-reported by the artifact being gated. The gate
-therefore bounds forgery (an inconsistent descriptor cannot approve itself), not
-provenance (an internally consistent fabrication still clears it). Binding the
-descriptor to an attested `projectionId` is how that gap closes.
+proposal hash — and then goes one step further, **binding** the descriptor to
+provenance. Because the descriptor is a hashed component of the projection
+artifact (`projectionArtifact` folds it into the JSON that `projectionId`
+hashes), the gate recomputes that id and requires the proposal to cite it. A
+descriptor lifted onto a thinner or foreign forecast — whether tampered at rest
+or in flight before the executor's fire-time re-audit — changes the recomputed id
+and no longer matches a cited one, so it fails closed. This closes the "an
+internally consistent fabrication still clears it" gap that self-consistency
+alone leaves open.
 
-Until it does, provenance is an operational limitation rather than an enforced
-invariant: callers should pass through the descriptor from the cited projection,
-never synthesize one to satisfy this self-consistency gate.
+One residual remains, shared with invariant 4: a wholly self-consistent,
+self-cited artifact is measured, not disproven — exactly as a self-hashed
+proposal clears invariant 4's reproducibility check. The auditor holds no price
+window to recount the coverage from scratch; what the binding enforces is that
+the ratio it judges belongs to the forecast artifact the proposal committed to.
+Callers therefore pass the whole projection through from the cited run and cite
+its `projectionId`; they never synthesize a descriptor to satisfy the gate.
 
 ## Procedure
 

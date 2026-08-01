@@ -19,7 +19,7 @@
 
 import { observeOpportunities, windowFromHistory } from './oracle-watcher.js';
 import { analyze } from './analyzer.js';
-import { project } from './forecaster.js';
+import { project, projectionId } from './forecaster.js';
 import { plan } from './planner.js';
 import { audit, coverageGateArmed, sanitizeLabel } from './auditor.js';
 import { execute } from './executor.js';
@@ -204,12 +204,22 @@ export async function runOodaCycle(input) {
   });
 
   // ----- DECIDE: planner (ymax-shaped) -----
+  // When the forecaster attached a data-sufficiency descriptor, cite the forecast
+  // by its canonical projectionId too, so the auditor's data-sufficiency gate can
+  // BIND that descriptor to the artifact this proposal commits to (a descriptor
+  // swapped before the audit changes the id and fails the gate closed). Off ->
+  // no descriptor -> no extra citation, so the proposal and its journal entry
+  // stay byte-identical to before.
+  const forecastProvenanceId = forecast.dataSufficiency ? projectionId(forecast) : null;
   const proposal = plan({
     portfolio: world.portfolio.markToMarket(prices),
     prices,
     targetWeights: analysis.targetWeights,
     bounds: config.bounds || {},
-    cited_forecasts: [forecastId || `forecast:${cycleId}`],
+    cited_forecasts: [
+      forecastId || `forecast:${cycleId}`,
+      ...(forecastProvenanceId ? [forecastProvenanceId] : []),
+    ],
     cited_analyses: [analysisId || `analysis:${cycleId}`],
   });
   await record({

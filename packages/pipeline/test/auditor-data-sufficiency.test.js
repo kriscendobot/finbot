@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { project } from '../forecaster.js';
+import { project, projectionId } from '../forecaster.js';
 import {
   audit, sanitizeLabel, formatCoverage, MAX_LABEL_CODE_POINTS,
 } from '../auditor.js';
@@ -47,8 +47,20 @@ function forecastWith(window, config) {
 const PROPOSAL = {
   steps: [], proposal_hash: hashProposal([]), cited_forecasts: ['f'], cited_analyses: ['a'],
 };
+// The provenance binding requires the proposal to cite the forecast's recomputed
+// projectionId, so cite it here — the way the pipeline records it — rather than a
+// bare 'f'. Guarded because some fixtures below pass a hostile or primitive
+// forecast on purpose; those reach a fail-closed branch before the binding, so
+// an uncomputable id (cited as a sentinel that will simply never match) is fine.
+function citedIdFor(forecast) {
+  try {
+    return projectionId(forecast);
+  } catch (_error) {
+    return 'unrecomputable-projection-id';
+  }
+}
 const auditInputFor = (forecast) => ({
-  proposal: PROPOSAL, forecast,
+  proposal: { ...PROPOSAL, cited_forecasts: [citedIdFor(forecast)] }, forecast,
   portfolio: { cash: 1000, balances: { ATOM: 0 } }, prices: { ATOM: 10 }, currentTick: 0,
 });
 const sufficiencyOf = (verdict) =>
@@ -236,9 +248,16 @@ test('audit: a hostile descriptor owes a verdict, never a throw', () => {
     coverageRatio: 3, horizon: 5, historyFrames: 16, worstAsset: 'ATOM',
     get historyReturns() { reads += 1; return reads === 1 ? 15 : 999999; },
   };
-  const cited = audit(auditInputFor({ ...forecast, dataSufficiency: flapping }), armed);
+  // Build the audit input first, then zero the counter: the shared helper cites
+  // the forecast by its recomputed projectionId, which serializes the descriptor
+  // and runs the getter ONCE as scaffolding. What this test pins is that AUDIT()
+  // never runs it — the gate reaches its fail-closed whole-count branch before
+  // the provenance recompute, so no descriptor accessor executes inside audit().
+  const flappingInput = auditInputFor({ ...forecast, dataSufficiency: flapping });
+  reads = 0;
+  const cited = audit(flappingInput, armed);
   assert.equal(sufficiencyOf(cited).pass, false);
-  assert.equal(reads, 0, 'the getter never ran');
+  assert.equal(reads, 0, 'the getter never ran inside audit()');
   assert.match(sufficiencyOf(cited).detail, /counts are not whole, non-negative/);
 
   // A `worstAsset` whose `toString` throws is not a string, so it cannot name
@@ -561,6 +580,73 @@ test('audit: forged coverage is refuted by the descriptor it rides on', () => {
     assert.equal(verdict.verdict, 'rejected');
     assert.match(sufficiencyOf(verdict).detail, /fails closed/);
   }
+});
+
+test('audit: an internally consistent descriptor lifted onto a foreign forecast fails CLOSED (provenance binding)', () => {
+  // The hole the panel named: self-consistency alone cannot tell a MEASURED
+  // descriptor from an internally consistent one lifted onto a thinner forecast
+  // to make it look covered. The binding recomputes the projection's content id
+  // and requires the proposal to cite it, so a descriptor swapped onto a forecast
+  // the proposal did not cite fails closed — the reject arriving through the
+  // front door of a hand-built forecast, and (in executor.test.js) through the
+  // executor's fire-time re-audit on a pipeline-built proposal.
+  const armed = { tailFloorPct: 0.5, dataSufficiencyMinCoverage: 1 };
+
+  // A genuinely thin forecast: 4 frames (3 returns) / 20-tick horizon -> 0.15.
+  const thin = forecastWith(readingsOf(DIP.slice(0, 4)), { horizon: 20 });
+  assert.ok(thin.dataSufficiency.coverageRatio < 1);
+
+  // Forge a FAT but internally consistent descriptor (20 returns / 20 ticks =
+  // 1.0) onto that same thin projection. Every self-consistency check clears:
+  // the ratio recomputes exactly, the counts are whole and contiguous, the
+  // horizons agree, the worst asset is named. Only the binding can catch it.
+  const forgedDescriptor = {
+    coverageRatio: 1, historyReturns: 20, historyFrames: 21, horizon: thin.horizon, worstAsset: 'ATOM',
+  };
+  const forged = { ...thin, dataSufficiency: forgedDescriptor };
+
+  // The proposal still cites the ORIGINAL thin forecast, as the pipeline recorded
+  // it. The swapped descriptor changes the recomputed id, so it no longer matches.
+  const proposalCitingThin = { ...PROPOSAL, cited_forecasts: [projectionId(thin)] };
+  const verdict = audit(
+    {
+      proposal: proposalCitingThin, forecast: forged,
+      portfolio: { cash: 1000, balances: { ATOM: 0 } }, prices: { ATOM: 10 }, currentTick: 0,
+    },
+    armed,
+  );
+  assert.equal(sufficiencyOf(verdict).pass, false);
+  assert.equal(verdict.verdict, 'rejected');
+  assert.match(sufficiencyOf(verdict).detail, /not bound to a forecast artifact the proposal cites/);
+  assert.match(sufficiencyOf(verdict).detail, /uncited/);
+  assert.match(sufficiencyOf(verdict).detail, /fails closed/);
+
+  // The binding is what rejects, not the descriptor's shape: the SAME forged
+  // descriptor, on a proposal that cites its OWN (forged) artifact, is measured
+  // like any self-consistent, self-cited artifact — the residual the binding
+  // shares with invariant 4's proposal-hash recompute. This pins that the reject
+  // above is the provenance edge and nothing else.
+  const proposalCitingForged = { ...PROPOSAL, cited_forecasts: [projectionId(forged)] };
+  const selfCited = audit(
+    {
+      proposal: proposalCitingForged, forecast: forged,
+      portfolio: { cash: 1000, balances: { ATOM: 0 } }, prices: { ATOM: 10 }, currentTick: 0,
+    },
+    armed,
+  );
+  assert.equal(sufficiencyOf(selfCited).pass, true);
+
+  // A proposal that cites NO forecast at all also fails closed under an armed
+  // gate: an unbound descriptor is not evidence the proposal committed to.
+  const uncited = audit(
+    {
+      proposal: { ...PROPOSAL, cited_forecasts: [] }, forecast: thin,
+      portfolio: { cash: 1000, balances: { ATOM: 0 } }, prices: { ATOM: 10 }, currentTick: 0,
+    },
+    { tailFloorPct: 0.5, dataSufficiencyMinCoverage: 0.1 }, // thin would otherwise clear 0.1
+  );
+  assert.equal(sufficiencyOf(uncited).pass, false);
+  assert.match(sufficiencyOf(uncited).detail, /not bound to a forecast artifact the proposal cites/);
 });
 
 test('audit: a count that is not a whole number is not a count, and only that refutes it', () => {

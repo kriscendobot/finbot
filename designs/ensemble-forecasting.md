@@ -984,14 +984,21 @@ binary pre-execution gate for the graded planner downweight it also asked for.
   cleared `tail-risk-floor` beside it, having simulated nothing. It now
   recomputes to coverage 0 and clears no positive requirement, like any other
   thin window.
-- **What the recompute does and does not buy.** It bounds *forgery*, not
-  *provenance*: the counts are still self-reported by the artifact being gated,
-  so an internally consistent fabrication (1000 returns over a 20-tick horizon)
-  clears the gate. That makes it strictly weaker than invariant 4, which
-  recomputes `proposal_hash` from evidence the auditor independently holds; the
-  auditor holds no price window to recount coverage against. Binding the
-  descriptor to an attested `projectionId` is how that gap closes, and until then
-  this invariant should be read as measuring self-consistency.
+- **What the recompute buys, and the binding that completes it.** The recompute
+  bounds *self-consistency*: the counts are self-reported, so on their own an
+  internally consistent fabrication (1000 returns over a 20-tick horizon)
+  recomputes cleanly. The gate therefore goes one step further and binds the
+  descriptor to *provenance*. Because the descriptor is a hashed component of the
+  projection artifact (`projectionArtifact` folds it into the JSON that
+  `projectionId` hashes), the gate recomputes that id and requires the proposal to
+  cite it: a descriptor lifted onto a thinner or foreign forecast — tampered at
+  rest or in flight before the executor's fire-time re-audit — changes the id and
+  no longer matches a cited one, so it fails closed. This is the sibling of
+  invariant 4's `proposal_hash` recompute and shares its one residual: a wholly
+  self-consistent, self-cited artifact is measured, not disproven, since the
+  auditor holds no price window to recount coverage from scratch. What the binding
+  enforces is that the ratio it judges belongs to the artifact the proposal
+  committed to; the forged-descriptor path the pre-merge review flagged is closed.
 - **Wiring.** `runOodaCycle` auto-enables the forecaster report when only the
   auditor knob is set, so a lone gate knob yields a live gate. An explicit
   `forecaster.reportDataSufficiency: false` still wins, but no longer disarms the

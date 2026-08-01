@@ -15,7 +15,7 @@
 import { hashProposal } from './planner.js';
 import { navOf } from './rebalance.js';
 import { stepHasRealRoute } from './substrates.js';
-import { worstAssetPersistence, persistenceStress, round12 } from './forecaster.js';
+import { worstAssetPersistence, persistenceStress, round12, projectionId } from './forecaster.js';
 
 // audit() accepts caller-supplied forecasts and configuration. Preserve the
 // primordial own-data-property machinery before any untrusted call can replace
@@ -222,16 +222,19 @@ export function audit(input, config = {}) {
   // 7. Forecast data-sufficiency (opt-in gate). A projection whose horizon
   // outruns its observed window is extrapolating past its evidence. Off by
   // default -> the invariant is not emitted, so the verdict is byte-identical to
-  // before; armed, it fails CLOSED and decides on coverage it RECOMPUTES from
-  // the descriptor's counts. The rationale, each unevaluable case, and the limit
-  // of what the recompute buys are in the `@param` above and in
-  // `dataSufficiencyGate`; the canonical statement is
-  // skills/pre-execution-audit/SKILL.md § 7.
+  // before; armed, it fails CLOSED, decides on coverage it RECOMPUTES from the
+  // descriptor's counts, and BINDS that descriptor to the forecast artifact the
+  // proposal cites (a descriptor lifted onto a thinner or foreign forecast
+  // changes the recomputed projectionId and no longer matches a cited id). The
+  // rationale, each unevaluable case, and the limit of what the recompute and
+  // the binding buy are in the `@param` above and in `dataSufficiencyGate`; the
+  // canonical statement is skills/pre-execution-audit/SKILL.md § 7.
   if (dataSufficiencyArmed) {
     results.push({
       name: 'forecast-data-sufficiency',
       ...dataSufficiencyGate({
         forecast, minCoverage: dataSufficiencyMinCoverage, minCoverageUsable, rawMinCoverage,
+        citedForecasts: citedProjectionIds(proposal),
       }),
     });
   }
@@ -359,6 +362,66 @@ function readOwn(object, key) {
  */
 function readOwnFiniteNumber(object, key) {
   return finiteNumber(readOwn(object, key));
+}
+
+/**
+ * Recompute the forecast's canonical projection id from the artifact the caller
+ * supplied, or `null` when it cannot be computed. `projectionId` folds the
+ * data-sufficiency descriptor into the hashed artifact, so this id changes the
+ * instant the descriptor does — which is what makes the descriptor tamper-
+ * evident against a cited commitment. Guarded because the forecast is untrusted
+ * on the `audit_proposal` / fire-time re-audit surface: a hostile field that
+ * throws while the artifact serializes owes the gate a fail-closed verdict, not
+ * an exception out of `audit()`.
+ *
+ * Unlike the descriptor reads, this recompute goes through `projectionId`'s plain
+ * property access and `JSON.stringify`, so a caller accessor CAN run here — but
+ * it cannot corrupt the verdict. It reaches this point only after the descriptor
+ * passed the own-data checks above, the detail line quotes those own-data values
+ * (never this recompute's), and the binding compares only the resulting HASH, so
+ * a side-effecting getter changes at most the attacker's own id, which then
+ * fails to match a cited one. Recomputing with the SAME `projectionId` the
+ * producer/citer used is what guarantees an honest plain-data forecast hashes
+ * identically on both sides; a bespoke own-data snapshot here would risk drifting
+ * from that hash and fail-closing honest forecasts.
+ *
+ * @param {unknown} forecast
+ * @returns {string|null}
+ */
+function recomputeProjectionId(forecast) {
+  if (forecast == null || typeof forecast !== 'object') return null;
+  try {
+    return projectionId(forecast);
+  } catch (_error) {
+    return null;
+  }
+}
+
+/**
+ * The forecast ids the proposal cites, as a plain, bounded string array (own
+ * data property only, non-string entries dropped). The provenance binding tests
+ * the recomputed projection id against this list, so the list is read as the
+ * untrusted, caller-supplied input it is — a hostile `cited_forecasts` accessor
+ * or an unbounded length owes a verdict, not an exception or an unbounded walk.
+ *
+ * @param {unknown} proposal
+ * @returns {string[]}
+ */
+function citedProjectionIds(proposal) {
+  const cited = readOwn(proposal, 'cited_forecasts');
+  if (!Array.isArray(cited)) return [];
+  const ids = [];
+  const length = Math.min(cited.length, 4096);
+  for (let index = 0; index < length; index += 1) {
+    let id;
+    try {
+      id = cited[index];
+    } catch (_error) {
+      continue; // a hostile element getter is not a citation
+    }
+    if (typeof id === 'string') ids.push(id);
+  }
+  return ids;
 }
 
 /**
@@ -565,25 +628,36 @@ function readDataSufficiency(forecast) {
  * nothing. A zero-tick projection is absence of evidence, and absence of
  * evidence is not evidence of sufficiency.
  *
- * The recompute bounds FORGERY, not competence: the counts are still
- * self-reported by the artifact being gated, so an internally consistent
- * fabrication (`1000` returns over a `20`-tick horizon) clears the gate. That is
- * a weaker guarantee than invariant 4's, which recomputes `proposal_hash` from
- * the proposal's own steps — independent evidence the auditor already holds.
- * Here the auditor holds no price window to recount against, so what it can
- * enforce is that the ratio it judges is the ratio the descriptor's own evidence
- * supports. Binding the descriptor to an attested `projectionId` is the way to
- * close the remaining gap; until then, treat this invariant as measuring
- * self-consistency, not provenance.
+ * The recompute bounds SELF-CONSISTENCY; the provenance binding at the end
+ * bounds SUBSTITUTION. The counts are self-reported by the artifact being gated,
+ * so an internally consistent fabrication (`1000` returns over a `20`-tick
+ * horizon) recomputes cleanly on its own terms. But the descriptor is a hashed
+ * component of the forecast's canonical projection artifact (`projectionArtifact`
+ * folds it into the JSON that `projectionId` hashes), so the gate recomputes
+ * that id and requires the proposal to CITE it: a descriptor lifted onto a
+ * thinner or foreign forecast changes the recomputed id and no longer matches a
+ * cited one, so it fails closed. This is the sibling of invariant 4, which
+ * recomputes `proposal_hash` from the proposal's own steps — and it inherits the
+ * same residual: a wholly self-consistent, self-cited artifact is measured, not
+ * disproven, exactly as a self-hashed proposal clears invariant 4. What the
+ * binding removes is the gap the finding named — a forged descriptor borrowing
+ * the coverage of an artifact the proposal never committed to, whether swapped
+ * at rest or in flight before the executor's fire-time re-audit. The auditor
+ * holds no price window to recount against, so it cannot re-derive the coverage
+ * from scratch; what it enforces is that the ratio it judges is the ratio the
+ * cited artifact's own evidence supports.
  *
  * @param {object} input
  * @param {unknown} input.forecast          untrusted, caller-supplied
  * @param {number} input.minCoverage        the threshold, NaN when unusable
  * @param {boolean} input.minCoverageUsable
  * @param {unknown} input.rawMinCoverage    as supplied, for the unusable-threshold detail
+ * @param {string[]} input.citedForecasts   the projection ids the proposal cites, for the binding
  * @returns {{ pass: boolean, detail: string }}
  */
-function dataSufficiencyGate({ forecast, minCoverage, minCoverageUsable, rawMinCoverage }) {
+function dataSufficiencyGate({
+  forecast, minCoverage, minCoverageUsable, rawMinCoverage, citedForecasts,
+}) {
   if (!minCoverageUsable) {
     return {
       pass: false,
@@ -644,6 +718,25 @@ function dataSufficiencyGate({ forecast, minCoverage, minCoverageUsable, rawMinC
       detail: `data-sufficiency descriptor claims coverage ${formatCoverage(coverageRatio)}${onAsset} but its `
         + `own counts ${evidence} recompute to ${formatCoverage(recomputed)}; the gate cannot be evaluated `
         + '(fails closed)',
+    };
+  }
+  // Provenance binding: the descriptor's counts are self-reported, so
+  // self-consistency alone cannot tell a measured descriptor from an internally
+  // consistent one lifted onto a thinner or foreign forecast. `projectionId`
+  // hashes the descriptor as part of the canonical artifact, so recompute that
+  // id and require the proposal to CITE it: a swapped descriptor changes the id
+  // and stops matching, so the gate refuses coverage the proposal never
+  // committed to. Fail closed when the id cannot be recomputed (a hostile
+  // artifact) or the proposal cites no matching id — the same fail-closed
+  // direction the rest of this gate takes when it cannot SHOW the requirement is
+  // met.
+  const provenanceId = recomputeProjectionId(forecast);
+  if (provenanceId == null || !citedForecasts.includes(provenanceId)) {
+    return {
+      pass: false,
+      detail: `data-sufficiency descriptor reports coverage ${formatCoverage(recomputed)}${onAsset} ${evidence} `
+        + 'but is not bound to a forecast artifact the proposal cites (its recomputed projection id is '
+        + `${provenanceId == null ? 'unavailable' : 'uncited'}); the gate cannot be evaluated (fails closed)`,
     };
   }
   return {
