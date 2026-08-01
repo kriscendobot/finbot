@@ -29,7 +29,7 @@ import { promises as fs } from 'node:fs';
 import crypto from 'node:crypto';
 
 import { assertSpawnParams } from './schemas/spawn.js';
-import { compartmentAttenuator } from './sandbox/permissive.js';
+import { compartmentAttenuator, runCompartmentLlm } from './sandbox/permissive.js';
 
 /**
  * Spawn a subagent in this process.
@@ -41,8 +41,10 @@ import { compartmentAttenuator } from './sandbox/permissive.js';
 export async function spawn(params, ctx) {
   assertSpawnParams(params);
   const attenuator = params.attenuator || compartmentAttenuator;
-  const llm = params.llm || stubLlm;
   const timeoutMs = params.timeoutMs || 10 * 60 * 1000;
+  const llm = params.llm || (params.llmProgram
+    ? makeCompartmentLlm(params.role, params.llmProgram, timeoutMs)
+    : stubLlm);
 
   const id = shortId();
   const started = Date.now();
@@ -72,7 +74,14 @@ export async function spawn(params, ctx) {
   }
 
   // attenuate capabilities
-  const attenuated = attenuator(params.role, params.capabilities, ctx);
+  // Host-realm LLM adapters keep the legacy omitted-capabilities behavior.
+  // An untrusted llmProgram is different: omission must mean no grants, never
+  // every host tool. The program receives tool names as data and the host later
+  // resolves a requested name against this exact attenuated registry.
+  const capabilities = params.llmProgram && params.capabilities === undefined
+    ? []
+    : params.capabilities;
+  const attenuated = attenuator(params.role, capabilities, ctx);
 
   // run asynchronously; the caller awaits the handle's result via the
   // returned promise pattern.
@@ -135,6 +144,7 @@ async function runLoop({ params, ctx, attenuated, roleBrief, events, llm }) {
       systemPrompt,
       messages,
       tools: attenuated.tools,
+      globals: attenuated.globals,
       role: params.role,
       turn,
     });
@@ -163,7 +173,15 @@ async function runLoop({ params, ctx, attenuated, roleBrief, events, llm }) {
         try {
           result = await tool.run(tc.arguments || {}, { role: params.role });
         } catch (err) {
-          result = { ok: false, content: [{ type: 'text', text: String(err.message || err) }] };
+          // A tool runs with host authority. Its exception can contain paths,
+          // credentials, or implementation details, so preserve it only in host
+          // diagnostics and return an opaque protocol failure to the role.
+          events.push({
+            type: 'tool_execution_error',
+            toolCall: tc,
+            error: { message: String(err.message || err), stack: err.stack },
+          });
+          result = { ok: false, content: [{ type: 'text', text: 'tool execution failed' }] };
         }
       }
       const toolResultMessage = {
@@ -182,6 +200,39 @@ async function runLoop({ params, ctx, attenuated, roleBrief, events, llm }) {
 
   const finalText = extractFinalText(messages);
   return { messages, finalText };
+}
+
+/**
+ * Adapt a source-string role program to the harness LLM interface. The source
+ * runs in an SES Compartment and receives only a copied turn snapshot plus the
+ * names of tools selected by the attenuator. Host tool objects stay outside the
+ * compartment; the normal runLoop host boundary validates and invokes requests.
+ *
+ * The compartment's ambient globals come from `args.globals` — the policy the
+ * attenuator produced for this spawn — so a caller-supplied attenuator narrows
+ * the role program's ambient authority, not just its tool slice.
+ *
+ * @param {string} role
+ * @param {string} source
+ * @returns {Function}
+ */
+function makeCompartmentLlm(role, source, timeoutMs) {
+  return (args) => runCompartmentLlm({
+    role,
+    source,
+    globals: args.globals,
+    // The role program runs in a worker thread; `timeoutMs` bounds a single
+    // non-yielding turn and terminates the worker on overrun, so a program that
+    // never returns can no longer wedge the spawn loop.
+    timeoutMs,
+    input: {
+      systemPrompt: args.systemPrompt,
+      messages: args.messages,
+      toolNames: Object.keys(args.tools || {}),
+      role: args.role,
+      turn: args.turn,
+    },
+  });
 }
 
 function composeSystemPrompt(role, roleBrief) {

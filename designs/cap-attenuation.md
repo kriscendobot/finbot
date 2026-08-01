@@ -1,7 +1,7 @@
 ---
 created: 2026-06-17
-updated: 2026-06-17
-author: architect
+updated: 2026-07-22
+author: builder, architect
 status: stub
 ---
 
@@ -107,3 +107,100 @@ The inference-driven OODA axis is now **complete end to end**: the **ACT stage's
 - **Chained in the bin.** `bin/finbot-dispatch` now drives OBSERVE → ORIENT → DECIDE → AUDIT → ACT entirely by inference in one command (verified `seed=7` → 1-step proposal `hash=7c90a9a577e7…`, verdict **approved**, dry-run 1 step simulated, post-equity 1085.91, **WALLET TOUCHED: false**). The bin exits non-zero if the executor dispatch ever reports `walletTouched != false` (the load-bearing safety check).
 
 What remains on the axis: the **live executor** — the first paper-wallet/test-net run — which is not an inference-wiring increment but a cap-attenuation Phase 2 decision (choose the CapTP transport, replace the `spawnSigningWorker` stub, and gate behind an explicit maintainer `live_authorized: true`). Every OODA stage that can run read-only now runs by inference; the remaining boundary is authorization, not code.
+
+## Notes from the field (2026-07-22, harness role-program compartment)
+
+The harness previously defaulted to a role-scoped policy and tool slice, but
+its `llm` adapter remained a host-realm JavaScript function. That was correctly
+described as a policy, not as a sandbox. The new optional `llmProgram` dispatch
+form makes the boundary executable for locally supplied role JavaScript.
+
+- `spawn({ llmProgram })` evaluates the source as a function in a fresh SES
+  `Compartment` for each turn. It receives only a JSON-copied, hardened turn
+  snapshot: system prompt, prior messages, role, turn count, and the names of
+  the tools selected by attenuation.
+- The program receives tool names, never tool objects. It returns an ordinary
+  requested tool-call message, which crosses back to the host loop. The host
+  then resolves the name against the attenuated registry and invokes the tool.
+  The role program cannot retain, mutate, or inspect a host capability.
+- The new harness tests prove a planner role program cannot name `process`,
+  `require`, or ungranted `fetch`, and that a program can request its one
+  granted tool while a blocked tool remains unreachable. This is an actual SES
+  execution path, not an assertion that a policy object could eventually be
+  consumed by one.
+
+The default deterministic stub and provider adapters remain host functions.
+They are trusted adapters, not a claim that remote LLM output is JavaScript in a
+Compartment. Loading archived role module graphs and the live executor's
+separate CapTP worker remain the next larger boundaries.
+
+## Notes from the field (2026-07-25, the attenuator is the sole globals source)
+
+A review of the role-program compartment surfaced a latent bypass: `spawn()`
+honored a caller-supplied `params.attenuator` for the *tool* slice, but
+`runCompartmentLlm` re-derived the compartment's ambient globals from
+`CAPABILITY_MAP` directly (`buildRolePolicy(role)`), ignoring the policy the
+attenuator returned. A custom or narrowed attenuator could therefore restrict a
+role program's tools but **not** its ambient authority — the declared narrowing
+point was not the only narrowing point.
+
+- `spawn()` now threads the attenuated `globals` policy into the compartment LLM
+  adapter, and `runCompartmentLlm({ …, globals })` builds the Compartment from
+  exactly that policy. The compartment no longer consults `CAPABILITY_MAP` behind
+  the attenuator's back. Direct callers that omit `globals` still fall back to the
+  role's default policy for convenience; the spawn path always supplies it.
+- `test/spawn.test.js` proves a custom attenuator that narrows a role's ambient
+  globals to the empty set (plus a marker) is honored by the executing
+  compartment: the role program sees the injected marker and **not** the role's
+  default `console`. The test fails against the pre-fix path (which still exposed
+  `console`), so it is a live regression guard, not a tautology.
+
+What remains on this axis (surfaced by the same review, deferred as they need a
+design decision rather than a mechanical fix): the vended `fetch` is unbounded to
+any origin where the capability map specifies a **pinned** `fetch`, and the
+`bounded` ambient token is currently identical to `full`. Both belong to a
+follow-on that decides the pin set and the concrete `bounded` surface.
+
+## Notes from the field (2026-07-28, the role program is preemptible)
+
+A panel review of PR #4 found the untrusted role program was not preemptible.
+`runCompartmentLlm` ran it as `await program(harden(snapshot))` **on the host
+event-loop thread**, so a non-yielding program — `while (true) {}` or any
+synchronous CPU bomb the LLM might emit — blocked the loop forever. The
+`timeoutMs` deadline in `spawn()` is a `setTimeout`/`Promise.race`, and a blocked
+loop never runs the timer callback, so the deadline could never fire: the whole
+harness wedged. SES isolates *authority*, but it does not make untrusted code
+*interruptible*.
+
+- The role program now runs in a dedicated **worker thread**
+  (`packages/harness/sandbox/role-worker.js`). A non-yielding program blocks only
+  its own thread; the host loop stays free, so the host enforces `timeoutMs` and
+  calls `worker.terminate()` — a preemption that interrupts even a tight
+  synchronous loop, which the host thread could never perform on itself.
+- Transport is **JSON-only in both directions**. The host validates and copies
+  the turn input to JSON before posting (a `BigInt`/cycle/accessor still fails
+  with the same precise host-labeled error); the worker copies the program result
+  to JSON on its side (where accessors, proxies, and symbols are still rejected at
+  the boundary) and the host performs the final, authoritative
+  assistant-message validation on the parsed result. No live object — and no host
+  or worker ambient — ever crosses.
+- Ambient globals cannot be serialized, so the host distills the attenuated
+  `globals` into an explicit descriptor: the `console`/`fetch`/`rng` endowments
+  travel as **tokens** the worker rebuilds from the shared materializers in
+  `sandbox/boundary.js`, while any plain-data global a custom attenuator injects
+  travels verbatim as JSON. The token list is read off the attenuated globals, so
+  the attenuator remains the sole narrowing point; a function-valued global
+  outside the known ambient set is rejected loudly rather than silently dropped.
+  The boundary primitives (JSON copy, message validator, materializers, lockdown
+  guard) live in one module imported by both host and worker, so the two runners
+  cannot drift.
+- `test/spawn.test.js` adds a regression guard: a `while (true) {}` role program
+  with a 250 ms `timeoutMs` rejects with a timeout near the deadline — a test that
+  **hangs forever against the pre-fix in-process path** — plus a worker-isolation
+  assertion that a role program sees neither `process`, `Worker`, nor
+  `parentPort`, only its granted `console`.
+
+This closes the panel's standing must-fix on the harness role-program runner. The
+live executor's *separate CapTP signing worker* (§ Process boundary) is a distinct
+boundary and stays gated as before; this note is about the untrusted **inference**
+program, not the wallet signer.
