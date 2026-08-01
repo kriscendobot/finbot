@@ -19,13 +19,23 @@
  *   --seed=N         PRNG seed (default 7)
  *   --drift=F        per-tick GBM drift for ATOM (default -0.01, biases a dip)
  *   --vol=F          per-tick GBM volatility for ATOM (default 0.02)
- *   --warmup=N       price-feed warmup ticks before the cycle (default 10)
- *   --fit-window=N   longer rolling window for the GARCH vol-surface fit only (default = warmup);
+ *   --warmup=N       price-feed warmup ticks before the cycle (default 10); a whole tick count
+ *   --fit-window=N   longer rolling window for the GARCH vol-surface fit and data-sufficiency
+ *                    coverage measurement (default 0 = warmup);
  *                    set > warmup (e.g. 13+) so `--adaptive-vol=mle` engages the per-asset MLE while
- *                    the oracle deviation / realized-vol reads stay on the short `warmup` window
+ *                    the oracle deviation / realized-vol reads stay on the short `warmup` window.
+ *                    It is the observed window the coverage ratio --data-sufficiency-min gates on
+ *                    counts returns from, so a value that is not a tick count is rejected (exit 2)
+ *                    rather than silently collapsing back to --warmup
  *   --threshold=BPS  oracle deviation threshold in basis points (default 30)
  *   --ensemble=N     forecaster ensemble size (default 200)
- *   --horizon=N      forecaster horizon in ticks (default 20)
+ *   --horizon=N      forecaster BASE horizon (default 20); when --data-sufficiency-min arms the gate it
+ *                    must be a whole tick count >= 1. The projected horizon
+ *                    is the denominator of the coverage ratio --data-sufficiency-min gates on, so a
+ *                    value that is not a tick count is rejected (exit 2) rather than silently making
+ *                    that gate unevaluable. The projected horizon is this value AFTER any regime
+ *                    stretch (see --regime-horizon-stretch, which defaults to 0.5 under --adaptive-vol),
+ *                    so a persistent regime raises the denominator and lowers the achievable coverage
  *   --tail-floor=F   auditor tail-risk floor as a fraction of NAV (default 0.6)
  *   --regime-tail-bump=F  extra tail floor a fully persistent vol regime adds (default: 0.1 when
  *                    --adaptive-vol is on, else 0); a persistent GARCH regime tightens the audit gate
@@ -33,6 +43,16 @@
  *                    (default: 0.5 when --adaptive-vol is on, else 0); a persistent regime projects longer
  *   --regime-position-shrink=F  max fractional target reduction a fully persistent vol regime applies
  *                    (default: 0.5 when --adaptive-vol is on, else 0); a persistent asset sizes smaller
+ *   --data-sufficiency-min=F  require the forecast's coverage ratio (observed returns per projected
+ *                    tick) to be >= F or the auditor rejects (default: off; F=0 is also off); names +
+ *                    gates a forecast whose horizon outruns its observed window. An F the gate could
+ *                    not evaluate (non-finite, negative, empty, or a positive value that quantizes to
+ *                    zero at the coverage descriptor's 12-decimal resolution) is rejected (exit 2)
+ *                    rather than silently disarming the gate. The achievable coverage is (observed returns of
+ *                    the worst-covered asset) / (the PROJECTED horizon, i.e. --horizon after any regime
+ *                    stretch), so the defaults (--warmup=10, --horizon=20, no --adaptive-vol) top out near
+ *                    0.45, and less than that when --adaptive-vol stretches the horizon; widen the observed
+ *                    window with --fit-window (or --warmup) to make a requirement of 1.0 reachable
  *   --multi          run the multi-instrument world (correlated growth legs + a yield leg)
  *   --adaptive-vol[=mle|auto|auto-egarch|auto-family]  fit a conditional-vol surface from the window; the
  *                    forecaster projects the ensemble under it and the analyzer
@@ -50,14 +70,38 @@ import process from 'node:process';
 
 import { makeWorld } from '../packages/simulator/world.js';
 import { runSimulator } from '../packages/simulator/runner.js';
-import { runOodaCycle } from '../packages/pipeline/index.js';
+// This report is a RECORDER of the same coverage evidence the auditor's verdict
+// records, so it shares every rule that evidence is written by rather than
+// re-approximating any of them: `round12` is the ONE quantizer, `formatCoverage`
+// the ONE formatter (a local `toFixed` would print a passing coverage as the
+// number that means "no gate at all"), `sanitizeLabel` the ONE scrubber for a
+// caller-supplied identifier, and `coverageThresholdUsable` the ONE definition
+// of a threshold the gate can evaluate — the test this CLI's validation must not
+// drift from. All come through the package entry point, like `runOodaCycle`,
+// rather than by reaching around it into a module.
+import {
+  runOodaCycle, round12, sanitizeLabel, formatCoverage, coverageThresholdUsable, coverageGateArmed,
+} from '../packages/pipeline/index.js';
+
+/**
+ * A flag value as a number, or NaN when the flag carried no value at all. Never
+ * `Number(null)` / `Number('  ')`, both of which are 0 — a real, meaningful
+ * setting for several of these knobs.
+ *
+ * @param {string|null} value
+ * @returns {number}
+ */
+function numberOrNaN(value) {
+  return value === null || String(value).trim() === '' ? NaN : Number(value);
+}
 
 function parseArgs(argv) {
   const args = {
     seed: 7, drift: -0.01, vol: 0.02, warmup: 10, threshold: 30,
     ensemble: 200, horizon: 20, tailFloor: 0.6, journal: null, json: false,
     multi: false, adaptiveVol: null, fitWindow: 0, regimeTailBump: null,
-    regimeHorizonStretch: null, regimePositionShrink: null,
+    regimeHorizonStretch: null, regimePositionShrink: null, dataSufficiencyMin: null,
+    dataSufficiencyMinLiteral: null,
   };
   for (const arg of argv) {
     const eq = arg.indexOf('=');
@@ -66,8 +110,13 @@ function parseArgs(argv) {
     if (key === '--seed') args.seed = Number(val);
     else if (key === '--drift') args.drift = Number(val);
     else if (key === '--vol') args.vol = Number(val);
-    else if (key === '--warmup') args.warmup = Number(val);
-    else if (key === '--fit-window') args.fitWindow = Number(val);
+    // The two observed-window flags carry the coverage ratio's NUMERATOR, so a
+    // bare `--warmup` / `--fit-window` (or a blank value) must not read as the
+    // number 0 the way `Number(null)` and `Number('  ')` do — 0 is `--fit-window`'s
+    // documented "unset" value, so a typo would silently narrow the window the
+    // gate measures. NaN routes both to the validation below instead.
+    else if (key === '--warmup') args.warmup = numberOrNaN(val);
+    else if (key === '--fit-window') args.fitWindow = numberOrNaN(val);
     else if (key === '--threshold') args.threshold = Number(val);
     else if (key === '--ensemble') args.ensemble = Number(val);
     else if (key === '--horizon') args.horizon = Number(val);
@@ -75,6 +124,13 @@ function parseArgs(argv) {
     else if (key === '--regime-tail-bump') args.regimeTailBump = Number(val);
     else if (key === '--regime-horizon-stretch') args.regimeHorizonStretch = Number(val);
     else if (key === '--regime-position-shrink') args.regimePositionShrink = Number(val);
+    // A bare `--data-sufficiency-min`, or an empty/whitespace value, carries no
+    // number; NaN routes it to the validation below rather than to `Number(null)`
+    // or `Number('  ')`, both of which are 0 — the silently-off value.
+    else if (key === '--data-sufficiency-min') {
+      args.dataSufficiencyMin = numberOrNaN(val);
+      args.dataSufficiencyMinLiteral = val;
+    }
     else if (key === '--journal') args.journal = val;
     else if (key === '--json') args.json = true;
     else if (key === '--multi') args.multi = true;
@@ -98,6 +154,68 @@ function parseArgs(argv) {
     else if (key === '--help' || key === '-h') { printHelp(); process.exit(0); }
     else { console.error(`finbot-ooda: unknown flag ${arg}`); process.exit(2); }
   }
+  // A flag that ARMS a safety gate must never disarm it on a typo: `Number('abc')`
+  // is NaN and `NaN > 0` is false, so an unvalidated value would wire the knob,
+  // print the coverage line, and emit no invariant at all — a gate the operator
+  // believes is armed and is not. Fail fast instead, as finbot-eval does for
+  // --significance-alpha. The test is the auditor's own exported predicate — not
+  // a restatement of it — so a value this CLI accepts is by construction a value
+  // the gate can evaluate.
+  // Look only at the significand. A digit in the exponent does not make zero
+  // positive: `0e1` is the documented off value just as `0` is, whereas
+  // `1e-5000` underflows a genuinely positive threshold and must be rejected.
+  const thresholdSignificand = args.dataSufficiencyMinLiteral == null
+    ? ''
+    : String(args.dataSufficiencyMinLiteral).trim().split(/[eE]/, 1)[0];
+  const underflowedPositiveThreshold = args.dataSufficiencyMin === 0
+    && /[1-9]/.test(thresholdSignificand);
+  if (args.dataSufficiencyMin != null
+      && (underflowedPositiveThreshold || !coverageThresholdUsable(args.dataSufficiencyMin))) {
+    console.error('finbot-ooda: --data-sufficiency-min must be a finite number >= 0 that, when '
+      + "positive, does not quantize to zero at the descriptor's 12-decimal resolution "
+      + '(for example --data-sufficiency-min=1)');
+    process.exit(2);
+  }
+  // When the gate is armed, the horizon is the base of the DENOMINATOR its ratio is taken over.
+  // so leaving it unvalidated would disarm through the sibling flag:
+  // `--horizon=abc` yields a horizon that is not a tick count, hence an
+  // unmeasurable coverage descriptor, and an operator who armed the gate would
+  // watch it reject everything without learning why. A horizon is a whole number
+  // of ticks, and at least one: a zero-tick projection clears no positive
+  // coverage requirement anyway (the armed gate has NO unconditional pass — see
+  // `dataSufficiencyGate`), so it is not a cycle worth running.
+  if (coverageGateArmed(args.dataSufficiencyMin)
+      && !(Number.isSafeInteger(args.horizon) && args.horizon >= 1)) {
+    console.error('finbot-ooda: --horizon must be a whole number of ticks >= 1 '
+      + '(for example --horizon=20)');
+    process.exit(2);
+  }
+  // This option changes the projected horizon, which is the gate's
+  // denominator. A malformed explicit value otherwise suppresses the adaptive
+  // default (or is capped after an infinite calculation), silently changing
+  // the coverage an operator asked to enforce.
+  if (coverageGateArmed(args.dataSufficiencyMin)
+      && args.regimeHorizonStretch != null
+      && !(Number.isFinite(args.regimeHorizonStretch) && args.regimeHorizonStretch >= 0)) {
+    console.error('finbot-ooda: --regime-horizon-stretch must be a finite number >= 0 '
+      + '(for example --regime-horizon-stretch=0.5) when the data-sufficiency gate is armed');
+    process.exit(2);
+  }
+  // `--fit-window` is the NUMERATOR's window — the observed history the coverage
+  // ratio counts returns from — so it validates for the same reason `--horizon`
+  // does. Unvalidated, `Number('abc')` is NaN and `config.fitWindowTicks && NaN >
+  // windowTicks` is false, so the window silently collapses back to `--warmup`
+  // and the operator gets a rejection naming a gate they believe they widened
+  // past. A flag that arms a safety gate validates every sibling flag the gate's
+  // arithmetic reads, not only the one it divides by. 0 is the documented
+  // "unset" value (fall back to --warmup); --warmup itself takes the same shape.
+  for (const [flag, value, minimum] of [['--fit-window', args.fitWindow, 0], ['--warmup', args.warmup, 0]]) {
+    if (!(Number.isSafeInteger(value) && value >= minimum)) {
+      console.error(`finbot-ooda: ${flag} must be a whole number of ticks >= ${minimum} `
+        + `(for example ${flag}=20)`);
+      process.exit(2);
+    }
+  }
   return args;
 }
 
@@ -110,7 +228,28 @@ function printHelp() {
     '  finbot-ooda [--seed=N] [--drift=F] [--vol=F] [--warmup=N] [--fit-window=N]',
     '              [--threshold=BPS] [--ensemble=N] [--horizon=N]',
     '              [--tail-floor=F] [--regime-tail-bump=F] [--regime-horizon-stretch=F] [--regime-position-shrink=F]',
+    '              [--data-sufficiency-min=F]',
     '              [--multi] [--adaptive-vol[=mle|auto|auto-egarch|auto-family]] [--journal=PATH] [--json]',
+    '',
+    'Options (see the file header for the full per-flag notes):',
+    '  --seed=N            PRNG seed (default 7)',
+    '  --warmup=N          price-feed warmup ticks before the cycle (default 10)',
+    '  --fit-window=N      longer rolling window for the GARCH fit and the coverage',
+    '                     numerator (default 0 = warmup); set > warmup to widen coverage',
+    '  --horizon=N         forecaster base horizon (default 20); the coverage denominator',
+    '  --ensemble=N        forecaster ensemble size (default 200)',
+    '  --tail-floor=F      auditor tail-risk floor as a fraction of NAV (default 0.6)',
+    '  --data-sufficiency-min=F  ARM the pre-execution data-sufficiency gate: REJECT the',
+    '                     cycle unless the forecast\'s coverage ratio (observed returns per',
+    '                     projected tick, worst-covered asset) is >= F. Off by default and',
+    '                     at F=0; a value the gate cannot evaluate (non-finite, negative,',
+    '                     empty, or one that quantizes to zero) exits 2 rather than silently',
+    '                     disarming the gate. The default window tops out near 0.45, so',
+    '                     widen it with --fit-window/--warmup to make F=1.0 reachable',
+    '  --multi             run the 3-instrument world instead of ATOM-vs-cash',
+    '  --adaptive-vol[=…]  fit a conditional-vol surface from the observed window',
+    '  --json              print the structured result as JSON instead of a report',
+    '  --help / -h         print this and exit',
     '',
     'DRY-RUN ONLY. Never reads a keystore; never constructs a wallet.',
     '',
@@ -153,6 +292,9 @@ function buildSingleWorld(args) {
       // Explicit flag pins the horizon stretch; otherwise the ooda-cycle defaults
       // it to 0.5 when --adaptive-vol is on and leaves the horizon fixed when off.
       ...(args.regimeHorizonStretch != null ? { regimeHorizonStretch: args.regimeHorizonStretch } : {}),
+      // --data-sufficiency-min arms the auditor gate; report the descriptor so
+      // the gate has data to read (see the flag doc in the header).
+      ...(args.dataSufficiencyMin > 0 ? { reportDataSufficiency: true } : {}),
     },
     bounds: { maxStepPct: 0.25, maxDayPct: 0.5, concentrationCapPct: 0.9 },
     auditor: {
@@ -160,6 +302,7 @@ function buildSingleWorld(args) {
       // Explicit flag pins the regime bump; otherwise the ooda-cycle defaults it
       // to 0.1 when --adaptive-vol is on and leaves it 0 (unchanged gate) when off.
       ...(args.regimeTailBump != null ? { regimeTailBump: args.regimeTailBump } : {}),
+      ...(args.dataSufficiencyMin > 0 ? { dataSufficiencyMinCoverage: args.dataSufficiencyMin } : {}),
     },
   };
   return { world, config };
@@ -203,6 +346,7 @@ function buildMultiWorld(args) {
       // Explicit flag pins the horizon stretch; otherwise the ooda-cycle defaults
       // it to 0.5 when --adaptive-vol is on and leaves the horizon fixed when off.
       ...(args.regimeHorizonStretch != null ? { regimeHorizonStretch: args.regimeHorizonStretch } : {}),
+      ...(args.dataSufficiencyMin > 0 ? { reportDataSufficiency: true } : {}),
     },
     bounds: { maxStepPct: 0.4, maxDayPct: 1.0, concentrationCapPct: 0.9 },
     auditor: {
@@ -210,6 +354,7 @@ function buildMultiWorld(args) {
       // Explicit flag pins the regime bump; otherwise the ooda-cycle defaults it
       // to 0.1 when --adaptive-vol is on and leaves it 0 (unchanged gate) when off.
       ...(args.regimeTailBump != null ? { regimeTailBump: args.regimeTailBump } : {}),
+      ...(args.dataSufficiencyMin > 0 ? { dataSufficiencyMinCoverage: args.dataSufficiencyMin } : {}),
     },
   };
   return { world, config };
@@ -274,6 +419,38 @@ function printReport(res, args) {
     log(`  ORIENT   forecaster: N=${f.ensembleSize} horizon=${f.horizon} `
       + `p05/p50/p95=${f.summary.p05.toFixed(2)}/${f.summary.p50.toFixed(2)}/${f.summary.p95.toFixed(2)} `
       + `pProfit=${(f.pProfit * 100).toFixed(1)}%`);
+    if (f.dataSufficiency) {
+      const dataSufficiency = f.dataSufficiency;
+      // SCARCE is the AUDITOR's own verdict on this forecast, not a second
+      // comparison that could drift from the gate it claims to mirror: the
+      // report can never flag scarcity beside an approving gate, nor stay silent
+      // beside a rejecting one. Only when the cycle produced no audit at all
+      // (no proposal to gate) does the label fall back to the same quantized
+      // comparison the auditor makes.
+      const gate = res.audit
+        && res.audit.invariant_results.find((r) => r.name === 'forecast-data-sufficiency');
+      // An unmeasurable descriptor (a horizon that is not a tick count) has no
+      // ratio to print or compare; say UNMEASURABLE rather than inventing a 0,
+      // which is the number that reads as "cannot outrun its window".
+      const measured = typeof dataSufficiency.coverageRatio === 'number';
+      const scarce = gate
+        ? !gate.pass
+        : args.dataSufficiencyMin > 0
+          && (!measured || round12(dataSufficiency.coverageRatio) < round12(args.dataSufficiencyMin));
+      // Sanitized here as it is in the verdict: this report is a record too, and
+      // the descriptor it reads is the same untrusted, caller-supplied object.
+      const worstAsset = typeof dataSufficiency.worstAsset === 'string'
+        ? sanitizeLabel(dataSufficiency.worstAsset) : null;
+      const onAsset = worstAsset ? ` on ${worstAsset}` : '';
+      // The auditor's own formatter, not a local `toFixed`: below three decimals
+      // a flat format renders a coverage that PASSES as `0.00`, the number that
+      // reads as the OFF value, on the line that is this report's evidence.
+      const coverage = measured ? formatCoverage(dataSufficiency.coverageRatio) : 'UNMEASURABLE';
+      const ticks = dataSufficiency.horizon == null ? 'unmeasurable' : `${dataSufficiency.horizon}-tick`;
+      log(`           data-sufficiency: coverage=${coverage}${onAsset} `
+        + `(${dataSufficiency.historyReturns} observed return(s) / ${ticks} horizon)`
+        + `${scarce ? ' SCARCE' : ''}`);
+    }
   }
   if (res.proposal) {
     log(`  DECIDE   planner: ${res.proposal.steps.length} step(s) hash=${res.proposal.proposal_hash.slice(0, 16)}…`);

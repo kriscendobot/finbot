@@ -72,7 +72,8 @@ export const PLANNER_TOOL_NAMES = ['propose_rebalance'];
  * gate exposed as `audit_proposal`, so an inference-driven auditor subagent can
  * reason over the planner's proposal and the forecast that justified it, then
  * delegate the invariant checks (citation completeness, risk bounds, tail-risk
- * floor, hash reproducibility, pricing freshness, place/route reachability) to
+ * floor, hash reproducibility, pricing freshness, place/route reachability, and
+ * — when armed — forecast data-sufficiency) to
  * the deterministic auditor rather than adjudicating them by hand. Strictly
  * read-only — the auditor recomputes and returns a verdict; a verdict is a
  * precondition for a live executor dispatch, never an authorization, and no
@@ -151,10 +152,10 @@ function simulateExecutionTool() {
         proposal: { type: 'object', description: 'the audited planner proposal: { steps, proposal_hash, cited_forecasts, cited_analyses, substrate? }' },
         portfolio: { type: 'object', description: 'pre-trade snapshot: { cash, balances: { ASSET: qty }, quoteCurrency? }' },
         prices: { type: 'object', description: 'latest price book { ASSET: price }' },
-        forecast: { type: 'object', description: 'the forecaster projection carrying p05Equity (the tail-risk anchor for the fire-time audit)' },
+        forecast: { type: 'object', description: "the forecaster projection carrying p05Equity (the tail-risk anchor for the fire-time audit) and horizon. When config.dataSufficiencyMinCoverage arms the data-sufficiency gate the fire-time re-audit reads the forecaster's dataSufficiency descriptor too, and fails CLOSED without it. Pass the WHOLE projection the proposal cited, descriptor included, unchanged: the gate recomputes the projection's content id and requires proposal.cited_forecasts to name it, so a descriptor SUBSTITUTED onto another forecast — or a projection rebuilt by hand — no longer matches the cited id and fails closed (descriptor-substitution resistance; a tamperer who also rewrites cited_forecasts is outside this binding's scope)" },
         currentTick: { type: 'number', description: 'the freshness clock (cited readings must be within the staleness window of it)' },
         oracleReadings: { type: 'array', description: 'cited oracle readings (carry observedAtTick for the freshness invariant)' },
-        config: { type: 'object', description: 'optional audit bounds for the fire-time drift guard: { maxStepPct, maxDayPct, concentrationCapPct, tailFloorPct, stalenessWindowTicks }' },
+        config: { type: 'object', description: 'optional audit bounds for the fire-time drift guard, the same set audit() accepts: { maxStepPct, maxDayPct, concentrationCapPct, tailFloorPct, regimeTailBump, regimePersistenceLo, regimePersistenceHi, regimeTailFloorCap, stalenessWindowTicks, dataSufficiencyMinCoverage }' },
         substrate: { type: 'string', description: "target substrate id ('sim' | 'agoric' | 'evm' | 'solana') for the prepared transaction; default the proposal's" },
       },
       required: ['proposal', 'portfolio', 'prices'],
@@ -230,7 +231,10 @@ function auditProposalTool() {
       + '(freshness clock), and the cited oracle readings, returns a verdict '
       + "('approved' | 'rejected'), the per-invariant results (citation-completeness, "
       + 'risk-bound-compliance, tail-risk-floor, reproducibility, pricing-freshness, '
-      + 'place-route-reachability), and the names of any failed invariants. Use this to adjudicate '
+      + 'place-route-reachability, plus config-integrity when a config knob is present but '
+      + 'unreadable as own data or non-finite, and forecast-data-sufficiency when that opt-in gate '
+      + 'is armed via config.dataSufficiencyMinCoverage), and the names of any failed invariants. Use this '
+      + 'to adjudicate '
       + 'the proposal rather than checking the invariants by hand — the auditor recomputes the '
       + 'proposal hash, so the verdict is the deterministic function of the inputs. Read-only: an '
       + 'approved verdict is a precondition for execution, never an authorization to trade.',
@@ -238,12 +242,12 @@ function auditProposalTool() {
       type: 'object',
       properties: {
         proposal: { type: 'object', description: 'the planner proposal: { steps, proposal_hash, cited_forecasts, cited_analyses, substrate? }' },
-        forecast: { type: 'object', description: 'the forecaster projection carrying p05Equity (the tail-risk anchor)' },
+        forecast: { type: 'object', description: "the forecaster projection carrying p05Equity (the tail-risk anchor) and horizon, read as OWN data properties: an inherited or accessor p05Equity is not evidence and rejects. When config.dataSufficiencyMinCoverage arms the data-sufficiency gate the projection must also carry the forecaster's own dataSufficiency descriptor (the DataSufficiency typedef in forecaster.js, as project(input, { reportDataSufficiency: true }) emits it — the report flag is the SECOND, config argument): that gate fails CLOSED, so a hand-built forecast without it is REJECTED, and a descriptor whose counts contradict each other or the forecast's horizon is rejected too. The gate also BINDS the descriptor against SUBSTITUTION: it recomputes the projection's content id and requires proposal.cited_forecasts to name it, so a forged or foreign descriptor SUBSTITUTED onto another forecast fails closed. (This buys descriptor-substitution resistance only, not full proposal tamper: cited_forecasts sits outside proposal_hash, so a tamperer who also rewrites the citation list is not caught by this binding alone.) Pass the whole projection exactly as project() emitted it and cite its projectionId in the proposal; never synthesize a descriptor" },
         portfolio: { type: 'object', description: 'pre-trade snapshot: { cash, balances: { ASSET: qty } }' },
         prices: { type: 'object', description: 'latest price book { ASSET: price }' },
         currentTick: { type: 'number', description: 'the freshness clock (cited readings must be within the staleness window of it)' },
         oracleReadings: { type: 'array', description: 'cited oracle readings (carry observedAtTick for the freshness invariant)' },
-        config: { type: 'object', description: 'optional bounds: { maxStepPct, maxDayPct, concentrationCapPct, tailFloorPct, stalenessWindowTicks }' },
+        config: { type: 'object', description: 'optional bounds, the same set audit() itself accepts: { maxStepPct, maxDayPct, concentrationCapPct, tailFloorPct, regimeTailBump, regimePersistenceLo, regimePersistenceHi, regimeTailFloorCap, stalenessWindowTicks, dataSufficiencyMinCoverage }. dataSufficiencyMinCoverage arms the opt-in forecast-data-sufficiency invariant (minimum observed returns per projected tick); absent, null, or 0 leaves it OFF and unemitted, while a value the gate cannot evaluate arms it and fails it closed' },
       },
       required: ['proposal', 'portfolio', 'prices'],
       additionalProperties: true,

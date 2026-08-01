@@ -45,6 +45,86 @@ test('worstAssetPersistence: keys off the max-persistence asset; inert without u
   );
 });
 
+test('worstAssetPersistence: ties break LEXICOGRAPHICALLY, never on key order', () => {
+  // This `worstAsset` rides into `horizonRegime` and thence into the hashed
+  // artifact, so a key-order tie-break would make `projectionId` depend on how
+  // the price map happened to be built. The sibling tie-break in the coverage
+  // descriptor is pinned; this one was copied without its test, and reverting it
+  // to a plain `p > max` passed the whole suite while returning 'B' for one key
+  // order and 'A' for the other.
+  const tied = (...names) => ({
+    assets: Object.fromEntries(names.map((name) => [name, { persistence: 0.9 }])),
+  });
+  for (const order of [['A', 'B'], ['B', 'A'], ['B', 'A', 'C'], ['C', 'B', 'A']]) {
+    assert.deepEqual(
+      worstAssetPersistence(tied(...order)),
+      { worstAsset: 'A', persistence: 0.9 },
+      `key order ${order.join(',')}`,
+    );
+  }
+  // A strictly greater persistence still wins regardless of where it sits.
+  assert.equal(
+    worstAssetPersistence({ assets: { B: { persistence: 0.99 }, A: { persistence: 0.9 } } }).worstAsset,
+    'B',
+  );
+  // UTF-16 code-unit order, never `localeCompare` (locale-dependent, so not
+  // hash-stable across ICU builds).
+  assert.equal(
+    worstAssetPersistence(tied('a', 'B')).worstAsset, 'B',
+    'uppercase sorts before lowercase in code-unit order',
+  );
+});
+
+test('worstAssetPersistence: TOTAL over hostile input — the inert answer, never a throw', () => {
+  // One of its two callers is the auditor, whose forecast is caller-supplied on
+  // the `audit_proposal` / fire-time re-audit surface, and this call runs BEFORE
+  // every fail-closed branch the gate has: a throw here aborts `audit()` with no
+  // verdict at all.
+  const inert = { worstAsset: null, persistence: 0 };
+  const throwingOwnKeys = new Proxy({}, { ownKeys() { throw new Error('boom'); } });
+  const throwingStat = Object.defineProperty({}, 'persistence', {
+    get() { throw new Error('boom'); }, enumerable: true,
+  });
+  const throwingAssets = Object.defineProperty({}, 'assets', {
+    get() { throw new Error('boom'); }, enumerable: true,
+  });
+  for (const [label, volFit] of [
+    ['a throwing ownKeys trap', { assets: throwingOwnKeys }],
+    ['a throwing assets accessor', throwingAssets],
+    ['a throwing persistence accessor', { assets: { ATOM: throwingStat } }],
+    ['a numeric assets map', { assets: 7 }],
+    ['a string assets map', { assets: 'ATOM' }],
+    ['a numeric volFit', 7],
+    ['a string volFit', 'volFit'],
+  ]) {
+    assert.deepEqual(worstAssetPersistence(volFit), inert, label);
+  }
+  // A throwing stat does not poison its honest neighbours.
+  assert.deepEqual(
+    worstAssetPersistence({ assets: { BAD: throwingStat, ATOM: { persistence: 0.8 } } }),
+    { worstAsset: 'ATOM', persistence: 0.8 },
+  );
+
+  // An accessor is caller-supplied code, not a persistence estimate. The
+  // regime read is shared with the auditor, so it must not invoke either the
+  // top-level map accessor or a per-asset persistence getter.
+  let reads = 0;
+  const accessorStat = {};
+  Object.defineProperty(accessorStat, 'persistence', {
+    enumerable: true,
+    get() { reads += 1; return 0.9; },
+  });
+  assert.deepEqual(worstAssetPersistence({ assets: { ATOM: accessorStat } }), inert);
+  assert.equal(reads, 0);
+  const accessorFit = {};
+  Object.defineProperty(accessorFit, 'assets', {
+    enumerable: true,
+    get() { reads += 1; return { ATOM: accessorStat }; },
+  });
+  assert.deepEqual(worstAssetPersistence(accessorFit), inert);
+  assert.equal(reads, 0);
+});
+
 test('persistenceStress: clamped linear ramp; degenerate span is a step at hi', () => {
   assert.equal(persistenceStress(0.7, 0.7, 0.98), 0); // at lo → 0
   assert.equal(persistenceStress(0.98, 0.7, 0.98), 1); // at hi → 1
@@ -157,16 +237,14 @@ test('ooda-cycle: adaptive vol on defaults the regime horizon stretch (0.5); off
   // persistence 0.98 → stress 1.0 → round(10 * 1.5) = 15.
   const on = await run(buildWorld('rh-on'), { ensembleSize: 8, horizon: 10, baseSeed: 100, adaptiveVol: { kind: 'garch' } });
   assert.equal(on.walletTouched, false);
-  if (on.forecast) {
-    assert.equal(on.forecast.horizon, 15);
-    assert.equal(on.forecast.horizonRegime.worstAsset, 'ATOM');
-  }
+  assert.ok(on.forecast, 'adaptive run produces a forecast');
+  assert.equal(on.forecast.horizon, 15);
+  assert.equal(on.forecast.horizonRegime.worstAsset, 'ATOM');
 
   // Adaptive off → no stretch, horizon stays at the configured 10.
   const off = await run(buildWorld('rh-off'), { ensembleSize: 8, horizon: 10, baseSeed: 100 });
   assert.equal(off.walletTouched, false);
-  if (off.forecast) {
-    assert.equal(off.forecast.horizon, 10);
-    assert.equal(off.forecast.horizonRegime, null);
-  }
+  assert.ok(off.forecast, 'non-adaptive run produces a forecast');
+  assert.equal(off.forecast.horizon, 10);
+  assert.equal(off.forecast.horizonRegime, null);
 });

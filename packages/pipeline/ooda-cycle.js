@@ -19,9 +19,9 @@
 
 import { observeOpportunities, windowFromHistory } from './oracle-watcher.js';
 import { analyze } from './analyzer.js';
-import { project } from './forecaster.js';
+import { project, projectionId } from './forecaster.js';
 import { plan } from './planner.js';
-import { audit } from './auditor.js';
+import { audit, coverageGateArmed, sanitizeLabel } from './auditor.js';
 import { execute } from './executor.js';
 import { navOf } from './rebalance.js';
 
@@ -45,7 +45,7 @@ import { navOf } from './rebalance.js';
  * @param {object} input
  * @param {import('@finbot/simulator/world').World} input.world   already warmed up (history present on its sim, or pass `readings`)
  * @param {Array<{ t: number, prices: Record<string, number> }>} [input.readings]   oracle window; else derived from `input.history`
- * @param {Array<{ t: number, prices: Record<string, number> }>} [input.fitReadings]   longer rolling window for the vol-surface fit only; else derived from `input.history` via `config.fitWindowTicks`, else the oracle window
+ * @param {Array<{ t: number, prices: Record<string, number> }>} [input.fitReadings]   longer rolling window for the vol-surface fit and data-sufficiency coverage; else derived from `input.history` via `config.fitWindowTicks`, else the oracle window
  * @param {Array<object>} [input.history]   simulator history to window from when `readings` absent
  * @param {object} [input.config]           per-stage config; `config.windowTicks` (oracle/realized-vol window, default 10) and `config.fitWindowTicks` (longer vol-fit window, default = windowTicks) among them
  * @param {object} [input.recorder]         optional { record(entry): Promise<string> }
@@ -77,24 +77,67 @@ export async function runOodaCycle(input) {
     auditorConfig.regimeTailBump = 0.1;
   }
 
-  const windowTicks = config.windowTicks || 10;
-  const readings = input.readings
-    || windowFromHistory(input.history || [], windowTicks);
-
-  // Separable fit window: the oracle deviation and realized-vol reads want a
-  // short, recent window (`readings`), but the GARCH vol-surface fit wants a
-  // LONGER rolling history so the per-asset MLE (>=12 returns) can engage on a
-  // live cycle. `config.fitWindowTicks` (default = windowTicks) draws that
-  // longer window from the same history; it ends at the same current tick, so
-  // the regime read still lands "where in the vol cycle we are now". Absent or
-  // <= windowTicks → fitReadings === readings and the cycle is byte-identical.
-  const fitWindowTicks = config.fitWindowTicks && config.fitWindowTicks > windowTicks
-    ? config.fitWindowTicks
-    : windowTicks;
-  const fitReadings = input.fitReadings
-    || (fitWindowTicks > windowTicks && !input.readings
-      ? windowFromHistory(input.history || [], fitWindowTicks)
-      : readings);
+  // The observed-window semantics FORK on whether the coverage gate is armed,
+  // because an explicit `0` means two different things in the two modes.
+  //
+  //   Gate OFF — reproduce the pre-feature `config.windowTicks || 10` coercion
+  //   EXACTLY. Every falsy window (0, NaN, negative-zero, absent) → the default
+  //   10; a truthy one → itself, byte-identical to `origin/main`. In particular
+  //   `windowTicks: 0` off the gate is NOT an empty window — it is the default,
+  //   the same as before this feature. An empty observed window is only
+  //   meaningful under an armed gate (it is the state the data-sufficiency
+  //   invariant measures), so `0` is honored as empty ONLY there.
+  //
+  //   Gate ARMED — an explicit `0` is a valid empty window, honored verbatim;
+  //   only an omitted value takes the default 10. A MALFORMED explicit window
+  //   (NaN, fractional, negative, unsafe integer) must never flow into
+  //   `windowFromHistory`, whose `Math.max(0, length - NaN)` slice-start is
+  //   `NaN` and selects the ENTIRE history; it collapses to an empty window,
+  //   leaving the auditor no coverage evidence so the data-sufficiency invariant
+  //   fails CLOSED. The `fitWindowTicksValid` guard bounds a truthy-but-invalid
+  //   fit window (15.5, an unsafe integer) here too — a truthiness check alone
+  //   would let those slice a fractional/whole-history vol-fit window.
+  const coverageGateOn = coverageGateArmed(auditorConfig.dataSufficiencyMinCoverage);
+  const validTickCount = (value) => Number.isSafeInteger(value) && value >= 0;
+  let windowTicks;
+  let fitWindowTicks;
+  let readings;
+  let fitReadings;
+  if (!coverageGateOn) {
+    // `|| 10` verbatim: 0/NaN/absent → 10, any truthy value → itself.
+    windowTicks = config.windowTicks || 10;
+    fitWindowTicks = config.fitWindowTicks && config.fitWindowTicks > windowTicks
+      ? config.fitWindowTicks
+      : windowTicks;
+    readings = input.readings || windowFromHistory(input.history || [], windowTicks);
+    fitReadings = input.fitReadings
+      || (fitWindowTicks > windowTicks && !input.readings
+        ? windowFromHistory(input.history || [], fitWindowTicks)
+        : readings);
+  } else {
+    const requestedWindowTicks = config.windowTicks ?? 10;
+    const requestedFitWindowTicks = config.fitWindowTicks;
+    const windowTicksValid = validTickCount(requestedWindowTicks);
+    const fitWindowTicksValid = requestedFitWindowTicks == null || validTickCount(requestedFitWindowTicks);
+    const windowMalformed = !windowTicksValid || !fitWindowTicksValid;
+    // A malformed window collapses to empty (fail-closed); an explicit valid 0 is
+    // honored. `windowFromHistory(history, 0)` already returns `[]`, so a valid
+    // zero window needs no special case beyond the malformed collapse.
+    windowTicks = windowMalformed ? 0 : requestedWindowTicks;
+    fitWindowTicks = !windowMalformed
+      && requestedFitWindowTicks && requestedFitWindowTicks > windowTicks
+      ? requestedFitWindowTicks
+      : windowTicks;
+    readings = windowMalformed
+      ? []
+      : input.readings || windowFromHistory(input.history || [], windowTicks);
+    fitReadings = windowMalformed
+      ? []
+      : input.fitReadings
+      || (fitWindowTicks > windowTicks && !input.readings
+        ? windowFromHistory(input.history || [], fitWindowTicks)
+        : readings);
+  }
 
   // ----- OBSERVE: oracle-watcher -----
   const observed = observeOpportunities({ readings }, config.oracle || {});
@@ -161,6 +204,20 @@ export async function runOodaCycle(input) {
   if (forecasterConfig.regimeHorizonStretch === undefined && forecasterConfig.adaptiveVol) {
     forecasterConfig.regimeHorizonStretch = 0.5;
   }
+  // Data-sufficiency gate: the auditor's `dataSufficiencyMinCoverage` can only
+  // bite on evidence the forecaster actually emits — auto-enable the report when
+  // the operator set only the auditor threshold, so a lone gate knob yields a
+  // live gate. An explicit `forecaster.reportDataSufficiency` still wins, but it
+  // can no longer disarm the gate: an explicit `false` under an armed threshold
+  // leaves the auditor with no evidence, which now FAILS the invariant closed
+  // rather than passing it vacuously. Both off -> unchanged.
+  // The arming test is the auditor's own exported predicate, not a copy of it: a
+  // mirror that drifted would either withhold evidence from an armed gate or
+  // arm the forecaster's measurement for a gate that is off.
+  if (forecasterConfig.reportDataSufficiency === undefined
+      && coverageGateArmed(auditorConfig.dataSufficiencyMinCoverage)) {
+    forecasterConfig.reportDataSufficiency = true;
+  }
   const forecast = project(
     { world, targetWeights: analysis.targetWeights, bounds: config.bounds || {}, readings, fitReadings },
     forecasterConfig,
@@ -171,12 +228,22 @@ export async function runOodaCycle(input) {
   });
 
   // ----- DECIDE: planner (ymax-shaped) -----
+  // When the forecaster attached a data-sufficiency descriptor, cite the forecast
+  // by its canonical projectionId too, so the auditor's data-sufficiency gate can
+  // BIND that descriptor to the artifact this proposal commits to (a descriptor
+  // swapped before the audit changes the id and fails the gate closed). Off ->
+  // no descriptor -> no extra citation, so the proposal and its journal entry
+  // stay byte-identical to before.
+  const forecastProvenanceId = forecast.dataSufficiency ? projectionId(forecast) : null;
   const proposal = plan({
     portfolio: world.portfolio.markToMarket(prices),
     prices,
     targetWeights: analysis.targetWeights,
     bounds: config.bounds || {},
-    cited_forecasts: [forecastId || `forecast:${cycleId}`],
+    cited_forecasts: [
+      forecastId || `forecast:${cycleId}`,
+      ...(forecastProvenanceId ? [forecastProvenanceId] : []),
+    ],
     cited_analyses: [analysisId || `analysis:${cycleId}`],
   });
   await record({
@@ -264,7 +331,7 @@ function analysisBody(cycleId, a) {
 }
 
 function forecastBody(cycleId, f) {
-  return [
+  const lines = [
     `# forecast (${cycleId})`, '',
     `ensemble_size: ${f.ensembleSize}`,
     `horizon: ${f.horizon}`,
@@ -272,8 +339,21 @@ function forecastBody(cycleId, f) {
     `meanEquity: ${f.summary.meanEquity.toFixed(2)}`,
     `p05 / p50 / p95: ${f.summary.p05.toFixed(2)} / ${f.summary.p50.toFixed(2)} / ${f.summary.p95.toFixed(2)}`,
     `pProfit: ${(f.pProfit * 100).toFixed(1)}%`,
-    '',
-  ].join('\n');
+  ];
+  if (f.dataSufficiency) {
+    // This line enters the journal as Markdown. JSON escapes C0 controls but
+    // leaves Unicode line separators and bidi controls intact, so preserve the
+    // descriptor while applying the same recorder-safe label discipline the
+    // auditor uses for its verdict detail.
+    const worstAsset = f.dataSufficiency.worstAsset;
+    const recorded = {
+      ...f.dataSufficiency,
+      worstAsset: typeof worstAsset === 'string' ? sanitizeLabel(worstAsset) : worstAsset,
+    };
+    lines.push(`data_sufficiency: ${JSON.stringify(recorded)}`);
+  }
+  lines.push('');
+  return lines.join('\n');
 }
 
 function proposalBody(cycleId, p) {

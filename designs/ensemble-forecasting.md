@@ -1,8 +1,8 @@
 ---
 created: 2026-06-17
-updated: 2026-07-20
+updated: 2026-07-28
 author: architect
-status: stub
+status: active
 ---
 
 # Design: ensemble forecasting
@@ -64,13 +64,13 @@ A 10,000-simulation ensemble on a non-trivial program takes minutes. The orchest
 ## Open questions
 
 - What is the right N for routine forecasts vs. high-confidence pre-rebalance forecasts? N=10,000 is the default; tail risk at p01 / p99 is noisy there.
-- How does the forecaster handle programs whose horizon exceeds the historical window? (A 30-day forecast of a 3-month-old instrument has thin data.) Probably name the data scarcity in the result and let the planner downweight.
+- How does the forecaster handle programs whose horizon exceeds the historical window? (A 30-day forecast of a one-week-old instrument has thin data.) **Partially resolved:** the binary auditor gate is described in *Notes from the field (2026-07-28 — forecast data-sufficiency)*; the graded planner-downweighting half remains open.
 - Does the forecaster vend its output as a Far ref to the analyzer (per `skills/far-exo-vending`) or as a journal-entry path the analyzer reads? The latter is simpler at bootstrap; the former is the right shape if forecasts get large enough that we want to lazy-load.
 
 ## Implementation pointers
 
-- The ensemble runner lives in `skills/monte-carlo-ensemble`; the renderer lives in `skills/histogram-projection-render`. Both are stubs.
-- The forecaster role file names the inputs and outputs; the implementation lands when the first concrete program is chosen for forecasting.
+- The ensemble runner is implemented in `packages/pipeline/forecaster.js`; the renderer is part of the returned projection.
+- The forecaster role file names the inputs and outputs. The first concrete forecasting program is implemented in the pipeline's simulator-backed projection path.
 
 ## Notes from the field (2026-06-26 — richer-forecasting build)
 
@@ -414,7 +414,18 @@ regime-tail-floor). This cut applies the same measure-then-decide loop to the
   persistence→stress ramp, previously inline in the auditor's `regimeTailFloor`,
   are now `worstAssetPersistence()` + `persistenceStress()` in `forecaster.js`,
   imported by both levers — so the horizon and the tail floor key off the SAME
-  worst instrument the SAME way, by construction rather than by coincidence.
+  worst instrument the SAME way, by construction rather than by coincidence. The
+  shared scan also **tie-breaks lexicographically** on an exact persistence tie
+  (`asset < worstAsset`), where the prior inline scan took the first asset in
+  map-construction order (strict `>`). This is a deliberate determinism
+  improvement — a key-order tie-break would make `projectionId` depend on how the
+  price map happened to be built — but it is **not** byte-identical to the
+  pre-helper behaviour on that exact-tie path: when two assets share the maximum
+  persistence, the chosen worst asset (and thus `horizonRegime`, the projection
+  horizon, and the forecast p05/p50/p95) resolves lexicographically now rather
+  than by construction order, even with the data-sufficiency gate off. The
+  regime-horizon test locks the tie-break (`worstAssetPersistence: ties break
+  LEXICOGRAPHICALLY`).
 - **Off by default, byte-identical when inert.** `regimeHorizonStretch` defaults to
   0, so a plain (non-adaptive) or explicitly-pinned projection keeps its base
   horizon and carries no `horizonRegime`, leaving its artifact JSON — and thus its
@@ -866,3 +877,236 @@ fixtures and read the selection deltas." Making `significanceAlpha` the live
 default remains a maintainer call (it would change proposal hashes and needs a
 re-baselined fixture); live execution remains separately blocked on explicit
 paper-wallet/test-net authorization and a selected CapTP transport.
+
+## Notes from the field (2026-07-28 — forecast data-sufficiency)
+
+This cut names the data scarcity the open question asked about and substitutes a
+binary pre-execution gate for the graded planner downweight it also asked for.
+
+- **The measurement.** `computeDataSufficiency({ frames, horizon, assets })` is a
+  new export of `packages/pipeline/forecaster.js`. It returns
+  `{ historyFrames, historyReturns, worstAsset, horizon, coverageRatio }` —
+  observed returns per projected tick, where 1.0 means the window carries one
+  observed return for every tick projected. Pure counts and arithmetic, no RNG,
+  so a projection carrying the descriptor still hashes stably.
+- **Worst-constituent, not portfolio-wide.** Coverage is measured per asset over
+  the assets actually projected and reported for the worst-covered one — the same
+  worst-asset convention `worstAssetPersistence` uses for the regime read. This
+  is what makes the descriptor answer the question that motivated it: a
+  freshly-listed instrument inside a long window reads as thin instead of hiding
+  behind its better-observed neighbours. Ties break lexicographically, never on
+  the caller's key order, since `worstAsset` rides into the hashed artifact.
+- **What counts as evidence.** A frame carrying no *own data property* holding a
+  finite positive price for an asset says nothing about it, so a stalled feed
+  emitting empty price maps (`{}`, once the reading's `prices` is unwrapped), one
+  emitting a `0` sentinel, one whose frames inherit their prices from a
+  prototype, and one whose price is an accessor rather than a value all read as
+  no evidence rather than padding the ratio. Returns need two *adjacent*
+  observations, so a gappy or alternating feed carries fewer returns than
+  `historyFrames - 1` — a real frame is not a real return. Both untrusted arrays
+  are walked by index — the frames rather than through `frames.map`, and the
+  projected assets rather than through `assets.filter` — since an own method on a
+  caller-supplied array would fabricate the mask the whole measurement rests on;
+  `Array.isArray` is proxy-transparent and says nothing about which method a
+  `[[Get]]` resolves to. The length is snapshotted once and each element read
+  through a guard, so a growing `length` trap cannot pad the window and a throwing
+  `get` trap yields no-evidence rather than an exception out of `project()`, and
+  the snapshotted length is also *bounded*, since a proxy over an array can report
+  `2**53-1` and turn the walk into unbounded synchronous work. The ownness check
+  is itself prototype-independent (`Object.hasOwn(descriptor, 'value')`, never
+  `'value' in descriptor`, which walks the descriptor's own prototype chain and
+  would let one polluted `Object.prototype.value` supply a price for every
+  accessor). The descriptor is frozen at production, alongside `volFit` and
+  `horizonRegime`, so the hashed artifact and the evidence the gate reads cannot
+  diverge after the id is computed — and the `volFit` freeze reaches each
+  per-asset stat record, not merely the container, because `persistence` is the
+  leaf the auditor's tail floor actually reads.
+- **No asset nameable means zero, not a portfolio-wide count.** An earlier
+  revision fell back, when no asset was named, to counting a frame as observed if
+  it carried *at least one* own positive price. That was strictly more permissive
+  than every per-asset path around it, and unfixably so: without an asset set to
+  intersect against, no predicate distinguishes a price from any other positive
+  number, so a stalled feed emitting `{ observedAtTick: n }` frames — no price
+  observed at all — measured full coverage, as did an array-shaped frame and a
+  boxed string. The fallback is gone: omitted, empty, and malformed asset lists
+  all measure zero, and *any* unnameable element malforms the whole list rather
+  than narrowing the measurement to its readable elements (worst-of-a-subset is
+  at least worst-of-the-whole, so silent narrowing runs gate-approving too). A
+  measurement feeding a fail-closed gate degrades toward less coverage,
+  uniformly: an unknown shape is absence of evidence, and absence of evidence is
+  not evidence of sufficiency.
+- **An unmeasurable horizon is `null`, not `0`.** A horizon that is not a whole,
+  non-negative tick count (a `NaN` from a typo'd flag, a negative, a fraction)
+  yields `horizon: null` / `coverageRatio: null`. Clamping it to `0` was the
+  earlier behavior and was the wrong shape: `0` is the one horizon a consumer may
+  read as "projects nothing, so it cannot outrun its window", so the most extreme
+  input minted the cleanest-looking descriptor and disarmed the gate through the
+  sibling flag.
+- **Measurement, not policy.** The descriptor carries no threshold and no
+  verdict. That is deliberate: a threshold in the descriptor would ride into
+  `projectionArtifact` and give two byte-identical ensembles two different
+  `projectionId`s purely from a reporting knob, breaking the
+  "same forecast -> same id" contract the auditor's recompute-and-compare rests
+  on. The consumer owns the comparison.
+- **What is byte-identical when off.** `project()` returns `dataSufficiency:
+  null` by default and `projectionArtifact` omits a null descriptor, so the
+  **hashed artifact and its `projectionId`** are byte-identical to before. The
+  returned projection object (and `finbot-ooda --json`) does carry the key as
+  `null`, exactly as `horizonRegime` and `volFit` do — the invariance claim is
+  about the artifact, not the object.
+- **The gate.** The auditor gains a seventh invariant,
+  `forecast-data-sufficiency`, armed by `dataSufficiencyMinCoverage` (default 0 =
+  off, and the invariant is then not even emitted, so the verdict is
+  byte-identical to before). It is the pre-execution sibling of
+  pricing-freshness: a forecast can be fresh yet thin.
+- **Armed, it fails CLOSED.** A forecast with no measurable descriptor — the
+  report left off upstream, or a malformed one from a caller-supplied forecast
+  (`audit_proposal`, the executor's fire-time re-audit) — *fails* rather than
+  passing vacuously. Absence of evidence is not evidence of sufficiency, and this
+  verdict is a precondition for irreversible action; the sibling tail-risk floor
+  already fails closed on a missing forecast. An unusable threshold fails closed
+  on the same reasoning, so a malformed knob can never degrade to no gate at all
+  — and "unusable" is read *strictly*: only a finite non-negative `number` can
+  be usable, because `Number('')`, `Number(false)`, and `Number([])` are all
+  `0`, which is exactly the OFF value, so a coercing read would hand an operator
+  who asked for a gate no gate at all. A supplied non-number therefore arms the
+  invariant and makes it fail closed. So does a positive threshold that quantizes to zero at the
+  descriptor's own 12-decimal resolution, which no coverage could fail (that
+  boundary is where `round12` rounds up, just above 5e-13, not 1e-12 itself).
+- **The gate recomputes; it does not read a verdict.** Coverage is recomputed
+  from the descriptor's primitive counts (`historyReturns / horizon`), and the
+  gate fails closed on a descriptor whose reported `coverageRatio` disagrees with
+  those counts, whose counts disagree with *each other* (`historyReturns` cannot
+  exceed `historyFrames - 1`, the producer's own contiguity rule), whose counts
+  are not whole numbers (`1e-13` returns over a `1e-13`-tick horizon recomputes
+  to a clean 1.0 while measuring nothing), or whose `horizon` disagrees with the
+  forecast carrying it. A ratio is a judgement made by the thing being gated; the
+  counts are the evidence. Every field is read *once* and *own-data-property
+  only* — an inherited descriptor, or one behind an accessor, is not evidence the
+  producer supplied — and the read is guarded, so a hostile descriptor yields a
+  *verdict* and never an exception out of `audit()` (the executor's fire-time
+  re-audit calls it unwrapped; invariant 3's `p05Equity` formatting is guarded
+  for the same reason). There is **no unconditional pass**. A zero-tick horizon
+  briefly had one — nothing measured is not the same as measured-and-insufficient
+  — but `forecast.horizon` and `dataSufficiency.horizon` are two fields of the
+  *same* self-reported object, so a zero corroborated only by its neighbour is an
+  assertion, not evidence: a hand-built `{ horizon: 0, p05Equity: <high> }`
+  forecast through `audit_proposal` cleared a demand for *full* coverage, and
+  cleared `tail-risk-floor` beside it, having simulated nothing. It now
+  recomputes to coverage 0 and clears no positive requirement, like any other
+  thin window.
+- **What the recompute buys, and the binding that completes it.** The recompute
+  bounds *self-consistency*: the counts are self-reported, so on their own an
+  internally consistent fabrication (1000 returns over a 20-tick horizon)
+  recomputes cleanly. The gate therefore goes one step further and binds the
+  descriptor to *provenance*. Because the descriptor is a hashed component of the
+  projection artifact (`projectionArtifact` folds it into the JSON that
+  `projectionId` hashes), the gate recomputes that id and requires the proposal to
+  cite it: a forged or foreign descriptor SUBSTITUTED onto the forecast — swapped
+  at rest or in flight before the executor's fire-time re-audit — recomputes to an
+  id that matches no honest cited one, so it fails closed. This is the sibling of
+  invariant 4's `proposal_hash` recompute and shares its one residual: a wholly
+  self-consistent, self-cited artifact is measured, not disproven, since the
+  auditor holds no price window to recount coverage from scratch. What the binding
+  enforces is that the ratio it judges belongs to the artifact the proposal
+  committed to. Its scope is descriptor SUBSTITUTION, not full proposal-tamper:
+  `hashProposal` commits to the proposal's `steps` alone, so `cited_forecasts`
+  sits outside `proposal_hash`. A payload-level tamperer who swaps the descriptor
+  AND appends its recomputed id to `cited_forecasts` therefore still clears the
+  binding — the disclosed residual, measured rather than disproven, the same shape
+  as invariant 4's self-hashed proposal. Widening `hashProposal` to cover the
+  citations would close it, at the cost of changing the proposal commitment; that
+  is out of this change's scope.
+- **Wiring.** `runOodaCycle` auto-enables the forecaster report when only the
+  auditor knob is set, so a lone gate knob yields a live gate. An explicit
+  `forecaster.reportDataSufficiency: false` still wins, but no longer disarms the
+  gate: it now leaves the armed invariant failing closed.
+- **The CLI.** `finbot-ooda --data-sufficiency-min=F` demonstrates it end to end.
+  `F=0` (or omitted) is off on both halves. An `F` the gate could not evaluate —
+  non-finite, negative, empty/whitespace, or positive-but-sub-resolution — exits
+  2 rather than silently disarming the gate, applying the auditor's own usability
+  test so a value the CLI accepts is a value the gate can evaluate. (`Number('abc')`
+  is `NaN` and `Number('')` is `0`; an unvalidated value would print a coverage
+  line while emitting no invariant, the worst false-assurance shape for a safety
+  knob.) `--horizon` is validated on the same footing — it is the *denominator*
+  of the ratio the gate reads, so an unvalidated `--horizon=abc` disarmed the
+  gate that `--data-sufficiency-min` armed; it must now be a whole number of
+  ticks >= 1. The report's `SCARCE` label is the *auditor's own verdict* on that
+  forecast rather than a second comparison that could drift from it, so it can
+  never appear beside an approving gate nor stay silent beside a rejecting one.
+  `--fit-window` and `--warmup` are validated on the same footing as `--horizon`,
+  for the mirror reason: they carry the ratio's *numerator*, and an unvalidated
+  `--fit-window=abc` silently collapsed the observed window back to `--warmup`,
+  so an operator who widened the window to reach coverage 1.0 got a rejection
+  naming a gate they believed they had widened past. A flag that arms a safety
+  gate validates every sibling flag the gate's arithmetic reads, not only the one
+  it divides by. The `--horizon` narrowing is gate-scoped, preserving legacy
+  ungated runs; it rejects a non-tick horizon whenever
+  `--data-sufficiency-min` arms the coverage gate. `--fit-window` and
+  `--warmup` remain unconditional because they set the observed history used by
+  the gate and the simulator alike.
+- **One scrubber, exported.** Every caller-supplied identifier that lands in a
+  record goes through one `sanitizeLabel` (exported from `auditor.js`, imported
+  by `bin/finbot-ooda`), for the reason the quantizer is shared: a value one
+  module sanitizes before recording must be sanitized by every module that
+  records it. It scrubs the whole structural class rather than just `\n` — C0
+  and DEL, the C1 block (U+0085 NEL, U+009B CSI), the Unicode line terminators
+  U+2028/U+2029 (line breaks to any Unicode-aware splitter, and *not* escaped by
+  `JSON.stringify`), the bidi overrides, and the *surrogate range* itself — and
+  truncates by *code point* rather than by code unit. Both halves of the
+  well-formedness claim matter: the code-point truncation stops the sanitizer
+  from cutting an astral name mid-surrogate, and the surrogate clause stops a
+  lone surrogate that arrived in the INPUT from passing straight through. Either
+  way the result is a string the journal's UTF-8 writer (U+FFFD) and `--json`
+  (`\ud83d`) disagree about, on the record attesting why execution was gated.
+  It applies to the concentration-cap `asset` and the `substrate` label too, not
+  only to the descriptor's `worstAsset`. `MAX_LABEL_CODE_POINTS` is exported
+  alongside it, so a co-recorder can size the field and tell a truncation from a
+  label that genuinely ends in an ellipsis.
+- **One quantizer, one formatter, one arming predicate — all exported.** The
+  gate's recompute-and-compare is only correct while both sides quantize
+  identically, so `round12` is exported from `forecaster.js` and imported by the
+  auditor and the CLI report rather than copied under a "mirrors X" comment. A
+  drift there would fail every honest forecast closed — an availability failure
+  on a live-execution gate. The same discipline reaches one level further, to the
+  things *built on* the quantizer: `formatCoverage`
+  (the CLI re-printed the same evidence through a flat `toFixed(2)`, which renders
+  a coverage that PASSES a 0.001 requirement as `0.00`, the number that reads as
+  the OFF value) and the arming/usability predicates (`coverageGateArmed`,
+  `coverageThresholdUsable`), which the CLI's flag validation and
+  `ooda-cycle.js`'s evidence auto-enable had each restated under a "mirrors the
+  auditor's test exactly" comment. Relax the copy and the CLI exits 2 on values
+  the gate accepts; tighten it and the CLI accepts a value that arms the gate and
+  fails it closed — the disarm-by-typo the validation exists to prevent. When a
+  PR exports a primitive to defeat duplication, the copies of the *predicate
+  built on it* are the next place to look; the "mirrors" comment is the tell.
+  `computeDataSufficiency` is deliberately NOT on the entry point: the criterion
+  is an actual cross-module consumer, and it has none.
+- **Tests.** `packages/pipeline/test/forecaster-data-sufficiency.test.js`,
+  `.../auditor-data-sufficiency.test.js`, `.../ownness-prototype-independence.test.js`,
+  and `.../cli-ooda-flags.test.js` are the inventory: the producer's padding and
+  forgery defenses, every fail-closed path on the consumer, and the operator
+  surface's validations and both gate outcomes. They are the enumeration, so this
+  note does not duplicate it. Two shapes are worth naming as *how* the gaps were
+  found rather than *what* they cover. A test pinning a BOUNDARY must demonstrate
+  the boundary branch executed — the label-truncation test used 48-, 30-, and
+  31-code-point fixtures against a 48-code-point cap, so the branch never ran and
+  the code-unit bug it named would have passed it. And an adversarial guard test
+  must bound its own divergence: the growing-`length` proxy climbed without limit,
+  so removing the snapshot it guards would have hung the suite rather than failing
+  with a diagnosis.
+- **`ownness-prototype-independence.test.js` imports `forecaster.js` and nothing
+  else, deliberately.** `auditor.js` reaches `cap-attenuation.js` transitively
+  (auditor -> substrates -> cap-attenuation), whose import calls `lockdown()` and
+  freezes `Object.prototype` — so the prototype-pollution attack cannot even be
+  staged in a process that imported it. That shields the auditor's half of the
+  `'value' in descriptor` hazard today, by an import chain with nothing to do
+  with the gate; it is a reason to fix the check, not to trust it.
+  `forecaster.js` pulls in no such chain, so the producing side is exposed in an
+  ordinary process and that test's attack is a live one.
+
+Still outstanding: the graded planner downweight the open question also asked
+about remains unbuilt; `planner.js` is untouched. And the binding is descriptor-
+substitution-scoped, not full proposal-tamper resistance — a payload tamperer who
+also rewrites `cited_forecasts` is out of its reach until `hashProposal` covers
+the citations (see "What the recompute buys" above).

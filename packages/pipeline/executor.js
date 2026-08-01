@@ -38,7 +38,10 @@ import { selectSubstrate } from './substrates.js';
  * @param {object} input
  * @param {import('./planner.js').Proposal} input.proposal
  * @param {import('@finbot/simulator/world').World} input.world      live world (NOT mutated)
- * @param {import('./forecaster.js').ForecastProjection} input.forecast
+ * @param {import('./forecaster.js').ForecastProjection|null|undefined} input.forecast   passed
+ *   straight to `audit()` for the fire-time re-audit, which declares it possibly-absent and
+ *   possibly-malformed and fails closed on either; declaring it required here would tell a checker
+ *   the opposite of what that reader expects
  * @param {import('./oracle-watcher.js').Opportunity[]} [input.oracleReadings]
  * @param {number} input.currentTick
  * @param {Record<string, unknown>} [input.parentCaps]   orchestrator caps (wallet lives here in live runs)

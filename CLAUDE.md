@@ -147,7 +147,7 @@ Create `skills/<name>/SKILL.md`. Sections: purpose, inputs, state (if any), proc
 
 ## Conventions
 
-- **No PR workflows for finbot's own repo.** finbot is a meta library, not application code. Both `main` and `journal` are pushed directly to `origin` (`github.com/kriscendobot/finbot`); we do not generally open pull requests against ourselves.
+- **PR workflows for `packages/`, direct pushes for the library.** finbot's roles, skills, and designs are a meta library: edits there and to `journal` are pushed directly to `origin` (`github.com/kriscendobot/finbot`), and we do not open pull requests against ourselves for them. Changes to `packages/` and `bin/` — application code, where the panel's review is what keeps a safety gate honest — do go through a pull request; PRs #1 onward are that exception, not a violation of this convention.
 - The `journal` branch is orphan; it never merges with `main`, and PR comparisons against `main` are meaningless. GitHub will sometimes offer a "create PR for journal" link after a push; ignore it.
 - **Live executor mode is rare and authorized.** Every `live_authorized: true` executor dispatch is recorded in the journal with the maintainer's name, the proposal's hash, and the auditor's verdict.
 

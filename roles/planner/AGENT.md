@@ -27,7 +27,7 @@ The planner's dispatch prompt names:
 2. **Target allocation.** Either a reference to the configured target, or an explicit override the maintainer wants tested.
 3. **Recent forecasts.** Pointers to forecaster `result` entries (or the histogram artifacts they produced) for each instrument the planner should weigh.
 4. **Recent analyses.** Pointers to analyzer `result` entries scoring opportunities.
-5. **Risk bounds.** Per-step max-move (percent of NAV), per-day max-move, per-instrument concentration cap. Defaults live in the project README; the dispatch may override per-engagement.
+5. **Risk bounds.** Per-step max-move (percent of NAV), per-day max-move, per-instrument concentration cap. [pre-execution-audit](../../skills/pre-execution-audit/SKILL.md) is canonical for defaults; the dispatch may override per-engagement.
 
 ## Output
 

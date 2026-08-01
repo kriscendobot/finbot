@@ -1,6 +1,6 @@
 ---
 created: 2026-06-17
-updated: 2026-06-17
+updated: 2026-07-28
 author: architect
 ---
 
@@ -17,11 +17,13 @@ The auditor reads a planner proposal (named by `proposal_hash`) and verifies a s
 The invariant set (initial; the maintainer will grow this over time):
 
 1. **Citation completeness.** Every step in the plan cites at least one forecaster entry and one analyzer entry. Without citations, the plan has no audit trail.
-2. **Risk-bound compliance.** Per-step max-move (percent of NAV), per-day max-move (cumulative since the day's first execution), per-instrument concentration cap. The configured defaults live in the project README; the planner names the bounds it used.
+2. **Risk-bound compliance.** Per-step max-move (percent of NAV), per-day max-move (cumulative since the day's first execution), per-instrument concentration cap. [pre-execution-audit](../../skills/pre-execution-audit/SKILL.md) is the canonical source for configured defaults; the planner names the bounds it used.
 3. **Tail-risk floor.** The cited forecast's 5th-percentile terminal value must clear a configured floor. A plan whose forecast says "5% chance of losing more than 20% of NAV in one week" is not eligible regardless of expected return.
 4. **Reproducibility.** Recompute the `proposal_hash` from the plan body; if the recomputed hash does not match the planner's named hash, the plan has been tampered with or the planner is buggy. Either way, the auditor rejects.
 5. **Pricing freshness.** Every cited oracle reading is fresh (within a configured staleness window). A plan that cites a one-hour-old price is not eligible for live execution.
-6. **No off-chain dependencies in the on-chain steps.** Each step's preconditions are verifiable from chain state and oracle readings alone; the plan does not assume any off-chain trust (the planner / analyzer / forecaster artifacts are off-chain inputs that the auditor verifies, but the step's success or failure is determined on-chain).
+6. **No off-chain dependencies in the on-chain steps.** Each step's preconditions are verifiable from chain state and oracle readings alone; the plan does not assume any off-chain trust (the planner / analyzer / forecaster artifacts are off-chain inputs that the auditor verifies, but the step's success or failure is determined on-chain). The deterministic implementation names this `place-route-reachability`.
+7. **Forecast data-sufficiency** (opt-in; OFF unless the operator sets a minimum coverage ratio). A projection whose horizon outruns its observed window is extrapolating past its evidence — the pre-execution sibling of pricing freshness, since a forecast can be fresh and still be thin. Armed, the gate fails CLOSED, and it BINDS the descriptor to provenance — recomputing the cited projection's id and requiring the proposal to cite it, which bounds descriptor SUBSTITUTION (a forged or foreign descriptor fails closed) but not a payload tamperer who also rewrites `cited_forecasts` — so the descriptor must come from the projection that was cited and never be hand-built; [pre-execution-audit](../../skills/pre-execution-audit/SKILL.md) § 7 is the canonical statement of both.
+8. **Config integrity** (emitted only when a config knob is present but unreadable as an own data property — an accessor, an inherited value, or a hostile descriptor — or is a non-finite number). A safety bound the auditor cannot legibly read must not silently default to a possibly-looser built-in, and a NaN/±Infinity bound never trips, so either fails the gate CLOSED rather than approving under a bound that cannot bite.
 
 ## Skills
 

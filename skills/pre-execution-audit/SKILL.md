@@ -1,6 +1,6 @@
 ---
 created: 2026-06-17
-updated: 2026-06-17
+updated: 2026-07-28
 author: architect
 ---
 
@@ -69,11 +69,10 @@ assert recomputed == proposal.proposal_hash
 Every cited oracle reading is within the configured staleness window:
 
 ```pseudo
-now = current_iso_time()
 for oracle_ref in proposal.cited_oracle_readings:
   reading = read_journal(oracle_ref)
-  age_seconds = now - reading.read_at
-  assert age_seconds <= configured_staleness_window_seconds
+  age_ticks = current_tick - reading.tick
+  assert age_ticks <= configured_staleness_window_ticks
 ```
 
 ### 6. On-chain verifiability
@@ -85,6 +84,150 @@ for step in proposal.steps:
   for precondition in step.preconditions:
     assert precondition.kind in { 'chain_balance', 'chain_state', 'oracle_reading' }
 ```
+
+The deterministic implementation names this invariant `place-route-reachability`
+and verifies the same property from the step's resolved place/route: a step whose
+venue mapping is unresolved (or names an unknown place) is not reachable from
+chain state alone.
+
+### 7. Forecast data-sufficiency (opt-in)
+
+A projection whose horizon outruns its observed window is extrapolating past its
+evidence. The pre-execution sibling of pricing freshness: a forecast can be
+perfectly fresh and still be thin. The forecast carries a measured descriptor
+(`{ historyFrames, historyReturns, worstAsset, horizon, coverageRatio }`);
+coverage is observed returns per projected tick, measured PER ASSET and reported
+for the WORST-covered one, so a freshly-listed instrument cannot hide behind its
+better-observed neighbours. The measurement names no fallback for a projection
+carrying no nameable asset: with no asset set, nothing distinguishes a price from
+any other positive number, so an unknown shape measures ZERO rather than
+everything. Evidence-free frames — an empty price map, a `0` or negative stall
+sentinel, an inherited or accessor price — pad nothing, and the ownness check
+that decides so is itself prototype-independent.
+
+```pseudo
+if data_sufficiency_min_coverage is supplied and is not the number 0:  # absent / null / 0 is OFF
+  # ARMED. Note the arming test is deliberately NOT "is a positive number": a
+  # non-number ('', false, '0.5') arms the gate and fails it closed below, so a
+  # malformed knob can never degrade to no gate at all.
+  assert data_sufficiency_min_coverage is a number, finite, >= 0, and — when
+         positive — does not quantize to 0 at the descriptor's 12 decimals
+  descriptor = forecast.dataSufficiency               # own data properties only
+  assert forecast.horizon is readable and a whole, non-negative tick count
+  assert descriptor is readable and its counts are whole and non-negative
+  assert descriptor.horizon == forecast.horizon
+  assert descriptor.historyReturns <= max(0, descriptor.historyFrames - 1)
+  recomputed = round12(descriptor.historyReturns / descriptor.horizon) if horizon > 0 else 0
+  assert round12(recomputed) == round12(descriptor.coverageRatio)  # never trust the reported ratio
+  # PROVENANCE BINDING: the descriptor is a hashed component of the projection
+  # artifact, so recompute the artifact's projectionId and require the proposal
+  # to cite it — a descriptor swapped onto a thinner or foreign forecast changes
+  # the id and no longer matches. Fails closed when unrecomputable or uncited.
+  assert projectionId(forecast) in proposal.cited_forecasts
+  assert round12(recomputed) >= round12(data_sufficiency_min_coverage)
+```
+
+Two properties are load-bearing:
+
+- **Off by default.** Absent, `null`, or the number `0` is OFF, and the invariant
+  is not emitted at all, so every verdict predating the knob is unchanged.
+- **Armed, it fails CLOSED.** An unusable threshold, an unreadable descriptor, an
+  unreadable forecast horizon, counts that refute each other, a reported ratio its
+  own counts refute, or a descriptor not bound to a cited forecast artifact all
+  REJECT. Absence of evidence is not evidence of sufficiency, and a gate that
+  rejects absent evidence must reject contradictory or unattested evidence at
+  least as firmly — only one of them looks like a measurement.
+
+There is **no unconditional pass**, and in particular no zero-horizon exemption.
+A projection of 0 ticks recomputes to coverage 0 and clears no positive
+requirement. It is true that a zero-tick projection cannot outrun its window, and
+beside the point: the descriptor's horizon and the forecast's horizon are two
+fields of the same self-reported object, so a zero corroborated only by its own
+neighbour is an assertion, not evidence — and a hand-built `{ horizon: 0 }`
+forecast would otherwise clear a demand for full coverage having simulated
+nothing at all.
+
+The gate recomputes coverage from the descriptor's primitive counts rather than
+reading its reported ratio, the same discipline invariant 4 applies to the
+proposal hash — and then goes one step further, **binding** the descriptor to
+provenance. Because the descriptor is a hashed component of the projection
+artifact (`projectionArtifact` folds it into the JSON that `projectionId`
+hashes), the gate recomputes that id and requires the proposal to cite it. For a
+**plain-data forecast** — the gate's real threat surface, since the
+`audit_proposal` tool and the executor's fire-time re-audit both receive parsed
+JSON, which carries no accessors, Proxies, or `toJSON` — a forged or foreign
+descriptor SUBSTITUTED onto the forecast recomputes to an id that matches no
+honest cited one, so it fails closed. This buys DESCRIPTOR-SUBSTITUTION
+resistance: it closes the "a forged descriptor borrowing another artifact's
+coverage clears it" gap that self-consistency alone leaves open. It does NOT buy
+full at-rest/in-flight proposal-tamper resistance — see the payload-tamper
+residual below.
+
+Three residuals remain, all disclosed rather than closed:
+
+- **Self-consistency**, shared with invariant 4: a wholly self-consistent,
+  self-cited artifact is measured, not disproven — exactly as a self-hashed
+  proposal clears invariant 4's reproducibility check. The auditor holds no price
+  window to recount the coverage from scratch; what the binding enforces is that
+  the ratio it judges belongs to the forecast artifact the proposal committed to.
+- **Payload-level proposal tamper**, the scope limit above: `hashProposal` commits
+  to the proposal's `steps` alone, so `cited_forecasts` sits OUTSIDE `proposal_hash`
+  (a bare checksum). A tamperer who swaps the descriptor AND appends its recomputed
+  `projectionId` to `cited_forecasts` still clears the binding — the reproducibility
+  check passes and the gate approves. The binding buys descriptor SUBSTITUTION
+  resistance (a forged/foreign descriptor whose id matches no honest cited id fails
+  closed), not resistance to a tamperer who rewrites the citation list too. Closing
+  it would mean widening `hashProposal` to cover the citations, changing the
+  proposal commitment — out of scope here.
+- **In-process split view**, out of the threat model: a hostile in-process object
+  whose `getOwnPropertyDescriptor('dataSufficiency').value` (the gate's own-data
+  snapshot) diverges from its `[[Get]]`/`toJSON` view (what `projectionId` hashes)
+  — a Proxy with disagreeing `getOwnPropertyDescriptor`/`get` traps, or a `toJSON`
+  — can present forged counts to the gate while presenting an honest artifact to
+  the id recompute, binding forged coverage to an honest cited id. This needs a
+  live JS Proxy or `toJSON` in the auditor's own process and cannot cross the JSON
+  boundary the tool gate actually receives, so it is disclosed here rather than
+  fixed: closing it would mean recomputing the id from the gate's own-data
+  snapshot, which cannot be done without drifting from `projectionId` and
+  fail-closing honest plain-data forecasts.
+
+Callers therefore pass the whole projection through from the cited run and cite
+its `projectionId`; they never synthesize a descriptor to satisfy the gate.
+
+### 8. Config integrity (fail-closed, emitted only on a bad knob)
+
+The audit config carries the safety bounds themselves, and it arrives on the same
+untrusted surface as the proposal and forecast (the `audit_proposal` tool, the
+executor's fire-time re-audit). Three ways a knob can be present yet not a bound
+the gate can honor, all of which REJECT via a `config-integrity` invariant emitted
+only when one occurs (a plain-data config with legible knobs leaves the verdict
+byte-identical to before):
+
+- **Unreadable as own data** — an own accessor (reading it would run caller code
+  inside `audit()`), an INHERITED value (not evidence THIS config set it — a
+  single polluted `Object.prototype.tailFloorPct` would otherwise stand in), or a
+  hostile descriptor trap. Defaulting a safety bound to a built-in that may be
+  LOOSER than the value the operator set is the fail-open this refuses.
+- **Not a number at all** — a readable own value that is not a `number`: `'25%'`,
+  `'unbounded'`, `{}`, `true`. `maxStepPct * nav` is then `NaN`, so `notional > NaN`
+  is always false and a step 100× over the cap audits `approved` with no invariant
+  — the same fail-open a non-finite number produces. A value whose coercion throws
+  (`{ valueOf() { throw } }`) would instead throw out of `audit()` at
+  `maxStepPct * nav`. The knob is type-checked to a `number` FIRST for both.
+- **A non-finite number** — a readable `NaN`/`±Infinity` bound: every `value > NaN`
+  comparison is false, so the bound silently never trips.
+
+The usability test is therefore TYPE-scoped, `typeof value === 'number' &&
+Number.isFinite(value)`, leading with the type check in the same order
+`coverageThresholdUsable`/`coverageGateArmed` already take — a value-scoped test
+that only rejected non-finite *numbers* let the non-number cases through.
+`dataSufficiencyMinCoverage` is exempt from this funnel only because it has its own
+usability predicate (§ 7) that already fails it closed.
+
+Any of the three, the bound cannot legibly bite, so the gate fails CLOSED rather
+than approving under it. `dataSufficiencyMinCoverage` is read through the same
+own-data-only path, so an inherited threshold ARMS the gate (§ 7) rather than
+silently disarming it.
 
 ## Procedure
 
@@ -109,13 +252,19 @@ emit_journal_result(
 
 ## Configuration
 
-The configured floors and windows live in the project README (canonical), with optional per-dispatch overrides:
+The configured floors and windows are canonical here, with optional per-dispatch overrides:
 
 - `tail_risk_floor_pct`: default 80 (forecast's p05 must clear 80% of entry value).
-- `staleness_window_seconds`: default 300 (5 minutes).
-- `per_step_max_pct_nav`: default 5.
-- `per_day_max_pct_nav`: default 20.
-- `per_instrument_concentration_cap_pct`: default 40.
+- `staleness_window_ticks`: default 5.
+- `per_step_max_pct_nav`: default 25.
+- `per_day_max_pct_nav`: default 50.
+- `per_instrument_concentration_cap_pct`: default 80.
+- `data_sufficiency_min_coverage`: default 0 (OFF; invariant 7 is not emitted).
+  When set to a positive number, the forecast's recomputed coverage ratio must
+  clear it. A value the gate cannot evaluate (any non-number, a non-finite or
+  negative number, or a positive one that rounds to zero at the descriptor's
+  12-decimal resolution)
+  ARMS the gate and fails it closed rather than degrading to no gate at all.
 
 The maintainer adjusts these via a journal `message: liaison → *` entry; the auditor reads the most recent setting from the journal.
 

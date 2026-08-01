@@ -24,13 +24,32 @@ in-process for a dry-run cycle with **no LLM required**.
 | -------------------- | ------------------------------------------------------------------------- |
 | `oracle-watcher.js`  | detect price deviations past a basis-point threshold over a reading window |
 | `analyzer.js`        | risk-adjusted scoring (price edge + APR carry, less a correlated-cluster penalty); single- or multi-leg target allocation; no-action is valid |
-| `forecaster.js`      | Monte Carlo via the simulator's nested-fork `forecast()`; deterministic    |
+| `forecaster.js`      | Monte Carlo via the simulator's nested-fork `forecast()`; deterministic; `project(input, { reportDataSufficiency: true })` also measures whether the projection outruns its observed window |
 | `planner.js`         | ymax-shaped proposal: hashed steps + forecast/analysis citations           |
-| `auditor.js`         | the invariant set (citation, risk-bound, tail-risk, reproducibility, freshness) |
+| `auditor.js`         | the invariant set: citation-completeness, risk-bound-compliance, tail-risk-floor, reproducibility, pricing-freshness, place-route-reachability, config-integrity (emitted when a config knob is unreadable as own data or non-finite), plus the opt-in forecast-data-sufficiency gate |
 | `executor.js`        | dry-run simulation on a clone; refuses live without authorization          |
 | `rebalance.js`       | ymax-shaped `computeTargetBalances` + `deriveSteps` solver                  |
 | `cap-attenuation.js` | the wallet boundary: capability map, interface-guarded revocable wallet     |
-| `ooda-cycle.js`      | `runOodaCycle` — wires the six roles + optional journal recording          |
+| `ooda-cycle.js`      | `runOodaCycle` — wires the six roles + optional journal recording; an armed auditor gate auto-enables the forecaster evidence it reads |
+
+### Recording primitives on the entry point
+
+A figure or label that appears in more than one record is written by exactly one
+rule, so a second reader cannot render the same evidence differently. Those rules
+are named on `@finbot/pipeline` itself, because a co-recorder must not
+re-approximate them: `bin/finbot-ooda` re-records the auditor's coverage evidence
+(the ratio, the scrubbed label, and the gate-arming flag it validates), and any
+module that records a bounded label needs the scrubber's cap to size its field.
+`MAX_LABEL_CODE_POINTS` is promoted on that second ground, not as a
+`bin/finbot-ooda` import:
+
+| Export                    | Contract                                                                 |
+| ------------------------- | ------------------------------------------------------------------------ |
+| `round12`                 | the ONE quantizer (12 decimal places) the gate and every recorder compare through |
+| `formatCoverage`          | the ONE coverage formatter; goes exponential below 5e-4 so a passing ratio never prints as the OFF value |
+| `sanitizeLabel`           | the ONE scrubber for a caller-supplied identifier bound for a record; output is well-formed UTF-16, structural code points rewritten |
+| `MAX_LABEL_CODE_POINTS`   | that scrubber's cap, so a co-recorder can size the field and spot a truncation |
+| `coverageThresholdUsable` / `coverageGateArmed` | the ONE definitions of "the gate can evaluate this threshold" / "this threshold arms the gate" |
 
 ## Multi-instrument portfolios
 
