@@ -152,18 +152,34 @@ reading its reported ratio, the same discipline invariant 4 applies to the
 proposal hash — and then goes one step further, **binding** the descriptor to
 provenance. Because the descriptor is a hashed component of the projection
 artifact (`projectionArtifact` folds it into the JSON that `projectionId`
-hashes), the gate recomputes that id and requires the proposal to cite it. A
-descriptor lifted onto a thinner or foreign forecast — whether tampered at rest
-or in flight before the executor's fire-time re-audit — changes the recomputed id
-and no longer matches a cited one, so it fails closed. This closes the "an
-internally consistent fabrication still clears it" gap that self-consistency
-alone leaves open.
+hashes), the gate recomputes that id and requires the proposal to cite it. For a
+**plain-data forecast** — the gate's real threat surface, since the
+`audit_proposal` tool and the executor's fire-time re-audit both receive parsed
+JSON, which carries no accessors, Proxies, or `toJSON` — a descriptor lifted onto
+a thinner or foreign forecast, tampered at rest or in flight, changes the
+recomputed id and no longer matches a cited one, so it fails closed. This closes
+the "an internally consistent fabrication still clears it" gap that
+self-consistency alone leaves open.
 
-One residual remains, shared with invariant 4: a wholly self-consistent,
-self-cited artifact is measured, not disproven — exactly as a self-hashed
-proposal clears invariant 4's reproducibility check. The auditor holds no price
-window to recount the coverage from scratch; what the binding enforces is that
-the ratio it judges belongs to the forecast artifact the proposal committed to.
+Two residuals remain, both disclosed rather than closed:
+
+- **Self-consistency**, shared with invariant 4: a wholly self-consistent,
+  self-cited artifact is measured, not disproven — exactly as a self-hashed
+  proposal clears invariant 4's reproducibility check. The auditor holds no price
+  window to recount the coverage from scratch; what the binding enforces is that
+  the ratio it judges belongs to the forecast artifact the proposal committed to.
+- **In-process split view**, out of the threat model: a hostile in-process object
+  whose `getOwnPropertyDescriptor('dataSufficiency').value` (the gate's own-data
+  snapshot) diverges from its `[[Get]]`/`toJSON` view (what `projectionId` hashes)
+  — a Proxy with disagreeing `getOwnPropertyDescriptor`/`get` traps, or a `toJSON`
+  — can present forged counts to the gate while presenting an honest artifact to
+  the id recompute, binding forged coverage to an honest cited id. This needs a
+  live JS Proxy or `toJSON` in the auditor's own process and cannot cross the JSON
+  boundary the tool gate actually receives, so it is disclosed here rather than
+  fixed: closing it would mean recomputing the id from the gate's own-data
+  snapshot, which cannot be done without drifting from `projectionId` and
+  fail-closing honest plain-data forecasts.
+
 Callers therefore pass the whole projection through from the cited run and cite
 its `projectionId`; they never synthesize a descriptor to satisfy the gate.
 

@@ -414,7 +414,18 @@ regime-tail-floor). This cut applies the same measure-then-decide loop to the
   persistence→stress ramp, previously inline in the auditor's `regimeTailFloor`,
   are now `worstAssetPersistence()` + `persistenceStress()` in `forecaster.js`,
   imported by both levers — so the horizon and the tail floor key off the SAME
-  worst instrument the SAME way, by construction rather than by coincidence.
+  worst instrument the SAME way, by construction rather than by coincidence. The
+  shared scan also **tie-breaks lexicographically** on an exact persistence tie
+  (`asset < worstAsset`), where the prior inline scan took the first asset in
+  map-construction order (strict `>`). This is a deliberate determinism
+  improvement — a key-order tie-break would make `projectionId` depend on how the
+  price map happened to be built — but it is **not** byte-identical to the
+  pre-helper behaviour on that exact-tie path: when two assets share the maximum
+  persistence, the chosen worst asset (and thus `horizonRegime`, the projection
+  horizon, and the forecast p05/p50/p95) resolves lexicographically now rather
+  than by construction order, even with the data-sufficiency gate off. The
+  regime-horizon test locks the tie-break (`worstAssetPersistence: ties break
+  LEXICOGRAPHICALLY`).
 - **Off by default, byte-identical when inert.** `regimeHorizonStretch` defaults to
   0, so a plain (non-adaptive) or explicitly-pinned projection keeps its base
   horizon and carries no `horizonRegime`, leaving its artifact JSON — and thus its
