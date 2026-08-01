@@ -198,8 +198,8 @@ its `projectionId`; they never synthesize a descriptor to satisfy the gate.
 
 The audit config carries the safety bounds themselves, and it arrives on the same
 untrusted surface as the proposal and forecast (the `audit_proposal` tool, the
-executor's fire-time re-audit). Two ways a knob can be present yet not a bound the
-gate can honor, both of which REJECT via a `config-integrity` invariant emitted
+executor's fire-time re-audit). Three ways a knob can be present yet not a bound
+the gate can honor, all of which REJECT via a `config-integrity` invariant emitted
 only when one occurs (a plain-data config with legible knobs leaves the verdict
 byte-identical to before):
 
@@ -208,13 +208,24 @@ byte-identical to before):
   single polluted `Object.prototype.tailFloorPct` would otherwise stand in), or a
   hostile descriptor trap. Defaulting a safety bound to a built-in that may be
   LOOSER than the value the operator set is the fail-open this refuses.
-- **Non-finite** — a readable `NaN`/`±Infinity` bound: every `value > NaN`
-  comparison is false, so the bound silently never trips. `dataSufficiencyMinCoverage`
-  is exempt only because it has its own usability predicate (§ 7) that already
-  fails it closed.
+- **Not a number at all** — a readable own value that is not a `number`: `'25%'`,
+  `'unbounded'`, `{}`, `true`. `maxStepPct * nav` is then `NaN`, so `notional > NaN`
+  is always false and a step 100× over the cap audits `approved` with no invariant
+  — the same fail-open a non-finite number produces. A value whose coercion throws
+  (`{ valueOf() { throw } }`) would instead throw out of `audit()` at
+  `maxStepPct * nav`. The knob is type-checked to a `number` FIRST for both.
+- **A non-finite number** — a readable `NaN`/`±Infinity` bound: every `value > NaN`
+  comparison is false, so the bound silently never trips.
 
-Either way the bound cannot legibly bite, so the gate fails CLOSED rather than
-approving under it. `dataSufficiencyMinCoverage` is read through the same
+The usability test is therefore TYPE-scoped, `typeof value === 'number' &&
+Number.isFinite(value)`, leading with the type check in the same order
+`coverageThresholdUsable`/`coverageGateArmed` already take — a value-scoped test
+that only rejected non-finite *numbers* let the non-number cases through.
+`dataSufficiencyMinCoverage` is exempt from this funnel only because it has its own
+usability predicate (§ 7) that already fails it closed.
+
+Any of the three, the bound cannot legibly bite, so the gate fails CLOSED rather
+than approving under it. `dataSufficiencyMinCoverage` is read through the same
 own-data-only path, so an inherited threshold ARMS the gate (§ 7) rather than
 silently disarming it.
 
